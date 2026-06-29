@@ -1,0 +1,38 @@
+# Run the Skybridge agent next to your network egress. Raw rows are masked here, in-process, before
+# anything leaves the network. Point SKYBRIDGE_UPSTREAM at the target database.
+#
+#   cd skybridge/deploy
+#   SKYBRIDGE_UPSTREAM=db.internal:5432 docker compose up -d
+#   psql "postgres://user:pass@localhost:15432/appdb"
+#
+# By default the agent runs as a governed passthrough (no content masking). To enable PII masking,
+# set SKYBRIDGE_MASK_ANALYZE_URL / SKYBRIDGE_MASK_ANONYMIZE_URL to any HTTP service that exposes
+# "analyze" and "anonymize" endpoints (see the commented "masker" service below for the shape).
+name: skybridge
+
+services:
+  agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    container_name: skybridge-agent
+    restart: unless-stopped
+    environment:
+      - SKYBRIDGE_DB_TYPE=${SKYBRIDGE_DB_TYPE:-postgres}
+      - SKYBRIDGE_LISTEN=:15432
+      - SKYBRIDGE_UPSTREAM=${SKYBRIDGE_UPSTREAM:?set the database host:port}
+      # Optional remote masker (off unless both URLs are set):
+      - SKYBRIDGE_MASK_ANALYZE_URL=${SKYBRIDGE_MASK_ANALYZE_URL:-}
+      - SKYBRIDGE_MASK_ANONYMIZE_URL=${SKYBRIDGE_MASK_ANONYMIZE_URL:-}
+      # Column overlay (off by default): JSON map of column name -> replacement token.
+      - SKYBRIDGE_PII_OVERLAY=${SKYBRIDGE_PII_OVERLAY:-}
+    ports:
+      - "15432:15432"
+
+  # Optional masking backend. Any service exposing POST /analyze and POST /anonymize works; point the
+  # agent at it via SKYBRIDGE_MASK_ANALYZE_URL / SKYBRIDGE_MASK_ANONYMIZE_URL. Example:
+  #
+  # masker:
+  #   image: <your-pii-detection-service>
+  #   container_name: skybridge-masker
+  #   restart: unless-stopped

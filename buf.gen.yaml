@@ -1,0 +1,20 @@
+# Go code generation for the Skybridge edge. The repo's proto module (../proto) is governed by buf
+# (lint/breaking) and the Python stubs come from scripts/gen_agent_grpc.sh; this template adds Go
+# stubs for the connector/agent call-home contracts only, written under internal/genpb/.
+#
+#   cd skybridge
+#   PATH="$HOME/go/bin:$PATH" buf generate ../proto \
+#     --path ../proto/curlix/agent/v1/agent_runner.proto \
+#     --path ../proto/curlix/connector/v1/connector_gateway.proto
+version: v1
+managed:
+  enabled: true
+  go_package_prefix:
+    default: github.com/curlix-io/skybridge/internal/genpb
+plugins:
+  - plugin: go
+    out: internal/genpb
+    opt: paths=source_relative
+  - plugin: go-grpc
+    out: internal/genpb
+    opt: paths=source_relative

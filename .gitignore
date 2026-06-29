@@ -1,0 +1,19 @@
+# Build output
+/dist/
+/bin/
+skybridge-agent
+skybridge-gateway
+skybridge-edge
+
+# Local Go build cache (kept in-tree for offline builds)
+/.gocache/
+/.gotoolchain/
+
+# Test / coverage artifacts
+*.out
+coverage.txt
+coverage.html
+
+# Editor / OS
+.DS_Store
+*.swp

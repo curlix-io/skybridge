@@ -1,0 +1,38 @@
+# CI for the standalone Skybridge module. Paths assume this directory is the repository root
+# (i.e. after extraction). In the monorepo, run `make vet test race` from skybridge/ instead.
+name: ci
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  build-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: gofmt
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "These files need gofmt:"; echo "$out"; exit 1
+          fi
+
+      - name: vet
+        run: go vet ./...
+
+      - name: build
+        run: make build
+
+      - name: test (race + coverage)
+        run: go test -race -coverprofile=coverage.txt ./...

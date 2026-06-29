@@ -1,0 +1,54 @@
+version: 2
+
+project_name: skybridge
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: skybridge-agent
+    main: ./cmd/skybridge-agent
+    binary: skybridge-agent
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+  - id: skybridge-gateway
+    main: ./cmd/skybridge-gateway
+    binary: skybridge-gateway
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+  - id: skybridge-edge
+    main: ./cmd/skybridge-edge
+    binary: skybridge-edge
+    env: [CGO_ENABLED=0]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
+    goos: [linux, darwin]
+    goarch: [amd64, arm64]
+
+archives:
+  - formats: [tar.gz]
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  use: github
+  sort: asc
+  filters:
+    exclude: ["^docs:", "^test:", "^chore:"]
