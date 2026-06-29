@@ -14,28 +14,40 @@ drivers), and **masks PII at the source** — so raw rows never leave your netwo
 
 ```mermaid
 flowchart LR
-    subgraph net["Your network"]
-        agent["Skybridge agent<br/>(mask here)"]
-        db[(Database)]
-        agent --> db
-    end
-
-    subgraph listener["Listener mode"]
+    subgraph clients["Native DB clients"]
         c1["psql / mysql / mongosh"]
     end
-    c1 --> agent
 
-    subgraph tunnel["Tunnel mode"]
-        c2["psql / mysql / mongosh"]
-        gw["Skybridge gateway"]
-        c2 --> gw
+    subgraph net["Your network (egress-only)"]
+        agent["Skybridge agent<br/>masks PII here"]
+        edge["Skybridge edge<br/>call-home + AWS reads"]
+        db[(Database)]
+        aws["AWS account<br/>(read-only)"]
+        agent --> db
+        edge --> aws
     end
+
+    subgraph saas["Control plane (SaaS)"]
+        gw["Skybridge gateway"]
+        cg["Connector Gateway"]
+    end
+
+    c1 -->|"listener mode"| agent
+    c1 -->|"tunnel mode"| gw
     gw -. "egress tunnel<br/>(masked bytes only)" .-> agent
+    cg -. "egress call-home<br/>(read-only tool calls)" .-> edge
 ```
 
-- **Listener** — clients connect straight to the agent. Simplest setup.
-- **Tunnel** — the agent dials **out** to a gateway (egress-only); clients connect to the gateway,
-  which relays already-masked bytes over the tunnel. Masking still happens at the agent.
+Skybridge ships three deployment shapes; all of them keep the customer side **egress-only** (it
+dials out, nothing dials in):
+
+- **Listener** — native clients connect straight to the agent. Simplest setup.
+- **Tunnel** — the agent dials **out** to a gateway; clients connect to the gateway, which relays
+  already-masked bytes over the tunnel. Masking still happens at the agent.
+- **Edge** — `skybridge-edge` dials **out** to the SaaS Connector Gateway and runs dispatched
+  **read-only tool calls** locally — chiefly live AWS reads against your account — and can co-host the
+  wire proxy in the same process. One install for everything that must run inside your network. See
+  [The `skybridge-edge` binary](#the-skybridge-edge-binary) below.
 
 ## Quick start
 
