@@ -1,9 +1,9 @@
 # Build output
 /dist/
 /bin/
-skybridge-agent
-skybridge-gateway
-skybridge-edge
+/skybridge-agent
+/skybridge-gateway
+/skybridge-edge
 
 # Local Go build cache (kept in-tree for offline builds)
 /.gocache/
