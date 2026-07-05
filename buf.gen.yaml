@@ -3,9 +3,10 @@
 # stubs for the connector/agent call-home contracts only, written under internal/genpb/.
 #
 #   cd skybridge
-#   PATH="$HOME/go/bin:$PATH" buf generate ../proto \
-#     --path ../proto/curlix/agent/v1/agent_runner.proto \
-#     --path ../proto/curlix/connector/v1/connector_gateway.proto
+#   PATH="$HOME/go/bin:$PATH" buf generate ../../proto --template buf.gen.yaml \
+#     --path ../../proto/curlix/agent/v1/agent_runner.proto \
+#     --path ../../proto/curlix/connector/v1/connector_gateway.proto \
+#     --path ../../proto/curlix/studiogateway/v1/studio_gateway.proto
 version: v1
 managed:
   enabled: true

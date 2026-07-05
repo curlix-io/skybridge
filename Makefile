@@ -24,9 +24,10 @@ edge:
 
 # Regenerate the Go gRPC stubs for the call-home contracts (needs buf + protoc-gen-go[-grpc] on PATH).
 gen:
-	$(BUF) generate ../proto --template buf.gen.yaml \
-	  --path ../proto/curlix/agent/v1/agent_runner.proto \
-	  --path ../proto/curlix/connector/v1/connector_gateway.proto
+	$(BUF) generate ../../proto --template buf.gen.yaml \
+	  --path ../../proto/curlix/agent/v1/agent_runner.proto \
+	  --path ../../proto/curlix/connector/v1/connector_gateway.proto \
+	  --path ../../proto/curlix/studiogateway/v1/studio_gateway.proto
 
 test:
 	$(GO) test ./...

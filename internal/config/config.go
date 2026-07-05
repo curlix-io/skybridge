@@ -173,6 +173,18 @@ type Edge struct {
 	AWSExternalID    string
 	AWSBinary        string
 
+// Studio execution agent (Query Studio dispatch — curlix.studiogateway.v1 on :7200).
+	StudioGateway        string // SKYBRIDGE_STUDIO_GATEWAY host:port
+	StudioEnrollGateway  string // SKYBRIDGE_STUDIO_ENROLL_GATEWAY (defaults to StudioGateway)
+	StudioEnrollmentToken string
+	StudioAgentID        string
+	StudioMaxSessions    int
+	StudioTargetsJSON    string
+	StudioDBUser         string
+	StudioDBPassword     string
+	StudioTLSDir         string
+	StudioTrustDomain    string
+
 	// Optional co-located wire proxy. When non-empty the edge also runs the DB proxy (see Agent).
 	WireProxy Agent
 }
@@ -194,8 +206,23 @@ func LoadEdge() Edge {
 		AWSAssumeRoleARN: env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
 		AWSExternalID:    env("SKYBRIDGE_AWS_EXTERNAL_ID", ""),
 		AWSBinary:        env("SKYBRIDGE_AWS_BINARY", ""),
+		StudioGateway:        env("SKYBRIDGE_STUDIO_GATEWAY", ""),
+		StudioEnrollGateway:  env("SKYBRIDGE_STUDIO_ENROLL_GATEWAY", ""),
+		StudioEnrollmentToken: env("SKYBRIDGE_STUDIO_ENROLLMENT_TOKEN", ""),
+		StudioAgentID:        env("SKYBRIDGE_STUDIO_AGENT_ID", env("SKYBRIDGE_EDGE_ID", "")),
+		StudioMaxSessions:    atoiDefault(env("SKYBRIDGE_STUDIO_MAX_SESSIONS", "8"), 8),
+		StudioTargetsJSON:    env("SKYBRIDGE_STUDIO_TARGETS", ""),
+		StudioDBUser:         env("SKYBRIDGE_STUDIO_DB_USER", ""),
+		StudioDBPassword:     env("SKYBRIDGE_STUDIO_DB_PASSWORD", ""),
+		StudioTLSDir:         env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
+		StudioTrustDomain:    env("SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN", "curlix.studio-agent"),
 		WireProxy:        LoadAgent(),
 	}
+}
+
+// StudioEnabled reports whether the edge should dial the Studio Gateway (:7200).
+func (e Edge) StudioEnabled() bool {
+	return strings.TrimSpace(e.StudioGateway) != ""
 }
 
 // WireProxyEnabled reports whether the edge should also run the co-located DB wire proxy.

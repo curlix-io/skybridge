@@ -1,0 +1,185 @@
+package dbquery
+
+import (
+	"context"
+	"encoding/json"
+	"fmt"
+	"regexp"
+	"strings"
+	"time"
+
+	"go.mongodb.org/mongo-driver/bson"
+	"go.mongodb.org/mongo-driver/mongo"
+	"go.mongodb.org/mongo-driver/mongo/options"
+	"github.com/curlix-io/skybridge/internal/mask"
+)
+
+var mongoFindRe = regexp.MustCompile(`(?is)^\s*db\.([a-zA-Z0-9_]+)\.find\s*\((.*)\)\s*(?:\.\s*limit\s*\(\s*(\d+)\s*\)\s*)?;?\s*$`)
+var mongoAggRe = regexp.MustCompile(`(?is)^\s*db\.([a-zA-Z0-9_]+)\.aggregate\s*\((.*)\)\s*(?:\.\s*limit\s*\(\s*(\d+)\s*\)\s*)?;?\s*$`)
+
+type mongoParsed struct {
+	collection string
+	op         string // find | aggregate
+	filter     bson.M
+	pipeline   bson.A
+	limit      int64
+}
+
+func parseMongoStatement(stmt string) (mongoParsed, error) {
+	stmt = strings.TrimSpace(stmt)
+	if stmt == "" {
+		return mongoParsed{}, errEmptyQuery
+	}
+	if m := mongoFindRe.FindStringSubmatch(stmt); len(m) >= 3 {
+		filter := bson.M{}
+		arg := strings.TrimSpace(m[2])
+		if arg != "" {
+			if err := bson.UnmarshalExtJSON([]byte(arg), false, &filter); err != nil {
+				return mongoParsed{}, fmt.Errorf("invalid find filter: %w", err)
+			}
+		}
+		limit := int64(0)
+		if len(m) >= 4 && strings.TrimSpace(m[3]) != "" {
+			fmt.Sscanf(m[3], "%d", &limit)
+		}
+		return mongoParsed{collection: m[1], op: "find", filter: filter, limit: limit}, nil
+	}
+	if m := mongoAggRe.FindStringSubmatch(stmt); len(m) >= 3 {
+		pipeline := bson.A{}
+		arg := strings.TrimSpace(m[2])
+		if arg == "" {
+			return mongoParsed{}, fmt.Errorf("aggregate requires a pipeline")
+		}
+		if err := bson.UnmarshalExtJSON([]byte(arg), false, &pipeline); err != nil {
+			return mongoParsed{}, fmt.Errorf("invalid aggregate pipeline: %w", err)
+		}
+		limit := int64(0)
+		if len(m) >= 4 && strings.TrimSpace(m[3]) != "" {
+			fmt.Sscanf(m[3], "%d", &limit)
+		}
+		return mongoParsed{collection: m[1], op: "aggregate", pipeline: pipeline, limit: limit}, nil
+	}
+	// JSON fallback: {"collection":"users","filter":{}} or {"collection":"users","pipeline":[...]}
+	var raw map[string]json.RawMessage
+	if err := json.Unmarshal([]byte(stmt), &raw); err == nil {
+		var collection string
+		if b, ok := raw["collection"]; ok {
+			_ = json.Unmarshal(b, &collection)
+		}
+		if collection == "" {
+			return mongoParsed{}, fmt.Errorf("mongo JSON statement requires collection")
+		}
+		if b, ok := raw["pipeline"]; ok {
+			var pipeline bson.A
+			if err := json.Unmarshal(b, &pipeline); err != nil {
+				return mongoParsed{}, err
+			}
+			return mongoParsed{collection: collection, op: "aggregate", pipeline: pipeline}, nil
+		}
+		filter := bson.M{}
+		if b, ok := raw["filter"]; ok {
+			if err := json.Unmarshal(b, &filter); err != nil {
+				return mongoParsed{}, err
+			}
+		}
+		return mongoParsed{collection: collection, op: "find", filter: filter}, nil
+	}
+	return mongoParsed{}, fmt.Errorf("unsupported mongo statement shape (use db.COL.find({}) or db.COL.aggregate([...]))")
+}
+
+func executeMongo(ctx context.Context, target Target, database, stmt string, opts Options, masker mask.Masker) (map[string]any, error) {
+	parsed, err := parseMongoStatement(stmt)
+	if err != nil {
+		return nil, err
+	}
+	user, pass := creds(target, opts.FallbackUser, opts.FallbackPassword)
+	host := strings.TrimSpace(target.Host)
+	if host == "" {
+		return nil, fmt.Errorf("mongo target missing host")
+	}
+	dbName := strings.TrimSpace(database)
+	if dbName == "" {
+		dbName = strings.TrimSpace(target.DatabaseName)
+	}
+	uri := fmt.Sprintf("mongodb://%s:%s@%s/%s", urlEscape(user), urlEscape(pass), host, dbName)
+	if user == "" && pass == "" {
+		uri = fmt.Sprintf("mongodb://%s/%s", host, dbName)
+	}
+	clientOpts := options.Client().ApplyURI(uri).SetConnectTimeout(15 * time.Second)
+	client, err := mongo.Connect(ctx, clientOpts)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = client.Disconnect(context.Background()) }()
+
+	coll := client.Database(dbName).Collection(parsed.collection)
+	limit := opts.MaxRows
+	if parsed.limit > 0 && parsed.limit < int64(limit) {
+		limit = int(parsed.limit)
+	}
+	findOpts := options.Find().SetLimit(int64(limit))
+
+	var cursor *mongo.Cursor
+	switch parsed.op {
+	case "find":
+		cursor, err = coll.Find(ctx, parsed.filter, findOpts)
+	case "aggregate":
+		cursor, err = coll.Aggregate(ctx, parsed.pipeline)
+	default:
+		return nil, fmt.Errorf("unsupported mongo op %q", parsed.op)
+	}
+	if err != nil {
+		return nil, err
+	}
+	defer cursor.Close(ctx)
+
+	docs := make([]map[string]any, 0)
+	for cursor.Next(ctx) {
+		var doc map[string]any
+		if err := cursor.Decode(&doc); err != nil {
+			return nil, err
+		}
+		docs = append(docs, flattenBSON(doc))
+		if len(docs) >= limit {
+			break
+		}
+	}
+	if err := cursor.Err(); err != nil {
+		return nil, err
+	}
+	masked, err := maskDocuments(ctx, masker, docs)
+	if err != nil {
+		return nil, err
+	}
+	return map[string]any{
+		"status": "success",
+		"results": map[string]any{
+			"data": masked,
+		},
+	}, nil
+}
+
+func flattenBSON(doc map[string]any) map[string]any {
+	out := make(map[string]any, len(doc))
+	for k, v := range doc {
+		out[k] = stringifyBSON(v)
+	}
+	return out
+}
+
+func stringifyBSON(v any) any {
+	switch x := v.(type) {
+	case nil:
+		return nil
+	case string, bool, float64, int32, int64, json.Number:
+		return x
+	case bson.M:
+		b, _ := bson.MarshalExtJSON(x, false, false)
+		return string(b)
+	case bson.A:
+		b, _ := bson.MarshalExtJSON(x, false, false)
+		return string(b)
+	default:
+		return fmt.Sprint(v)
+	}
+}
