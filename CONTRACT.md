@@ -155,7 +155,8 @@ Content-Type: application/json
 {
   "session_token":      "<token the client presented as its password>",
   "requested_user":     "alice",     // optional; the "user" the client asked for (informational)
-  "requested_database": "appdb"      // optional; the database the client asked to connect to
+  "requested_database": "appdb",     // optional; the database the client asked to connect to
+  "client_ip":          "203.0.113.9" // optional; native client IP (agent-hosted listeners)
 }
 ```
 
@@ -204,3 +205,38 @@ admins). The gateway never re-runs end-user auth, so attribution flows from what
    circuits both.
 
 When none resolve, the session is recorded honestly **unattributed** (admin-visible).
+
+---
+
+## 4. Wire client admission (gateway → control plane)
+
+Optional. When the gateway is configured with a control-plane URL it checks each native client's IP
+against the organization's **Allowed tenant IPs** (same KV as HTTP `/api/v1`) **before** relaying the
+wire handshake. The check is best-effort from the relay's perspective: a denial closes the TCP
+connection; an allow proceeds to byte relay and (when enabled) credential injection.
+
+Base path defaults to `/api/v1/data-studio/studio/native-access/wire-admit` and is configurable
+(`SKYBRIDGE_GW_WIRE_ADMIT_PATH`).
+
+```
+POST {baseURL}{basePath}
+Authorization: Bearer <token>
+Content-Type: application/json
+
+{
+  "organization_id": "<tenant id>",
+  "client_ip":       "203.0.113.9",
+  "target":          "prod-users"   // optional
+}
+```
+
+Response `200`:
+
+```json
+{ "status": "allowed" }
+```
+
+Response `403` carries `{"detail": "..."}` (same copy as HTTP tenant IP denial).
+
+Credential exchange (`§3`) accepts an optional `"client_ip"` field for **agent-hosted** listeners where
+the agent sees the end client directly; gateway-tunneled paths rely on this admission check instead.

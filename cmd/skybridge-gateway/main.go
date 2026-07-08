@@ -20,7 +20,9 @@ func main() {
 	gw := gateway.New(cfg.AuthToken, logger)
 	if cfg.ControlPlaneURL != "" {
 		gw.SetStore(gateway.NewHTTPStore(cfg.ControlPlaneURL, cfg.SessionPath, cfg.ControlPlaneToken))
+		gw.SetWireAdmitter(gateway.NewHTTPWireAdmitter(cfg.ControlPlaneURL, cfg.WireAdmitPath, cfg.ControlPlaneToken))
 		logger.Printf("skybridge-gateway: session recording -> %s%s", cfg.ControlPlaneURL, cfg.SessionPath)
+		logger.Printf("skybridge-gateway: wire IP admission -> %s%s", cfg.ControlPlaneURL, cfg.WireAdmitPath)
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)

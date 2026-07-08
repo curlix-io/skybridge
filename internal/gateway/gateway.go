@@ -32,6 +32,7 @@ type Gateway struct {
 	authToken string
 	log       *log.Logger
 	store     Store
+	admitter  WireAdmitter
 
 	mu      sync.RWMutex
 	agents  map[string]*agentConn // agent id -> connection
@@ -64,6 +65,7 @@ func New(authToken string, logger *log.Logger) *Gateway {
 		authToken: authToken,
 		log:       logger,
 		store:     NoopStore{},
+		admitter:  NoopWireAdmitter{},
 		agents:    make(map[string]*agentConn),
 		targets:   make(map[string]*agentConn),
 	}
@@ -75,6 +77,14 @@ func (g *Gateway) SetStore(s Store) {
 		s = NoopStore{}
 	}
 	g.store = s
+}
+
+// SetWireAdmitter installs the per-org client IP gate (defaults to NoopWireAdmitter).
+func (g *Gateway) SetWireAdmitter(a WireAdmitter) {
+	if a == nil {
+		a = NoopWireAdmitter{}
+	}
+	g.admitter = a
 }
 
 // ListenAgents accepts agent (egress) connections until ctx is cancelled. Pass a tls.Config-wrapped
@@ -210,6 +220,14 @@ func (g *Gateway) ServeClient(client net.Conn, target string) error {
 	g.mu.RUnlock()
 	if ac == nil {
 		return ErrNoAgent
+	}
+	if g.admitter != nil {
+		ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+		err := g.admitter.Admit(ctx, ac.orgID, client.RemoteAddr().String(), target)
+		cancel()
+		if err != nil {
+			return err
+		}
 	}
 	stream, err := ac.sess.Open(tunnel.OpenMeta{Target: target}.Encode())
 	if err != nil {

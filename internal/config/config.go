@@ -246,6 +246,7 @@ type Gateway struct {
 	ControlPlaneURL   string
 	ControlPlaneToken string
 	SessionPath       string // base path for session lifecycle reports (default /api/v1/data-studio/studio/native-sessions)
+	WireAdmitPath     string // base path for wire client IP admission (default /api/v1/data-studio/studio/native-access/wire-admit)
 }
 
 // ClientListener binds a local listen address to a registered target name.
@@ -263,6 +264,7 @@ func LoadGateway() Gateway {
 		ControlPlaneURL:   env("SKYBRIDGE_GW_CONTROL_PLANE_URL", ""),
 		ControlPlaneToken: env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
 		SessionPath:       env("SKYBRIDGE_GW_SESSION_PATH", "/api/v1/data-studio/studio/native-sessions"),
+		WireAdmitPath:     env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", "/api/v1/data-studio/studio/native-access/wire-admit"),
 	}
 }
 

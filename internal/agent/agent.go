@@ -222,7 +222,8 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 				}
 			}
 			defer upstream.Close()
-			if err := proxyConn(ctx, engine, client, upstream, masker, resolver); err != nil {
+			sessCtx := ContextWithWireClientIP(ctx, client.RemoteAddr().String())
+			if err := proxyConn(sessCtx, engine, client, upstream, masker, resolver); err != nil {
 				logger.Printf("session ended: %v", err)
 			}
 		}()

@@ -58,6 +58,28 @@ func TestHTTPCredentialResolverExchange(t *testing.T) {
 	}
 }
 
+func TestHTTPCredentialResolverSendsClientIP(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body exchangeRequest
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		if body.ClientIP != "203.0.113.9" {
+			http.Error(w, `{"detail":"missing client ip"}`, http.StatusForbidden)
+			return
+		}
+		_ = json.NewEncoder(w).Encode(exchangeResponse{Username: "u", Password: "p"})
+	}))
+	defer srv.Close()
+
+	resolve := NewHTTPCredentialResolver(config.Agent{
+		InjectCredentials:     true,
+		CredentialExchangeURL: srv.URL,
+	})
+	ctx := ContextWithWireClientIP(context.Background(), "203.0.113.9:15432")
+	if _, err := resolve(ctx, map[string]string{}, "tok"); err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestHTTPCredentialResolverRejectsBadToken(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, `{"detail":"session token expired"}`, http.StatusForbidden)

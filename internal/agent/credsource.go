@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"strings"
 	"time"
@@ -18,6 +19,22 @@ import (
 // the login prompt; it must be comfortably under common client login timeouts.
 const credentialExchangeTimeout = 10 * time.Second
 
+type wireClientIPKey struct{}
+
+// ContextWithWireClientIP annotates ctx with the native client's IP for credential exchange.
+func ContextWithWireClientIP(ctx context.Context, clientAddr string) context.Context {
+	ip := hostFromTCPAddr(clientAddr)
+	if ip == "" {
+		return ctx
+	}
+	return context.WithValue(ctx, wireClientIPKey{}, ip)
+}
+
+func wireClientIPFromContext(ctx context.Context) string {
+	ip, _ := ctx.Value(wireClientIPKey{}).(string)
+	return strings.TrimSpace(ip)
+}
+
 // exchangeRequest is the body the agent posts to the control plane to swap a client-presented session
 // token for a freshly-minted upstream credential. The control plane authenticates the agent (bearer),
 // validates the token, mints/looks up the credential via the broker, records the lease + attribution,
@@ -26,6 +43,7 @@ type exchangeRequest struct {
 	SessionToken      string `json:"session_token"`
 	RequestedUser     string `json:"requested_user,omitempty"`     // the "user" the native client asked for (informational)
 	RequestedDatabase string `json:"requested_database,omitempty"` // the "database" the native client asked for
+	ClientIP          string `json:"client_ip,omitempty"`          // native client IP for per-org Allowed tenant IPs
 }
 
 type exchangeResponse struct {
@@ -54,6 +72,7 @@ func NewHTTPCredentialResolver(cfg config.Agent) wire.CredentialResolver {
 			SessionToken:      secret,
 			RequestedUser:     startup["user"],
 			RequestedDatabase: startup["database"],
+			ClientIP:          wireClientIPFromContext(ctx),
 		})
 		if err != nil {
 			return wire.UpstreamCredential{}, err
@@ -96,4 +115,20 @@ func NewHTTPCredentialResolver(cfg config.Agent) wire.CredentialResolver {
 			Database: out.Database,
 		}, nil
 	}
+}
+
+func hostFromTCPAddr(addr string) string {
+	raw := strings.TrimSpace(addr)
+	if raw == "" {
+		return ""
+	}
+	if strings.HasPrefix(raw, "[") {
+		if host, _, err := net.SplitHostPort(raw); err == nil {
+			return host
+		}
+	}
+	if host, _, err := net.SplitHostPort(raw); err == nil {
+		return host
+	}
+	return raw
 }

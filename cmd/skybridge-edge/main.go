@@ -19,6 +19,7 @@ import (
 
 func main() {
 	cfg := config.LoadEdge()
+	config.NormalizeEdge(&cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger := log.Default()
