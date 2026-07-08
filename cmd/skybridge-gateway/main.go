@@ -18,6 +18,11 @@ func main() {
 	logger := log.Default()
 
 	gw := gateway.New(cfg.AuthToken, logger)
+	gw.SetRequireOrgID(cfg.RequireOrgID)
+	if lim := gateway.NewConnRateLimiter(cfg.ClientConnPerMin, cfg.OrgConnPerMin); lim != nil {
+		gw.SetConnRateLimiter(lim)
+		logger.Printf("skybridge-gateway: client conn limits ip=%d/min org=%d/min", cfg.ClientConnPerMin, cfg.OrgConnPerMin)
+	}
 	if cfg.ControlPlaneURL != "" {
 		gw.SetStore(gateway.NewHTTPStore(cfg.ControlPlaneURL, cfg.SessionPath, cfg.ControlPlaneToken))
 		gw.SetWireAdmitter(gateway.NewHTTPWireAdmitter(cfg.ControlPlaneURL, cfg.WireAdmitPath, cfg.ControlPlaneToken))

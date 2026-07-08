@@ -236,7 +236,19 @@ Response `200`:
 { "status": "allowed" }
 ```
 
-Response `403` carries `{"detail": "..."}` (same copy as HTTP tenant IP denial).
+Response `403` carries `{"detail": "..."}`:
+
+- Client IP not on the org allowlist (same copy as HTTP tenant IP denial).
+- Org has **no** Allowed tenant IPs configured when `CURLIX_WIRE_REQUIRE_TENANT_IP_ALLOWLIST=1`
+  (production default for the shared SaaS listener): native wire is denied until an administrator
+  adds at least one CIDR.
+
+Agents **must** register with a non-empty `org_id` when `SKYBRIDGE_GW_REQUIRE_ORG_ID=1` (default when
+`SKYBRIDGE_GW_CONTROL_PLANE_URL` is set). The gateway rejects registration and client relays otherwise.
+
+**Rate limits** (in-process, per gateway replica): `SKYBRIDGE_GW_CLIENT_CONN_PER_MIN` caps new native
+client TCP sessions per client IP per minute; `SKYBRIDGE_GW_ORG_CONN_PER_MIN` optionally caps per
+`organization_id`. Excess connections are closed before wire-admit / relay (default `60`/`300` in prod).
 
 Credential exchange (`§3`) accepts an optional `"client_ip"` field for **agent-hosted** listeners where
 the agent sees the end client directly; gateway-tunneled paths rely on this admission check instead.

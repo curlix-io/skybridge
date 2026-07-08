@@ -247,6 +247,9 @@ type Gateway struct {
 	ControlPlaneToken string
 	SessionPath       string // base path for session lifecycle reports (default /api/v1/data-studio/studio/native-sessions)
 	WireAdmitPath     string // base path for wire client IP admission (default /api/v1/data-studio/studio/native-access/wire-admit)
+	RequireOrgID      bool   // reject agent registration / client relay without organization_id
+	ClientConnPerMin  int    // max new native client connections per client IP per minute (0 = unlimited)
+	OrgConnPerMin     int    // max new native client connections per organization_id per minute (0 = unlimited)
 }
 
 // ClientListener binds a local listen address to a registered target name.
@@ -257,14 +260,27 @@ type ClientListener struct {
 
 // LoadGateway reads the gateway config from the environment.
 func LoadGateway() Gateway {
+	cpURL := strings.TrimSpace(env("SKYBRIDGE_GW_CONTROL_PLANE_URL", ""))
+	requireOrgID := truthy(env("SKYBRIDGE_GW_REQUIRE_ORG_ID", ""))
+	if strings.TrimSpace(env("SKYBRIDGE_GW_REQUIRE_ORG_ID", "")) == "" && cpURL != "" {
+		requireOrgID = true
+	}
+	clientConnPerMin := atoiDefault(env("SKYBRIDGE_GW_CLIENT_CONN_PER_MIN", ""), 0)
+	orgConnPerMin := atoiDefault(env("SKYBRIDGE_GW_ORG_CONN_PER_MIN", ""), 0)
+	if env("SKYBRIDGE_GW_CLIENT_CONN_PER_MIN", "") == "" && cpURL != "" {
+		clientConnPerMin = 60
+	}
 	return Gateway{
 		AgentListen:       env("SKYBRIDGE_GW_AGENT_LISTEN", ":8010"),
 		AuthToken:         env("SKYBRIDGE_GW_TOKEN", ""),
 		Clients:           parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
-		ControlPlaneURL:   env("SKYBRIDGE_GW_CONTROL_PLANE_URL", ""),
+		ControlPlaneURL:   cpURL,
 		ControlPlaneToken: env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
 		SessionPath:       env("SKYBRIDGE_GW_SESSION_PATH", "/api/v1/data-studio/studio/native-sessions"),
 		WireAdmitPath:     env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", "/api/v1/data-studio/studio/native-access/wire-admit"),
+		RequireOrgID:      requireOrgID,
+		ClientConnPerMin:  clientConnPerMin,
+		OrgConnPerMin:     orgConnPerMin,
 	}
 }
 

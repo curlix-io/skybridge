@@ -15,6 +15,7 @@ import (
 	"io"
 	"log"
 	"net"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,14 +26,19 @@ import (
 // ErrNoAgent is returned when no registered agent can serve a requested target.
 var ErrNoAgent = errors.New("gateway: no agent registered for target")
 
+// ErrMissingOrgID is returned when an agent or relay path lacks organization_id.
+var ErrMissingOrgID = errors.New("gateway: missing organization_id")
+
 const storeTimeout = 5 * time.Second
 
 // Gateway holds the live agent registry and relays client connections over agent tunnels.
 type Gateway struct {
-	authToken string
-	log       *log.Logger
-	store     Store
-	admitter  WireAdmitter
+	authToken    string
+	log          *log.Logger
+	store        Store
+	admitter     WireAdmitter
+	requireOrgID bool
+	connLimiter  ConnRateLimiter
 
 	mu      sync.RWMutex
 	agents  map[string]*agentConn // agent id -> connection
@@ -66,6 +72,7 @@ func New(authToken string, logger *log.Logger) *Gateway {
 		log:       logger,
 		store:     NoopStore{},
 		admitter:  NoopWireAdmitter{},
+		connLimiter: NoopConnRateLimiter{},
 		agents:    make(map[string]*agentConn),
 		targets:   make(map[string]*agentConn),
 	}
@@ -85,6 +92,20 @@ func (g *Gateway) SetWireAdmitter(a WireAdmitter) {
 		a = NoopWireAdmitter{}
 	}
 	g.admitter = a
+}
+
+// SetRequireOrgID requires agents to register with a non-empty organization_id and rejects client
+// relays when the serving agent omitted it (production default when a control plane is configured).
+func (g *Gateway) SetRequireOrgID(v bool) {
+	g.requireOrgID = v
+}
+
+// SetConnRateLimiter installs per-IP / per-org new-connection limits (defaults to unlimited).
+func (g *Gateway) SetConnRateLimiter(l ConnRateLimiter) {
+	if l == nil {
+		l = NoopConnRateLimiter{}
+	}
+	g.connLimiter = l
 }
 
 // ListenAgents accepts agent (egress) connections until ctx is cancelled. Pass a tls.Config-wrapped
@@ -127,6 +148,10 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 	if reg.AgentID == "" {
 		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "missing agent_id"})
 		return errors.New("gateway: agent missing id")
+	}
+	if g.requireOrgID && strings.TrimSpace(reg.OrgID) == "" {
+		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "missing organization_id"})
+		return ErrMissingOrgID
 	}
 
 	ac := &agentConn{id: reg.AgentID, orgID: reg.OrgID, sess: sess, targets: reg.Targets}
@@ -220,6 +245,14 @@ func (g *Gateway) ServeClient(client net.Conn, target string) error {
 	g.mu.RUnlock()
 	if ac == nil {
 		return ErrNoAgent
+	}
+	if g.requireOrgID && strings.TrimSpace(ac.orgID) == "" {
+		return ErrMissingOrgID
+	}
+	if g.connLimiter != nil {
+		if err := g.connLimiter.Allow(client.RemoteAddr().String(), ac.orgID); err != nil {
+			return err
+		}
 	}
 	if g.admitter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)

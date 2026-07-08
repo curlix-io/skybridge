@@ -63,7 +63,7 @@ type wireAdmitError struct {
 func (h *HTTPWireAdmitter) Admit(ctx context.Context, orgID, clientIP, target string) error {
 	orgID = strings.TrimSpace(orgID)
 	if orgID == "" {
-		return nil
+		return fmt.Errorf("wire admit: missing organization_id")
 	}
 	ip := HostFromTCPAddr(clientIP)
 	if ip == "" {

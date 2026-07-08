@@ -51,6 +51,14 @@ func TestHTTPWireAdmitterDenied(t *testing.T) {
 	}
 }
 
+func TestHTTPWireAdmitterRejectsMissingOrgID(t *testing.T) {
+	a := gateway.NewHTTPWireAdmitter("http://127.0.0.1:0", "", "tok")
+	err := a.Admit(context.Background(), "", "203.0.113.9", "db")
+	if err == nil {
+		t.Fatal("expected error for missing organization_id")
+	}
+}
+
 func TestHostFromTCPAddr(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
