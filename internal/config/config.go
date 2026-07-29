@@ -27,11 +27,17 @@ type Agent struct {
 	UpstreamAddr string // upstream database address host:port (dialed by the agent)
 
 	// Tunnel-mode (egress to the gateway, many targets).
-	GatewayAddr string          // gateway agent endpoint host:port (the agent dials OUT to this)
-	AgentID     string          // stable agent identity (an org key may be shared by many agents)
-	OrgID       string          // tenant this agent belongs to (for session attribution)
-	Token       string          // shared registration token
-	Targets     []tunnel.Target // databases this agent can reach
+	GatewayAddr string // gateway agent endpoint host:port (the agent dials OUT to this)
+	AgentID     string // stable agent identity (an org key may be shared by many agents)
+	OrgID       string // tenant this agent belongs to; the gateway routes client connections to this
+	// agent by org id (one agent process serves one org's databases).
+	Token string // shared registration token
+
+	// Targets is the static {name,addr,db_type} list used by LISTENER mode only (SKYBRIDGE_TARGETS).
+	// Tunnel mode no longer consults this: the gateway resolves addr/db_type live per connection via
+	// a TargetResolver and pushes it on the stream-open payload (see
+	// docs/design/skybridge-go-wire-proxy.md §4.2).
+	Targets []tunnel.Target
 
 	// Masking (shared by both modes).
 	MaskAnalyzeURL   string // empty disables the default remote masker
@@ -225,11 +231,12 @@ func (e Edge) StudioEnabled() bool {
 	return strings.TrimSpace(e.StudioGateway) != ""
 }
 
-// WireProxyEnabled reports whether the edge should also run the co-located DB wire proxy.
+// WireProxyEnabled reports whether the edge should also run the co-located DB wire proxy. Tunnel
+// mode no longer requires a static target list — the gateway resolves targets live per connection.
 func (e Edge) WireProxyEnabled() bool {
 	switch e.WireProxy.Mode {
 	case ModeTunnel:
-		return e.WireProxy.GatewayAddr != "" && len(e.WireProxy.Targets) > 0
+		return e.WireProxy.GatewayAddr != ""
 	default:
 		return e.WireProxy.UpstreamAddr != ""
 	}
@@ -247,14 +254,18 @@ type Gateway struct {
 	ControlPlaneToken string
 	SessionPath       string // base path for session lifecycle reports (default /api/v1/data-studio/studio/native-sessions)
 	WireAdmitPath     string // base path for wire client IP admission (default /api/v1/data-studio/studio/native-access/wire-admit)
+	WireTargetPath    string // base path for live target resolution (default gateway.DefaultWireTargetPath)
 	RequireOrgID      bool   // reject agent registration / client relay without organization_id
 	ClientConnPerMin  int    // max new native client connections per client IP per minute (0 = unlimited)
 	OrgConnPerMin     int    // max new native client connections per organization_id per minute (0 = unlimited)
 }
 
-// ClientListener binds a local listen address to a registered target name.
+// ClientListener binds a local listen address to an org's registered target name. OrgID selects
+// which org's agent tunnel serves this listener (one agent process per org); Target is resolved
+// live per connection via the gateway's TargetResolver.
 type ClientListener struct {
 	Addr   string `json:"addr"`
+	OrgID  string `json:"org_id"`
 	Target string `json:"target"`
 }
 
@@ -278,6 +289,7 @@ func LoadGateway() Gateway {
 		ControlPlaneToken: env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
 		SessionPath:       env("SKYBRIDGE_GW_SESSION_PATH", "/api/v1/data-studio/studio/native-sessions"),
 		WireAdmitPath:     env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", "/api/v1/data-studio/studio/native-access/wire-admit"),
+		WireTargetPath:    env("SKYBRIDGE_GW_WIRE_TARGET_PATH", "/api/v1/studio/native-access/wire-targets"),
 		RequireOrgID:      requireOrgID,
 		ClientConnPerMin:  clientConnPerMin,
 		OrgConnPerMin:     orgConnPerMin,

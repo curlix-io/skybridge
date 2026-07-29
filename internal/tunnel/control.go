@@ -7,23 +7,26 @@ import "encoding/json"
 
 // ControlKind enumerates the control message kinds.
 const (
-	KindRegister    = "register"     // agent -> gateway: announce identity + served targets
+	KindRegister    = "register"     // agent -> gateway: announce identity (org-scoped; no target list)
 	KindRegisterAck = "register_ack" // gateway -> agent: accept/reject the registration
 	KindHeartbeat   = "heartbeat"    // both directions: liveness
 )
 
-// Control is a control-channel message.
+// Control is a control-channel message. There is no target list here: the gateway resolves a
+// target's addr/db_type live, per client connection, and pushes it on the stream-open payload (see
+// OpenMeta) instead of caching what the agent announces at registration.
 type Control struct {
-	Kind    string   `json:"kind"`
-	AgentID string   `json:"agent_id,omitempty"`
-	OrgID   string   `json:"org_id,omitempty"` // tenant the agent belongs to (for session attribution)
-	Token   string   `json:"token,omitempty"`
-	Targets []Target `json:"targets,omitempty"`
-	OK      bool     `json:"ok,omitempty"`
-	Error   string   `json:"error,omitempty"`
+	Kind    string `json:"kind"`
+	AgentID string `json:"agent_id,omitempty"`
+	OrgID   string `json:"org_id,omitempty"` // tenant the agent belongs to; the gateway routes client
+	// connections to an agent by this org id (one agent process serves one org).
+	Token string `json:"token,omitempty"`
+	OK    bool   `json:"ok,omitempty"`
+	Error string `json:"error,omitempty"`
 }
 
-// Target describes a database the agent can reach inside the egress network.
+// Target describes a database, either from static listener-mode config (SKYBRIDGE_TARGETS) or as
+// the shape a gateway TargetResolver returns for one tunnel-mode connection.
 type Target struct {
 	Name   string `json:"name"`    // logical name clients select (e.g. "prod-users")
 	Addr   string `json:"addr"`    // upstream host:port the agent dials
@@ -48,9 +51,15 @@ func decodeControl(b []byte) (Control, error) {
 	return c, err
 }
 
-// OpenMeta is the payload of an OPEN frame: which target the new stream should be proxied to.
+// OpenMeta is the payload of an OPEN frame: which target the new stream is proxied to, plus (when
+// the gateway resolved it live via a TargetResolver) the addr/db_type/attribution the agent needs —
+// the agent dials Addr directly and no longer consults a local target cache.
 type OpenMeta struct {
-	Target string `json:"target"`
+	Target         string `json:"target"`
+	Addr           string `json:"addr,omitempty"`
+	DBType         string `json:"db_type,omitempty"`
+	ResourceRoleID string `json:"resource_role_id,omitempty"`
+	ActorEmail     string `json:"actor_email,omitempty"`
 }
 
 // Encode serializes the open metadata for Session.Open.

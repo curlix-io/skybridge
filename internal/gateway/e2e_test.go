@@ -55,6 +55,18 @@ func (upperEngine) Proxy(_ context.Context, client, upstream net.Conn, _ mask.Ma
 
 func silent() *log.Logger { return log.New(io.Discard, "", 0) }
 
+// stubTargetResolver is a TargetResolver test double: it resolves target names against a canned
+// map, replacing what the agent used to announce at registration.
+type stubTargetResolver map[string]tunnel.Target
+
+func (s stubTargetResolver) Resolve(_ context.Context, _, target string) (tunnel.Target, error) {
+	t, ok := s[target]
+	if !ok {
+		return tunnel.Target{}, gateway.ErrTargetNotFound
+	}
+	return t, nil
+}
+
 func TestEndToEndTunnelRelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -62,6 +74,9 @@ func TestEndToEndTunnelRelay(t *testing.T) {
 	g := gateway.New("tok", silent())
 	rec := &recordingStore{}
 	g.SetStore(rec)
+	g.SetTargetResolver(stubTargetResolver{
+		"db": {Name: "db", Addr: "upstream:0", DBType: "upper", ResourceRoleID: "role-1", ActorEmail: "owner@example.com"},
+	})
 
 	// Agent <-> gateway over an in-memory pipe.
 	agentGW, agentLocal := net.Pipe()
@@ -72,10 +87,6 @@ func TestEndToEndTunnelRelay(t *testing.T) {
 		AgentID: "a1",
 		OrgID:   "org-1",
 		Token:   "tok",
-		Targets: []tunnel.Target{{
-			Name: "db", Addr: "upstream:0", DBType: "upper",
-			ResourceRoleID: "role-1", ActorEmail: "owner@example.com",
-		}},
 	}
 	deps := agent.Deps{
 		Dial:   echoDialer,
@@ -84,14 +95,14 @@ func TestEndToEndTunnelRelay(t *testing.T) {
 	}
 	go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
 
-	// Wait for the agent to register its target.
-	if !waitForTarget(g, "db", 2*time.Second) {
-		t.Fatal("agent did not register target in time")
+	// Wait for the agent to register under its org.
+	if !waitForOrgAgent(g, "org-1", 2*time.Second) {
+		t.Fatal("agent did not register in time")
 	}
 
 	// Native client <-> gateway over an in-memory pipe.
 	clientGW, client := net.Pipe()
-	go func() { _ = g.ServeClient(clientGW, "db") }()
+	go func() { _ = g.ServeClient(clientGW, "org-1", "db") }()
 
 	if _, err := client.Write([]byte("ping")); err != nil {
 		t.Fatal(err)
@@ -115,8 +126,8 @@ func TestEndToEndTunnelRelay(t *testing.T) {
 	if rec.started.Target != "db" || rec.started.DBType != "upper" || rec.started.OrgID != "org-1" {
 		t.Fatalf("start record wrong: %+v", rec.started)
 	}
-	// Attribution from the registered target binding must reach the control plane so the session
-	// is owned (not recorded unattributed).
+	// Attribution from the resolver's binding must reach the control plane so the session is owned
+	// (not recorded unattributed).
 	if rec.started.ResourceRoleID != "role-1" || rec.started.ActorEmail != "owner@example.com" {
 		t.Fatalf("attribution not relayed: role=%q actor=%q", rec.started.ResourceRoleID, rec.started.ActorEmail)
 	}
@@ -190,6 +201,9 @@ func TestRelayAttributesByLoginUsername(t *testing.T) {
 	g := gateway.New("", silent())
 	rec := &recordingStore{}
 	g.SetStore(rec)
+	g.SetTargetResolver(stubTargetResolver{
+		"pg": {Name: "pg", Addr: "upstream:0", DBType: "postgres", ResourceRoleID: "role-1"},
+	})
 
 	agentGW, agentLocal := net.Pipe()
 	go func() { _ = g.ServeAgent(agentGW) }()
@@ -198,7 +212,6 @@ func TestRelayAttributesByLoginUsername(t *testing.T) {
 		Mode:    config.ModeTunnel,
 		AgentID: "a1",
 		OrgID:   "org-1",
-		Targets: []tunnel.Target{{Name: "pg", Addr: "upstream:0", DBType: "postgres", ResourceRoleID: "role-1"}},
 	}
 	deps := agent.Deps{
 		Dial:   echoDialer,
@@ -206,12 +219,12 @@ func TestRelayAttributesByLoginUsername(t *testing.T) {
 		Masker: mask.Noop{},
 	}
 	go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
-	if !waitForTarget(g, "pg", 2*time.Second) {
-		t.Fatal("agent did not register target in time")
+	if !waitForOrgAgent(g, "org-1", 2*time.Second) {
+		t.Fatal("agent did not register in time")
 	}
 
 	clientGW, client := net.Pipe()
-	go func() { _ = g.ServeClient(clientGW, "pg") }()
+	go func() { _ = g.ServeClient(clientGW, "org-1", "pg") }()
 
 	if _, err := client.Write(pgStartupBytes("alice")); err != nil {
 		t.Fatal(err)
@@ -237,14 +250,53 @@ func TestRelayAttributesByLoginUsername(t *testing.T) {
 func TestServeClientNoAgent(t *testing.T) {
 	g := gateway.New("", silent())
 	_, client := net.Pipe()
-	if err := g.ServeClient(client, "missing"); err != gateway.ErrNoAgent {
+	if err := g.ServeClient(client, "org-1", "missing"); err != gateway.ErrNoAgent {
 		t.Fatalf("want ErrNoAgent, got %v", err)
 	}
 }
 
-func TestServeAgentRejectsMissingOrgID(t *testing.T) {
+func TestServeClientRejectsWhenResolverFails(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
 	g := gateway.New("tok", silent())
-	g.SetRequireOrgID(true)
+	rec := &recordingStore{}
+	g.SetStore(rec)
+	g.SetTargetResolver(stubTargetResolver{}) // resolves nothing -> ErrTargetNotFound for any target
+
+	agentGW, agentLocal := net.Pipe()
+	go func() { _ = g.ServeAgent(agentGW) }()
+
+	cfg := config.Agent{Mode: config.ModeTunnel, AgentID: "a1", OrgID: "org-1", Token: "tok"}
+	deps := agent.Deps{
+		Dial:   echoDialer,
+		Engine: func(string) (wire.Engine, error) { return upperEngine{}, nil },
+		Masker: mask.Noop{},
+	}
+	go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
+	if !waitForOrgAgent(g, "org-1", 2*time.Second) {
+		t.Fatal("agent did not register in time")
+	}
+
+	clientGW, client := net.Pipe()
+	errc := make(chan error, 1)
+	go func() { errc <- g.ServeClient(clientGW, "org-1", "db") }()
+
+	// The client should see the connection close with no bytes relayed, since the resolver failed
+	// before any tunnel stream was opened.
+	buf := make([]byte, 1)
+	_ = client.SetReadDeadline(time.Now().Add(2 * time.Second))
+	if _, err := client.Read(buf); err == nil {
+		t.Fatal("expected client connection to close without relaying any bytes")
+	}
+	if err := <-errc; !errors.Is(err, gateway.ErrTargetNotFound) {
+		t.Fatalf("want ErrTargetNotFound, got %v", err)
+	}
+}
+
+func TestServeAgentRejectsMissingOrgIDWhenResolverIsLive(t *testing.T) {
+	g := gateway.New("tok", silent())
+	g.SetTargetResolver(stubTargetResolver{"db": {Name: "db", Addr: "x:0", DBType: "upper"}})
 	gw, local := net.Pipe()
 	go func() { _ = g.ServeAgent(gw) }()
 
@@ -252,7 +304,6 @@ func TestServeAgentRejectsMissingOrgID(t *testing.T) {
 		Mode:    config.ModeTunnel,
 		AgentID: "a1",
 		Token:   "tok",
-		Targets: []tunnel.Target{{Name: "db", Addr: "x:0", DBType: "upper"}},
 	}
 	err := agent.ServeTunnelConn(context.Background(), local, cfg, agent.Deps{
 		Dial:   echoDialer,
@@ -260,41 +311,16 @@ func TestServeAgentRejectsMissingOrgID(t *testing.T) {
 		Masker: mask.Noop{},
 	}, silent())
 	if err == nil {
-		t.Fatal("expected registration rejection when organization_id is required but missing")
+		t.Fatal("expected registration rejection when a live TargetResolver requires organization_id")
 	}
 }
 
 func TestServeClientRejectsMissingOrgID(t *testing.T) {
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
-
 	g := gateway.New("tok", silent())
-	rec := &recordingStore{}
-	g.SetStore(rec)
+	g.SetTargetResolver(stubTargetResolver{"db": {Name: "db", Addr: "x:0", DBType: "upper"}})
 
-	agentGW, agentLocal := net.Pipe()
-	go func() { _ = g.ServeAgent(agentGW) }()
-
-	cfg := config.Agent{
-		Mode:    config.ModeTunnel,
-		AgentID: "a1",
-		Token:   "tok",
-		Targets: []tunnel.Target{{Name: "db", Addr: "upstream:0", DBType: "upper"}},
-	}
-	deps := agent.Deps{
-		Dial:   echoDialer,
-		Engine: func(string) (wire.Engine, error) { return upperEngine{}, nil },
-		Masker: mask.Noop{},
-	}
-	go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
-
-	if !waitForTarget(g, "db", 2*time.Second) {
-		t.Fatal("agent registered without org_id while requireOrgID was off")
-	}
-
-	g.SetRequireOrgID(true)
 	clientGW, client := net.Pipe()
-	err := g.ServeClient(clientGW, "db")
+	err := g.ServeClient(clientGW, "", "db")
 	if !errors.Is(err, gateway.ErrMissingOrgID) {
 		t.Fatalf("want ErrMissingOrgID, got %v", err)
 	}
@@ -307,6 +333,7 @@ func TestServeClientRejectsRateLimit(t *testing.T) {
 
 	g := gateway.New("tok", silent())
 	g.SetConnRateLimiter(gateway.NewConnRateLimiter(1, 0))
+	g.SetTargetResolver(stubTargetResolver{"db": {Name: "db", Addr: "upstream:0", DBType: "upper"}})
 	rec := &recordingStore{}
 	g.SetStore(rec)
 
@@ -318,7 +345,6 @@ func TestServeClientRejectsRateLimit(t *testing.T) {
 		AgentID: "a1",
 		OrgID:   "org-1",
 		Token:   "tok",
-		Targets: []tunnel.Target{{Name: "db", Addr: "upstream:0", DBType: "upper"}},
 	}
 	deps := agent.Deps{
 		Dial:   echoDialer,
@@ -327,17 +353,17 @@ func TestServeClientRejectsRateLimit(t *testing.T) {
 	}
 	go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
 
-	if !waitForTarget(g, "db", 2*time.Second) {
-		t.Fatal("agent did not register target in time")
+	if !waitForOrgAgent(g, "org-1", 2*time.Second) {
+		t.Fatal("agent did not register in time")
 	}
 
 	clientGW1, client1 := net.Pipe()
-	go func() { _ = g.ServeClient(clientGW1, "db") }()
+	go func() { _ = g.ServeClient(clientGW1, "org-1", "db") }()
 	time.Sleep(20 * time.Millisecond)
 	_ = client1.Close()
 
 	clientGW2, client2 := net.Pipe()
-	err := g.ServeClient(clientGW2, "db")
+	err := g.ServeClient(clientGW2, "org-1", "db")
 	_ = client2.Close()
 	if !errors.Is(err, gateway.ErrRateLimited) {
 		t.Fatalf("want ErrRateLimited, got %v", err)
@@ -349,7 +375,7 @@ func TestServeAgentRejectsBadToken(t *testing.T) {
 	gw, local := net.Pipe()
 	go func() { _ = g.ServeAgent(gw) }()
 
-	cfg := config.Agent{Mode: config.ModeTunnel, AgentID: "a1", Token: "wrong", Targets: []tunnel.Target{{Name: "db", Addr: "x:0", DBType: "upper"}}}
+	cfg := config.Agent{Mode: config.ModeTunnel, AgentID: "a1", Token: "wrong"}
 	err := agent.ServeTunnelConn(context.Background(), local, cfg, agent.Deps{
 		Dial:   echoDialer,
 		Engine: func(string) (wire.Engine, error) { return upperEngine{}, nil },
@@ -367,11 +393,11 @@ func echoDialer(_ context.Context, _, _ string) (net.Conn, error) {
 	return c, nil
 }
 
-func waitForTarget(g *gateway.Gateway, name string, d time.Duration) bool {
+func waitForOrgAgent(g *gateway.Gateway, orgID string, d time.Duration) bool {
 	deadline := time.Now().Add(d)
 	for time.Now().Before(deadline) {
-		for _, tname := range g.Targets() {
-			if tname == name {
+		for _, o := range g.RegisteredOrgs() {
+			if o == orgID {
 				return true
 			}
 		}
