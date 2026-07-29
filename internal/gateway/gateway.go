@@ -37,29 +37,19 @@ type Gateway struct {
 	log          *log.Logger
 	store        Store
 	admitter     WireAdmitter
+	resolver     TargetResolver
 	requireOrgID bool
 	connLimiter  ConnRateLimiter
 
-	mu      sync.RWMutex
-	agents  map[string]*agentConn // agent id -> connection
-	targets map[string]*agentConn // target name -> serving agent (last registrant wins)
+	mu        sync.RWMutex
+	agents    map[string]*agentConn // agent id -> connection
+	orgAgents map[string]*agentConn // org id -> serving agent (one agent process per org)
 }
 
 type agentConn struct {
-	id      string
-	orgID   string
-	sess    *tunnel.Session
-	targets []tunnel.Target
-}
-
-// target returns the registered binding for a target name (used for attribution lookups).
-func (ac *agentConn) target(name string) (tunnel.Target, bool) {
-	for _, t := range ac.targets {
-		if t.Name == name {
-			return t, true
-		}
-	}
-	return tunnel.Target{}, false
+	id    string
+	orgID string
+	sess  *tunnel.Session
 }
 
 // New creates a Gateway. authToken (if non-empty) is required from agents at registration.
@@ -68,13 +58,14 @@ func New(authToken string, logger *log.Logger) *Gateway {
 		logger = log.Default()
 	}
 	return &Gateway{
-		authToken: authToken,
-		log:       logger,
-		store:     NoopStore{},
-		admitter:  NoopWireAdmitter{},
+		authToken:   authToken,
+		log:         logger,
+		store:       NoopStore{},
+		admitter:    NoopWireAdmitter{},
+		resolver:    NoopTargetResolver{},
 		connLimiter: NoopConnRateLimiter{},
-		agents:    make(map[string]*agentConn),
-		targets:   make(map[string]*agentConn),
+		agents:      make(map[string]*agentConn),
+		orgAgents:   make(map[string]*agentConn),
 	}
 }
 
@@ -92,6 +83,15 @@ func (g *Gateway) SetWireAdmitter(a WireAdmitter) {
 		a = NoopWireAdmitter{}
 	}
 	g.admitter = a
+}
+
+// SetTargetResolver installs the per-connection target resolver (defaults to NoopTargetResolver,
+// which fails closed — there is no safe default target to relay to without a control plane).
+func (g *Gateway) SetTargetResolver(r TargetResolver) {
+	if r == nil {
+		r = NoopTargetResolver{}
+	}
+	g.resolver = r
 }
 
 // SetRequireOrgID requires agents to register with a non-empty organization_id and rejects client
@@ -149,19 +149,19 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "missing agent_id"})
 		return errors.New("gateway: agent missing id")
 	}
-	if g.requireOrgID && strings.TrimSpace(reg.OrgID) == "" {
+	if (g.requireOrgID || g.resolverIsLive()) && strings.TrimSpace(reg.OrgID) == "" {
 		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "missing organization_id"})
 		return ErrMissingOrgID
 	}
 
-	ac := &agentConn{id: reg.AgentID, orgID: reg.OrgID, sess: sess, targets: reg.Targets}
+	ac := &agentConn{id: reg.AgentID, orgID: reg.OrgID, sess: sess}
 	g.register(ac)
 	defer g.deregister(ac)
 
 	if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: true}); err != nil {
 		return err
 	}
-	g.log.Printf("agent %q registered with %d target(s)", ac.id, len(ac.targets))
+	g.log.Printf("agent %q registered (org=%q)", ac.id, ac.orgID)
 
 	for {
 		if _, err := sess.NextControl(); err != nil {
@@ -176,8 +176,8 @@ func (g *Gateway) register(ac *agentConn) {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	g.agents[ac.id] = ac
-	for _, t := range ac.targets {
-		g.targets[t.Name] = ac
+	if ac.orgID != "" {
+		g.orgAgents[ac.orgID] = ac
 	}
 }
 
@@ -187,37 +187,54 @@ func (g *Gateway) deregister(ac *agentConn) {
 	if g.agents[ac.id] == ac {
 		delete(g.agents, ac.id)
 	}
-	for _, t := range ac.targets {
-		if g.targets[t.Name] == ac {
-			delete(g.targets, t.Name)
-		}
+	if ac.orgID != "" && g.orgAgents[ac.orgID] == ac {
+		delete(g.orgAgents, ac.orgID)
 	}
 }
 
-// Targets returns the currently reachable target names (for diagnostics / readiness).
-func (g *Gateway) Targets() []string {
+// resolverIsLive reports whether a real (non-Noop) TargetResolver is installed — once it is, org id
+// becomes load-bearing for routing (see ServeAgent/ServeClient), not just an optional attribution
+// field.
+func (g *Gateway) resolverIsLive() bool {
+	_, noop := g.resolver.(NoopTargetResolver)
+	return !noop
+}
+
+// RegisteredOrgs returns the currently connected agents' org ids (for diagnostics / readiness).
+func (g *Gateway) RegisteredOrgs() []string {
 	g.mu.RLock()
 	defer g.mu.RUnlock()
-	out := make([]string, 0, len(g.targets))
-	for name := range g.targets {
-		out = append(out, name)
+	out := make([]string, 0, len(g.orgAgents))
+	for orgID := range g.orgAgents {
+		out = append(out, orgID)
 	}
 	return out
 }
 
-// Open dials a target through its agent, returning a net.Conn-backed logical stream.
-func (g *Gateway) Open(target string) (net.Conn, error) {
+// Open resolves a target for orgID through its agent, returning a net.Conn-backed logical stream.
+func (g *Gateway) Open(ctx context.Context, orgID, target string) (net.Conn, error) {
 	g.mu.RLock()
-	ac := g.targets[target]
+	ac := g.orgAgents[orgID]
 	g.mu.RUnlock()
 	if ac == nil {
 		return nil, ErrNoAgent
 	}
-	return ac.sess.Open(tunnel.OpenMeta{Target: target}.Encode())
+	binding, err := g.resolver.Resolve(ctx, orgID, target)
+	if err != nil {
+		return nil, err
+	}
+	return ac.sess.Open(tunnel.OpenMeta{
+		Target:         target,
+		Addr:           binding.Addr,
+		DBType:         binding.DBType,
+		ResourceRoleID: binding.ResourceRoleID,
+		ActorEmail:     binding.ActorEmail,
+	}.Encode())
 }
 
-// ListenClients accepts native-client connections and relays each to target over its agent tunnel.
-func (g *Gateway) ListenClients(ctx context.Context, ln net.Listener, target string) error {
+// ListenClients accepts native-client connections and relays each to target over orgID's agent
+// tunnel.
+func (g *Gateway) ListenClients(ctx context.Context, ln net.Listener, orgID, target string) error {
 	go closeOnDone(ctx, ln)
 	for {
 		conn, err := ln.Accept()
@@ -228,57 +245,72 @@ func (g *Gateway) ListenClients(ctx context.Context, ln net.Listener, target str
 			return err
 		}
 		go func() {
-			if err := g.ServeClient(conn, target); err != nil {
-				g.log.Printf("client relay for %q ended: %v", target, err)
+			if err := g.ServeClient(conn, orgID, target); err != nil {
+				g.log.Printf("client relay for org=%q target=%q ended: %v", orgID, target, err)
 			}
 		}()
 	}
 }
 
-// ServeClient relays a single native-client connection to its target's agent tunnel, recording the
-// session lifecycle (best-effort) via the configured Store.
-func (g *Gateway) ServeClient(client net.Conn, target string) error {
+// ServeClient relays a single native-client connection to orgID's agent tunnel, resolving the
+// target's addr/db_type live for this connection and recording the session lifecycle (best-effort)
+// via the configured Store.
+func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 	defer client.Close()
 
 	clientAddr := client.RemoteAddr().String()
 
-	g.mu.RLock()
-	ac := g.targets[target]
-	g.mu.RUnlock()
-	if ac == nil {
-		g.logRejectedClient(target, clientAddr, "", ErrNoAgent)
-		return ErrNoAgent
-	}
-	if g.requireOrgID && strings.TrimSpace(ac.orgID) == "" {
-		g.logRejectedClient(target, clientAddr, ac.orgID, ErrMissingOrgID)
+	if (g.requireOrgID || g.resolverIsLive()) && strings.TrimSpace(orgID) == "" {
+		g.logRejectedClient(target, clientAddr, orgID, ErrMissingOrgID)
 		return ErrMissingOrgID
 	}
+	g.mu.RLock()
+	ac := g.orgAgents[orgID]
+	g.mu.RUnlock()
+	if ac == nil {
+		g.logRejectedClient(target, clientAddr, orgID, ErrNoAgent)
+		return ErrNoAgent
+	}
 	if g.connLimiter != nil {
-		if err := g.connLimiter.Allow(clientAddr, ac.orgID); err != nil {
-			g.logRejectedClient(target, clientAddr, ac.orgID, err)
+		if err := g.connLimiter.Allow(clientAddr, orgID); err != nil {
+			g.logRejectedClient(target, clientAddr, orgID, err)
 			return err
 		}
 	}
 	if g.admitter != nil {
-		ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
-		err := g.admitter.Admit(ctx, ac.orgID, clientAddr, target)
+		actx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+		err := g.admitter.Admit(actx, orgID, clientAddr, target)
 		cancel()
 		if err != nil {
-			g.logRejectedClient(target, clientAddr, ac.orgID, err)
+			g.logRejectedClient(target, clientAddr, orgID, err)
 			return err
 		}
 	}
-	stream, err := ac.sess.Open(tunnel.OpenMeta{Target: target}.Encode())
+
+	rctx, rcancel := context.WithTimeout(context.Background(), storeTimeout)
+	binding, err := g.resolver.Resolve(rctx, orgID, target)
+	rcancel()
 	if err != nil {
-		g.logRejectedClient(target, clientAddr, ac.orgID, err)
+		g.logRejectedClient(target, clientAddr, orgID, err)
+		return err
+	}
+
+	stream, err := ac.sess.Open(tunnel.OpenMeta{
+		Target:         target,
+		Addr:           binding.Addr,
+		DBType:         binding.DBType,
+		ResourceRoleID: binding.ResourceRoleID,
+		ActorEmail:     binding.ActorEmail,
+	}.Encode())
+	if err != nil {
+		g.logRejectedClient(target, clientAddr, orgID, err)
 		return err
 	}
 	defer stream.Close()
 
-	binding, _ := ac.target(target)
 	rec := SessionRecord{
 		AgentID:        ac.id,
-		OrgID:          ac.orgID,
+		OrgID:          orgID,
 		Target:         target,
 		DBType:         binding.DBType,
 		ClientAddr:     client.RemoteAddr().String(),

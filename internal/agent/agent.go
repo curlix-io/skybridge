@@ -288,9 +288,6 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 	if cfg.GatewayAddr == "" {
 		return fmt.Errorf("set SKYBRIDGE_GATEWAY to the gateway address (host:port)")
 	}
-	if len(cfg.Targets) == 0 {
-		return fmt.Errorf("set SKYBRIDGE_TARGETS to a JSON array of {name,addr,db_type}")
-	}
 	// Build the masker here (rather than letting withDefaults do it) so we can capture the overlay
 	// handle and keep it refreshed from the control plane. Respect a test-injected masker.
 	if deps.Masker == nil {
@@ -316,11 +313,9 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			return err
 		}
 		deps.UpstreamTLS = upTLS
-		dbTypes := make([]string, 0, len(cfg.Targets))
-		for _, t := range cfg.Targets {
-			dbTypes = append(dbTypes, t.DBType)
-		}
-		logUpstreamTLSMode(upTLS, dbTypes, logger)
+		// Tunnel-mode targets are resolved live by the gateway per connection now, so there is no
+		// static db-type list to enumerate here (unlike listener mode's single cfg.DBType).
+		logUpstreamTLSMode(upTLS, nil, logger)
 	}
 	deps = deps.withDefaults(cfg)
 	if cfg.InjectCredentials {
@@ -344,8 +339,8 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			}
 			continue
 		}
-		logger.Printf("skybridge-agent[tunnel]: connected to gateway %s as %q (%d targets, masking: %s)", cfg.GatewayAddr, cfg.AgentID, len(cfg.Targets), MaskingMode(cfg))
-		if err := ServeTunnelConn(ctx, conn, cfg, deps, logger); err != nil {
+		logger.Printf("skybridge-agent[tunnel]: connected to gateway %s as %q (masking: %s)", cfg.GatewayAddr, cfg.AgentID, MaskingMode(cfg))
+		if err := ServeTunnelConn(ctx, conn, cfg, deps, logger); err != nil && ctx.Err() == nil {
 			logger.Printf("tunnel session ended: %v (reconnecting)", err)
 		}
 		if !sleep(ctx, 2*time.Second) {
@@ -370,7 +365,6 @@ func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps 
 		AgentID: cfg.AgentID,
 		OrgID:   cfg.OrgID,
 		Token:   cfg.Token,
-		Targets: cfg.Targets,
 	}); err != nil {
 		return err
 	}
@@ -407,28 +401,28 @@ func serveStream(ctx context.Context, st *tunnel.Stream, cfg config.Agent, deps 
 		logger.Printf("stream open: bad meta: %v", err)
 		return
 	}
-	target, ok := cfg.TargetByName(meta.Target)
-	if !ok {
-		logger.Printf("stream open: unknown target %q", meta.Target)
+	if meta.Addr == "" || meta.DBType == "" {
+		logger.Printf("stream open: gateway sent no addr/db_type for target %q "+
+			"(upgrade the gateway or check its SKYBRIDGE_GW_CONTROL_PLANE_URL)", meta.Target)
 		return
 	}
-	engine, err := deps.Engine(target.DBType)
+	engine, err := deps.Engine(meta.DBType)
 	if err != nil {
 		logger.Printf("stream open: %v", err)
 		return
 	}
-	engine = deps.UpstreamTLS.configureEngine(engine, target.DBType, target.Addr)
-	rawUpstream, err := deps.Dial(ctx, "tcp", target.Addr)
+	engine = deps.UpstreamTLS.configureEngine(engine, meta.DBType, meta.Addr)
+	rawUpstream, err := deps.Dial(ctx, "tcp", meta.Addr)
 	if err != nil {
-		logger.Printf("dial upstream %s: %v", target.Addr, err)
+		logger.Printf("dial upstream %s: %v", meta.Addr, err)
 		return
 	}
 	upstream := rawUpstream
 	if deps.UpstreamTLS.enabled() {
-		upstream, err = deps.UpstreamTLS.startUpstreamTLS(target.DBType, rawUpstream, target.Addr)
+		upstream, err = deps.UpstreamTLS.startUpstreamTLS(meta.DBType, rawUpstream, meta.Addr)
 		if err != nil {
 			_ = rawUpstream.Close()
-			logger.Printf("upstream TLS to %s: %v", target.Addr, err)
+			logger.Printf("upstream TLS to %s: %v", meta.Addr, err)
 			return
 		}
 	}

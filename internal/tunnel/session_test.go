@@ -164,6 +164,23 @@ func TestControlChannel(t *testing.T) {
 	}
 }
 
+func TestOpenMetaRoundTrip(t *testing.T) {
+	m := OpenMeta{
+		Target:         "prod-users",
+		Addr:           "db.internal:5432",
+		DBType:         "postgres",
+		ResourceRoleID: "role-1",
+		ActorEmail:     "owner@example.com",
+	}
+	got, err := DecodeOpenMeta(m.Encode())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != m {
+		t.Fatalf("round-trip mismatch: got %+v want %+v", got, m)
+	}
+}
+
 func TestSessionCloseUnblocksAccept(t *testing.T) {
 	_, server := pair(t)
 	done := make(chan struct{})
