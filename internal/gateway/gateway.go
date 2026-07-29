@@ -240,30 +240,37 @@ func (g *Gateway) ListenClients(ctx context.Context, ln net.Listener, target str
 func (g *Gateway) ServeClient(client net.Conn, target string) error {
 	defer client.Close()
 
+	clientAddr := client.RemoteAddr().String()
+
 	g.mu.RLock()
 	ac := g.targets[target]
 	g.mu.RUnlock()
 	if ac == nil {
+		g.logRejectedClient(target, clientAddr, "", ErrNoAgent)
 		return ErrNoAgent
 	}
 	if g.requireOrgID && strings.TrimSpace(ac.orgID) == "" {
+		g.logRejectedClient(target, clientAddr, ac.orgID, ErrMissingOrgID)
 		return ErrMissingOrgID
 	}
 	if g.connLimiter != nil {
-		if err := g.connLimiter.Allow(client.RemoteAddr().String(), ac.orgID); err != nil {
+		if err := g.connLimiter.Allow(clientAddr, ac.orgID); err != nil {
+			g.logRejectedClient(target, clientAddr, ac.orgID, err)
 			return err
 		}
 	}
 	if g.admitter != nil {
 		ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
-		err := g.admitter.Admit(ctx, ac.orgID, client.RemoteAddr().String(), target)
+		err := g.admitter.Admit(ctx, ac.orgID, clientAddr, target)
 		cancel()
 		if err != nil {
+			g.logRejectedClient(target, clientAddr, ac.orgID, err)
 			return err
 		}
 	}
 	stream, err := ac.sess.Open(tunnel.OpenMeta{Target: target}.Encode())
 	if err != nil {
+		g.logRejectedClient(target, clientAddr, ac.orgID, err)
 		return err
 	}
 	defer stream.Close()
@@ -306,6 +313,16 @@ func (g *Gateway) ServeClient(client net.Conn, target string) error {
 		g.log.Printf("session recording (end) failed: %v", serr)
 	}
 	return rerr
+}
+
+// logRejectedClient records why a native-client connection was torn down before any bytes were
+// relayed. The gateway is a protocol-agnostic raw-TCP relay (it never speaks Postgres/MySQL/Mongo
+// wire), so it cannot safely write a driver-specific error response onto the client socket without
+// risking corrupting the client's handshake — the client just sees the TCP connection close. This
+// at least makes the reason (no agent / missing org / rate limit / admit-denied / tunnel-open
+// failure) visible server-side instead of every rejection looking identical.
+func (g *Gateway) logRejectedClient(target, clientAddr, orgID string, err error) {
+	g.log.Printf("client relay rejected: target=%q client=%q org=%q reason=%v", target, clientAddr, orgID, err)
 }
 
 func (g *Gateway) storeStarted(rec SessionRecord) (string, error) {
