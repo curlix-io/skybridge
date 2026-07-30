@@ -13,6 +13,13 @@ import (
 // ErrSessionClosed is returned once the underlying connection is gone.
 var ErrSessionClosed = errors.New("tunnel: session closed")
 
+// IdleTimeout bounds how long the read loop waits for ANY frame (data or heartbeat) before treating
+// the peer as dead. Both sides must send heartbeats well inside this window (see agent.go's
+// heartbeatLoop and the gateway's mirror of it) — otherwise an idle-but-healthy link with no client
+// traffic would be torn down. Ungraceful peer death (ECS task killed, no FIN) leaves a plain
+// io.ReadFull blocked forever with nothing to signal it; this deadline is what actually detects that.
+const IdleTimeout = 45 * time.Second
+
 // Session multiplexes logical streams and a control channel over one net.Conn.
 type Session struct {
 	conn net.Conn
@@ -119,6 +126,10 @@ func (s *Session) errOrClosed() error {
 
 func (s *Session) readLoop() {
 	for {
+		// Reset before every frame: a healthy peer sends at least a heartbeat within IdleTimeout, so
+		// this only fires when nothing at all — not even a heartbeat — has arrived in that window,
+		// which is exactly the signature of an ungracefully-killed peer (half-open socket, no FIN).
+		_ = s.conn.SetReadDeadline(time.Now().Add(IdleTimeout))
 		f, err := readFrame(s.conn)
 		if err != nil {
 			s.closeWithErr(err)

@@ -22,6 +22,7 @@ import (
 	"github.com/curlix-io/skybridge/internal/mask"
 	"github.com/curlix-io/skybridge/internal/tunnel"
 	"github.com/curlix-io/skybridge/internal/wire"
+	"github.com/curlix-io/skybridge/internal/wiremtls"
 )
 
 const (
@@ -329,8 +330,42 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 		}
 	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
+	var wireTLS *tls.Config
+	if cfg.WireMtlsConfigured() {
+		logger.Printf("skybridge-agent[tunnel]: wire mTLS enrollment configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL)
+	}
 
 	for ctx.Err() == nil {
+		if cfg.WireMtlsConfigured() {
+			material, merr := wiremtls.EnsureMaterial(ctx, wiremtls.EnrollConfig{
+				BaseURL:     cfg.WireMtlsEnrollURL,
+				TenantID:    cfg.OrgID,
+				AgentID:     cfg.AgentID,
+				EnrollToken: cfg.WireMtlsEnrollToken,
+				TrustDomain: cfg.WireMtlsTrustDomain,
+				TLSDir:      cfg.WireMtlsTLSDir,
+				CABundlePEM: cfg.WireMtlsCABundlePEM,
+			})
+			if merr != nil {
+				logger.Printf("wire mTLS enroll: %v (retrying)", merr)
+				if !sleep(ctx, 3*time.Second) {
+					return nil
+				}
+				continue
+			}
+			if material != nil {
+				tlsCfg, terr := material.ClientTLSConfig()
+				if terr != nil {
+					logger.Printf("wire mTLS material invalid: %v (retrying)", terr)
+					if !sleep(ctx, 3*time.Second) {
+						return nil
+					}
+					continue
+				}
+				wireTLS = tlsCfg
+			}
+		}
+
 		conn, err := dialer.DialContext(ctx, "tcp", cfg.GatewayAddr)
 		if err != nil {
 			logger.Printf("dial gateway %s: %v (retrying)", cfg.GatewayAddr, err)
@@ -339,7 +374,12 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			}
 			continue
 		}
-		logger.Printf("skybridge-agent[tunnel]: connected to gateway %s as %q (masking: %s)", cfg.GatewayAddr, cfg.AgentID, MaskingMode(cfg))
+		mode := "bearer-token"
+		if wireTLS != nil {
+			conn = tls.Client(conn, wireTLS)
+			mode = "mTLS"
+		}
+		logger.Printf("skybridge-agent[tunnel]: connected to gateway %s as %q (%s, masking: %s)", cfg.GatewayAddr, cfg.AgentID, mode, MaskingMode(cfg))
 		if err := ServeTunnelConn(ctx, conn, cfg, deps, logger); err != nil && ctx.Err() == nil {
 			logger.Printf("tunnel session ended: %v (reconnecting)", err)
 		}
