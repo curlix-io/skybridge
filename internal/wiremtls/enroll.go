@@ -154,7 +154,11 @@ func enroll(ctx context.Context, cfg EnrollConfig) (*Material, error) {
 
 func tlsPaths(dir string) (caPath, certPath, keyPath string) {
 	if dir == "" {
-		dir = "/var/lib/skybridge/wire-tls"
+		// /var/lib isn't writable by the distroless "nonroot" image's default user; /tmp always is
+		// (standard Linux world-writable + sticky bit), and on Fargate it's ephemeral storage
+		// anyway — this cache never needs to survive a task restart, IAM/enroll-token re-enrollment
+		// handles that.
+		dir = filepath.Join(os.TempDir(), "skybridge", "wire-tls")
 	}
 	return filepath.Join(dir, "ca.pem"), filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
 }
