@@ -88,6 +88,13 @@ type Agent struct {
 	WireMtlsTLSDir      string // SKYBRIDGE_WIRE_MTLS_TLS_DIR (persists ca.pem/client.crt/client.key)
 	WireMtlsCABundlePEM []byte // SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM / _FILE (pins the enroll call's server TLS)
 	WireMtlsTrustDomain string // SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN (cosmetic; default wiremtls.DefaultTrustDomain)
+
+	// Pre-issued client cert/key (e.g. injected from Secrets Manager), skipping the one-time-token
+	// enroll call entirely. Takes priority over WireMtlsEnrollToken/WireMtlsTLSDir — useful on
+	// ephemeral compute (Fargate) where there is no persistent disk to cache an enrolled cert
+	// across task restarts, and a fresh single-use enroll token can't be minted on every restart.
+	WireMtlsClientCertPEM []byte // SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM / _FILE
+	WireMtlsClientKeyPEM  []byte // SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_PEM / _FILE
 }
 
 // ClientTLSConfigured reports whether client-side TLS termination should be enabled.
@@ -143,13 +150,19 @@ func LoadAgent() Agent {
 		WireMtlsTLSDir:      env("SKYBRIDGE_WIRE_MTLS_TLS_DIR", ""),
 		WireMtlsCABundlePEM: pemFromEnv("SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_FILE"),
 		WireMtlsTrustDomain: env("SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN", ""),
+
+		WireMtlsClientCertPEM: pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_FILE"),
+		WireMtlsClientKeyPEM:  pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_FILE"),
 	}
 	return a
 }
 
-// WireMtlsConfigured reports whether the agent should attempt mTLS enrollment for the gateway
-// tunnel instead of (or on top of) the legacy bearer token.
+// WireMtlsConfigured reports whether the agent should attempt mTLS for the gateway tunnel instead
+// of (or on top of) the legacy bearer token — either via a pre-issued cert or the enroll flow.
 func (a Agent) WireMtlsConfigured() bool {
+	if len(a.WireMtlsClientCertPEM) > 0 && len(a.WireMtlsClientKeyPEM) > 0 {
+		return true
+	}
 	return strings.TrimSpace(a.WireMtlsEnrollURL) != ""
 }
 

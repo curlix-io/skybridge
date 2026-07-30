@@ -331,12 +331,32 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	var wireTLS *tls.Config
+	hasPresetCert := len(cfg.WireMtlsClientCertPEM) > 0 && len(cfg.WireMtlsClientKeyPEM) > 0
 	if cfg.WireMtlsConfigured() {
-		logger.Printf("skybridge-agent[tunnel]: wire mTLS enrollment configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL)
+		if hasPresetCert {
+			logger.Printf("skybridge-agent[tunnel]: wire mTLS configured with a pre-issued client cert — will present it instead of the bearer token.")
+		} else {
+			logger.Printf("skybridge-agent[tunnel]: wire mTLS enrollment configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL)
+		}
 	}
 
 	for ctx.Err() == nil {
-		if cfg.WireMtlsConfigured() {
+		if hasPresetCert {
+			material := &wiremtls.Material{
+				CABundlePEM:   cfg.WireMtlsCABundlePEM,
+				ClientCertPEM: cfg.WireMtlsClientCertPEM,
+				ClientKeyPEM:  cfg.WireMtlsClientKeyPEM,
+			}
+			tlsCfg, terr := material.ClientTLSConfig()
+			if terr != nil {
+				logger.Printf("wire mTLS preset cert invalid: %v (retrying)", terr)
+				if !sleep(ctx, 3*time.Second) {
+					return nil
+				}
+				continue
+			}
+			wireTLS = tlsCfg
+		} else if cfg.WireMtlsConfigured() {
 			material, merr := wiremtls.EnsureMaterial(ctx, wiremtls.EnrollConfig{
 				BaseURL:     cfg.WireMtlsEnrollURL,
 				TenantID:    cfg.OrgID,
