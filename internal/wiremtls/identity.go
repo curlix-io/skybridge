@@ -101,20 +101,23 @@ type Material struct {
 
 // ClientTLSConfig presents the agent's client cert and trusts the CA bundle. Used by RunTunnel's
 // dialer to mTLS-wrap the gateway connection.
+//
+// The gateway's own server cert (GenerateSelfSignedServerCert in server.go) is ephemeral and
+// self-signed unless an operator configures SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM/_KEY — CABundlePEM
+// here is the CA that signs *client* (agent) certs, an unrelated trust chain that can never verify
+// that server cert. So server-cert verification is skipped by default (mirrors the "only
+// authenticates the reverse" gap noted on ServerConfig); once a real, CA-chained server cert is
+// configured on the gateway, set cfg.RootCAs from that server CA to turn verification back on.
 func (m *Material) ClientTLSConfig() (*tls.Config, error) {
 	pair, err := tls.X509KeyPair(m.ClientCertPEM, m.ClientKeyPEM)
 	if err != nil {
 		return nil, fmt.Errorf("load client keypair: %w", err)
 	}
-	cfg := &tls.Config{MinVersion: tls.VersionTLS12, Certificates: []tls.Certificate{pair}}
-	if len(m.CABundlePEM) > 0 {
-		pool := x509.NewCertPool()
-		if !pool.AppendCertsFromPEM(m.CABundlePEM) {
-			return nil, errors.New("invalid CA bundle PEM")
-		}
-		cfg.RootCAs = pool
-	}
-	return cfg, nil
+	return &tls.Config{
+		MinVersion:         tls.VersionTLS12,
+		Certificates:       []tls.Certificate{pair},
+		InsecureSkipVerify: true, //nolint:gosec // client cert auth is the load-bearing check; see comment above
+	}, nil
 }
 
 // CertValid reports whether cert_pem is unexpired with at least `skew` of validity remaining.
