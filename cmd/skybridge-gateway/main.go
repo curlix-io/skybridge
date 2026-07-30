@@ -55,6 +55,10 @@ func main() {
 		if err != nil {
 			logger.Fatal(err)
 		}
+		if cfg.ClientProxyProtocol {
+			ln = gateway.WrapProxyProtocol(ln, 0)
+			logger.Printf("skybridge-gateway: client listener %s expects PROXY protocol (NLB client-IP passthrough)", cl.Addr)
+		}
 		logger.Printf("skybridge-gateway: client listener %s -> org %q target %q", cl.Addr, cl.OrgID, cl.Target)
 		go func() {
 			errs <- gw.ListenClients(ctx, ln, cl.OrgID, cl.Target)
