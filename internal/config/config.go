@@ -179,17 +179,17 @@ type Edge struct {
 	AWSExternalID    string
 	AWSBinary        string
 
-// Studio execution agent (Query Studio dispatch — curlix.studiogateway.v1 on :7200).
-	StudioGateway        string // SKYBRIDGE_STUDIO_GATEWAY host:port
-	StudioEnrollGateway  string // SKYBRIDGE_STUDIO_ENROLL_GATEWAY (defaults to StudioGateway)
+	// Studio execution agent (Query Studio dispatch — curlix.studiogateway.v1 on :7200).
+	StudioGateway         string // SKYBRIDGE_STUDIO_GATEWAY host:port
+	StudioEnrollGateway   string // SKYBRIDGE_STUDIO_ENROLL_GATEWAY (defaults to StudioGateway)
 	StudioEnrollmentToken string
-	StudioAgentID        string
-	StudioMaxSessions    int
-	StudioTargetsJSON    string
-	StudioDBUser         string
-	StudioDBPassword     string
-	StudioTLSDir         string
-	StudioTrustDomain    string
+	StudioAgentID         string
+	StudioMaxSessions     int
+	StudioTargetsJSON     string
+	StudioDBUser          string
+	StudioDBPassword      string
+	StudioTLSDir          string
+	StudioTrustDomain     string
 
 	// Optional co-located wire proxy. When non-empty the edge also runs the DB proxy (see Agent).
 	WireProxy Agent
@@ -198,31 +198,31 @@ type Edge struct {
 // LoadEdge reads the unified edge config from the environment.
 func LoadEdge() Edge {
 	return Edge{
-		GatewayAddr:      env("SKYBRIDGE_EDGE_GATEWAY", env("SKYBRIDGE_GATEWAY", "")),
-		TenantID:         env("SKYBRIDGE_ORG_ID", ""),
-		EdgeID:           env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", "")),
-		Token:            env("SKYBRIDGE_TOKEN", ""),
-		Insecure:         truthy(env("SKYBRIDGE_EDGE_INSECURE", "")),
-		CABundle:         pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE"),
-		TLSDir:           env("SKYBRIDGE_TLS_DIR", ""),
-		EnrollTarget:     env("SKYBRIDGE_ENROLL_GATEWAY", ""),
-		EnrollToken:      env("SKYBRIDGE_ENROLLMENT_TOKEN", ""),
-		TrustDomain:      env("SKYBRIDGE_SPIFFE_TRUST_DOMAIN", ""),
-		AWSRegion:        env("SKYBRIDGE_AWS_REGION", ""),
-		AWSAssumeRoleARN: env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
-		AWSExternalID:    env("SKYBRIDGE_AWS_EXTERNAL_ID", ""),
-		AWSBinary:        env("SKYBRIDGE_AWS_BINARY", ""),
-		StudioGateway:        env("SKYBRIDGE_STUDIO_GATEWAY", ""),
-		StudioEnrollGateway:  env("SKYBRIDGE_STUDIO_ENROLL_GATEWAY", ""),
+		GatewayAddr:           env("SKYBRIDGE_EDGE_GATEWAY", env("SKYBRIDGE_GATEWAY", "")),
+		TenantID:              env("SKYBRIDGE_ORG_ID", ""),
+		EdgeID:                env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", "")),
+		Token:                 env("SKYBRIDGE_TOKEN", ""),
+		Insecure:              truthy(env("SKYBRIDGE_EDGE_INSECURE", "")),
+		CABundle:              pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE"),
+		TLSDir:                env("SKYBRIDGE_TLS_DIR", ""),
+		EnrollTarget:          env("SKYBRIDGE_ENROLL_GATEWAY", ""),
+		EnrollToken:           env("SKYBRIDGE_ENROLLMENT_TOKEN", ""),
+		TrustDomain:           env("SKYBRIDGE_SPIFFE_TRUST_DOMAIN", ""),
+		AWSRegion:             env("SKYBRIDGE_AWS_REGION", ""),
+		AWSAssumeRoleARN:      env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
+		AWSExternalID:         env("SKYBRIDGE_AWS_EXTERNAL_ID", ""),
+		AWSBinary:             env("SKYBRIDGE_AWS_BINARY", ""),
+		StudioGateway:         env("SKYBRIDGE_STUDIO_GATEWAY", ""),
+		StudioEnrollGateway:   env("SKYBRIDGE_STUDIO_ENROLL_GATEWAY", ""),
 		StudioEnrollmentToken: env("SKYBRIDGE_STUDIO_ENROLLMENT_TOKEN", ""),
-		StudioAgentID:        env("SKYBRIDGE_STUDIO_AGENT_ID", env("SKYBRIDGE_EDGE_ID", "")),
-		StudioMaxSessions:    atoiDefault(env("SKYBRIDGE_STUDIO_MAX_SESSIONS", "8"), 8),
-		StudioTargetsJSON:    env("SKYBRIDGE_STUDIO_TARGETS", ""),
-		StudioDBUser:         env("SKYBRIDGE_STUDIO_DB_USER", ""),
-		StudioDBPassword:     env("SKYBRIDGE_STUDIO_DB_PASSWORD", ""),
-		StudioTLSDir:         env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
-		StudioTrustDomain:    env("SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN", "curlix.studio-agent"),
-		WireProxy:        LoadAgent(),
+		StudioAgentID:         env("SKYBRIDGE_STUDIO_AGENT_ID", env("SKYBRIDGE_EDGE_ID", "")),
+		StudioMaxSessions:     atoiDefault(env("SKYBRIDGE_STUDIO_MAX_SESSIONS", "8"), 8),
+		StudioTargetsJSON:     env("SKYBRIDGE_STUDIO_TARGETS", ""),
+		StudioDBUser:          env("SKYBRIDGE_STUDIO_DB_USER", ""),
+		StudioDBPassword:      env("SKYBRIDGE_STUDIO_DB_PASSWORD", ""),
+		StudioTLSDir:          env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
+		StudioTrustDomain:     env("SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN", "curlix.studio-agent"),
+		WireProxy:             LoadAgent(),
 	}
 }
 
@@ -258,6 +258,15 @@ type Gateway struct {
 	RequireOrgID      bool   // reject agent registration / client relay without organization_id
 	ClientConnPerMin  int    // max new native client connections per client IP per minute (0 = unlimited)
 	OrgConnPerMin     int    // max new native client connections per organization_id per minute (0 = unlimited)
+
+	// ClientProxyProtocol: when true, every native-client listener expects a PROXY protocol v1/v2
+	// header on each accepted connection (as sent by an AWS NLB target group with proxy_protocol_v2
+	// enabled) and recovers the real client IP from it instead of trusting RemoteAddr() directly —
+	// otherwise, behind an NLB, RemoteAddr() is always the NLB's own VPC-internal address, and the
+	// per-org wire-admit IP allowlist check can never match a real client. Only enable this when the
+	// NLB target group in front of these listeners actually sends PROXY protocol; a bare TCP client
+	// connecting directly (no NLB) will fail the handshake and be dropped.
+	ClientProxyProtocol bool
 }
 
 // ClientListener binds a local listen address to an org's registered target name. OrgID selects
@@ -282,17 +291,18 @@ func LoadGateway() Gateway {
 		clientConnPerMin = 60
 	}
 	return Gateway{
-		AgentListen:       env("SKYBRIDGE_GW_AGENT_LISTEN", ":8010"),
-		AuthToken:         env("SKYBRIDGE_GW_TOKEN", ""),
-		Clients:           parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
-		ControlPlaneURL:   cpURL,
-		ControlPlaneToken: env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
-		SessionPath:       env("SKYBRIDGE_GW_SESSION_PATH", "/api/v1/data-studio/studio/native-sessions"),
-		WireAdmitPath:     env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", "/api/v1/data-studio/studio/native-access/wire-admit"),
-		WireTargetPath:    env("SKYBRIDGE_GW_WIRE_TARGET_PATH", "/api/v1/studio/native-access/wire-targets"),
-		RequireOrgID:      requireOrgID,
-		ClientConnPerMin:  clientConnPerMin,
-		OrgConnPerMin:     orgConnPerMin,
+		AgentListen:         env("SKYBRIDGE_GW_AGENT_LISTEN", ":8010"),
+		AuthToken:           env("SKYBRIDGE_GW_TOKEN", ""),
+		Clients:             parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
+		ControlPlaneURL:     cpURL,
+		ControlPlaneToken:   env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
+		SessionPath:         env("SKYBRIDGE_GW_SESSION_PATH", "/api/v1/data-studio/studio/native-sessions"),
+		WireAdmitPath:       env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", "/api/v1/data-studio/studio/native-access/wire-admit"),
+		WireTargetPath:      env("SKYBRIDGE_GW_WIRE_TARGET_PATH", "/api/v1/studio/native-access/wire-targets"),
+		RequireOrgID:        requireOrgID,
+		ClientConnPerMin:    clientConnPerMin,
+		OrgConnPerMin:       orgConnPerMin,
+		ClientProxyProtocol: truthy(env("SKYBRIDGE_GW_CLIENT_PROXY_PROTOCOL", "")),
 	}
 }
 
