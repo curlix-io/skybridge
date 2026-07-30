@@ -11,6 +11,7 @@ package gateway
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"io"
 	"log"
@@ -21,6 +22,7 @@ import (
 	"time"
 
 	"github.com/curlix-io/skybridge/internal/tunnel"
+	"github.com/curlix-io/skybridge/internal/wiremtls"
 )
 
 // ErrNoAgent is returned when no registered agent can serve a requested target.
@@ -128,7 +130,11 @@ func (g *Gateway) ListenAgents(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// ServeAgent handles one agent connection: register, then track liveness until it disconnects.
+// ServeAgent handles one agent connection: register, then track liveness until it disconnects. When
+// conn is a *tls.Conn with a verified client cert (the gateway's agent listener wraps ln in a
+// wiremtls.ServerConfig-based tls.Config), the cert's SPIFFE identity is authoritative and the
+// plaintext bearer token check is skipped entirely — mirrors the connector gateway's mTLS-vs-bearer
+// dual mode (see integrations/skybridge-gateway/src/curlix/connector/gateway.py:Connect).
 func (g *Gateway) ServeAgent(conn net.Conn) error {
 	sess := tunnel.Server(conn)
 	defer sess.Close()
@@ -141,7 +147,20 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "expected register"})
 		return errors.New("gateway: first control was not register")
 	}
-	if g.authToken != "" && reg.Token != g.authToken {
+
+	certTenant, certAgentID, mtlsVerified := peerWireIdentity(conn)
+	if mtlsVerified {
+		if reg.OrgID != "" && reg.OrgID != certTenant {
+			_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "org_id does not match client certificate"})
+			return errors.New("gateway: agent org_id does not match client certificate")
+		}
+		if reg.AgentID != "" && reg.AgentID != certAgentID {
+			_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "agent_id does not match client certificate"})
+			return errors.New("gateway: agent agent_id does not match client certificate")
+		}
+		reg.OrgID = certTenant
+		reg.AgentID = certAgentID
+	} else if g.authToken != "" && reg.Token != g.authToken {
 		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "unauthorized"})
 		return errors.New("gateway: agent failed authentication")
 	}
@@ -163,12 +182,34 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 	}
 	g.log.Printf("agent %q registered (org=%q)", ac.id, ac.orgID)
 
+	// The agent's readLoop enforces tunnel.IdleTimeout waiting for ANY frame; without a gateway-side
+	// heartbeat, an agent with no active client relays would see nothing but its own outbound
+	// heartbeats and could sit fine — but a truly idle gateway->agent direction (no client streams
+	// opened) still needs a periodic frame so the agent's deadline never starves. Mirrors agent.go's
+	// heartbeatLoop so both directions detect an ungracefully-killed peer within IdleTimeout.
+	go agentHeartbeatLoop(sess)
+
 	for {
 		if _, err := sess.NextControl(); err != nil {
 			return err
 		}
 		// heartbeats (and future control messages) keep the loop alive; the registry stays valid
 		// until the session closes and NextControl returns an error.
+	}
+}
+
+func agentHeartbeatLoop(sess *tunnel.Session) {
+	t := time.NewTicker(tunnel.IdleTimeout / 3)
+	defer t.Stop()
+	for {
+		select {
+		case <-sess.Closed():
+			return
+		case <-t.C:
+			if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindHeartbeat}); err != nil {
+				return
+			}
+		}
 	}
 }
 
@@ -391,4 +432,21 @@ func relayCounted(client, stream net.Conn, clientTap io.Writer) (up, down int64,
 func closeOnDone(ctx context.Context, ln net.Listener) {
 	<-ctx.Done()
 	_ = ln.Close()
+}
+
+// peerWireIdentity extracts (tenant_id, agent_id) from conn's verified TLS client certificate, when
+// conn is a *tls.Conn that completed a handshake with a peer cert (ServerConfig requires and
+// verifies one against the wire mTLS CA — a connection reaching here with a peer cert is already
+// CA-verified, only the SPIFFE SAN needs parsing). Returns ok=false for plain (non-TLS) connections,
+// i.e. the legacy bearer-token tunnel.
+func peerWireIdentity(conn net.Conn) (tenant, agentID string, ok bool) {
+	tconn, isTLS := conn.(*tls.Conn)
+	if !isTLS {
+		return "", "", false
+	}
+	state := tconn.ConnectionState()
+	if len(state.PeerCertificates) == 0 {
+		return "", "", false
+	}
+	return wiremtls.IdentityFromCert(state.PeerCertificates[0])
 }

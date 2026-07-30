@@ -78,6 +78,16 @@ type Agent struct {
 	UpstreamTLSMode       string // SKYBRIDGE_UPSTREAM_TLS
 	UpstreamTLSCAPEM      []byte // SKYBRIDGE_UPSTREAM_TLS_CA_PEM / _FILE (trust roots for verify-* modes)
 	UpstreamTLSServerName string // SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME (override the verified hostname/SNI)
+
+	// Wire-agent mTLS to the gateway tunnel (Phase 2, docs/design/identity-aware-network-access.md).
+	// When WireMtlsEnrollURL (or a cached cert under WireMtlsTLSDir) is available, RunTunnel dials
+	// the gateway over TLS presenting this agent's client cert instead of the plaintext
+	// SKYBRIDGE_TOKEN shared secret. Falls back to bearer-token tunnel mode when unset.
+	WireMtlsEnrollURL   string // SKYBRIDGE_WIRE_MTLS_ENROLL_URL (control-plane origin, e.g. https://app.curlix.io)
+	WireMtlsEnrollToken string // SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN (one-time token to bootstrap the first cert)
+	WireMtlsTLSDir      string // SKYBRIDGE_WIRE_MTLS_TLS_DIR (persists ca.pem/client.crt/client.key)
+	WireMtlsCABundlePEM []byte // SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM / _FILE (pins the enroll call's server TLS)
+	WireMtlsTrustDomain string // SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN (cosmetic; default wiremtls.DefaultTrustDomain)
 }
 
 // ClientTLSConfigured reports whether client-side TLS termination should be enabled.
@@ -127,8 +137,20 @@ func LoadAgent() Agent {
 		UpstreamTLSMode:       strings.ToLower(env("SKYBRIDGE_UPSTREAM_TLS", "")),
 		UpstreamTLSCAPEM:      pemFromEnv("SKYBRIDGE_UPSTREAM_TLS_CA_PEM", "SKYBRIDGE_UPSTREAM_TLS_CA_FILE"),
 		UpstreamTLSServerName: env("SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME", ""),
+
+		WireMtlsEnrollURL:   env("SKYBRIDGE_WIRE_MTLS_ENROLL_URL", ""),
+		WireMtlsEnrollToken: env("SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN", ""),
+		WireMtlsTLSDir:      env("SKYBRIDGE_WIRE_MTLS_TLS_DIR", ""),
+		WireMtlsCABundlePEM: pemFromEnv("SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_FILE"),
+		WireMtlsTrustDomain: env("SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN", ""),
 	}
 	return a
+}
+
+// WireMtlsConfigured reports whether the agent should attempt mTLS enrollment for the gateway
+// tunnel instead of (or on top of) the legacy bearer token.
+func (a Agent) WireMtlsConfigured() bool {
+	return strings.TrimSpace(a.WireMtlsEnrollURL) != ""
 }
 
 func atoiDefault(raw string, def int) int {
@@ -267,6 +289,20 @@ type Gateway struct {
 	// NLB target group in front of these listeners actually sends PROXY protocol; a bare TCP client
 	// connecting directly (no NLB) will fail the handshake and be dropped.
 	ClientProxyProtocol bool
+
+	// Wire-agent mTLS server side (Phase 2, docs/design/identity-aware-network-access.md). When a CA
+	// bundle is configured, ListenAgents wraps the agent listener in a tls.Config that requires and
+	// verifies agent client certs — the verified cert's SPIFFE identity replaces the plaintext
+	// SKYBRIDGE_GW_TOKEN check in ServeAgent. Falls back to bearer-token mode when unset.
+	WireMtlsCABundlePEM []byte // SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM / _FILE
+	WireMtlsServerCert  []byte // SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM / _FILE (self-signed generated if empty)
+	WireMtlsServerKey   []byte // SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM / _FILE
+}
+
+// WireMtlsConfigured reports whether the gateway should require agent client certs on its agent
+// listener instead of (or on top of) the legacy bearer token.
+func (g Gateway) WireMtlsConfigured() bool {
+	return len(g.WireMtlsCABundlePEM) > 0
 }
 
 // ClientListener binds a local listen address to an org's registered target name. OrgID selects
@@ -298,11 +334,14 @@ func LoadGateway() Gateway {
 		ControlPlaneToken:   env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
 		SessionPath:         env("SKYBRIDGE_GW_SESSION_PATH", "/api/v1/data-studio/studio/native-sessions"),
 		WireAdmitPath:       env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", "/api/v1/data-studio/studio/native-access/wire-admit"),
-		WireTargetPath:      env("SKYBRIDGE_GW_WIRE_TARGET_PATH", "/api/v1/studio/native-access/wire-targets"),
+		WireTargetPath:      env("SKYBRIDGE_GW_WIRE_TARGET_PATH", "/api/v1/data-studio/studio/native-access/wire-targets"),
 		RequireOrgID:        requireOrgID,
 		ClientConnPerMin:    clientConnPerMin,
 		OrgConnPerMin:       orgConnPerMin,
 		ClientProxyProtocol: truthy(env("SKYBRIDGE_GW_CLIENT_PROXY_PROTOCOL", "")),
+		WireMtlsCABundlePEM: pemFromEnv("SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_GW_MTLS_CA_BUNDLE_FILE"),
+		WireMtlsServerCert:  pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM", "SKYBRIDGE_GW_MTLS_SERVER_CERT_FILE"),
+		WireMtlsServerKey:   pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM", "SKYBRIDGE_GW_MTLS_SERVER_KEY_FILE"),
 	}
 }
 

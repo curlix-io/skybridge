@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"log"
 	"net"
@@ -11,6 +12,7 @@ import (
 
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/gateway"
+	"github.com/curlix-io/skybridge/internal/wiremtls"
 )
 
 func main() {
@@ -43,7 +45,27 @@ func main() {
 	if err != nil {
 		logger.Fatal(err)
 	}
-	logger.Printf("skybridge-gateway: agent endpoint %s", cfg.AgentListen)
+	if cfg.WireMtlsConfigured() {
+		serverCert, serverKey := cfg.WireMtlsServerCert, cfg.WireMtlsServerKey
+		if len(serverCert) == 0 || len(serverKey) == 0 {
+			var genErr error
+			serverCert, serverKey, genErr = wiremtls.GenerateSelfSignedServerCert()
+			if genErr != nil {
+				logger.Fatalf("skybridge-gateway: generating self-signed wire mTLS server cert: %v", genErr)
+			}
+			logger.Printf("skybridge-gateway: WARNING: using an EPHEMERAL self-signed wire mTLS server cert " +
+				"(no SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM/_KEY_PEM). Client cert verification still authenticates " +
+				"agents; provide a real server cert in production so agents can verify the gateway too.")
+		}
+		tlsCfg, tlsErr := wiremtls.ServerConfig(serverCert, serverKey, cfg.WireMtlsCABundlePEM)
+		if tlsErr != nil {
+			logger.Fatalf("skybridge-gateway: wire mTLS server config: %v", tlsErr)
+		}
+		agentLn = tls.NewListener(agentLn, tlsCfg)
+		logger.Printf("skybridge-gateway: agent endpoint %s (mTLS: agent client certs required)", cfg.AgentListen)
+	} else {
+		logger.Printf("skybridge-gateway: agent endpoint %s (bearer-token mode — no SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM configured)", cfg.AgentListen)
+	}
 	go func() { errs <- gw.ListenAgents(ctx, agentLn) }()
 
 	for _, cl := range cfg.Clients {

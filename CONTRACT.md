@@ -238,10 +238,9 @@ Response `200`:
 
 Response `403` carries `{"detail": "..."}`:
 
-- Client IP not on the org allowlist (same copy as HTTP tenant IP denial).
-- Org has **no** Allowed tenant IPs configured when `CURLIX_WIRE_REQUIRE_TENANT_IP_ALLOWLIST=1`
-  (production default for the shared SaaS listener): native wire is denied until an administrator
-  adds at least one CIDR.
+- Client IP not on the org allowlist (same copy as HTTP tenant IP denial). An org with **no**
+  Allowed tenant IPs configured is never denied on that basis alone — an empty allowlist means no
+  IP restriction, not "deny everything."
 
 Agents **must** register with a non-empty `org_id` when `SKYBRIDGE_GW_REQUIRE_ORG_ID=1` (default when
 `SKYBRIDGE_GW_CONTROL_PLANE_URL` is set). The gateway rejects registration and client relays otherwise.
