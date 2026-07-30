@@ -95,6 +95,12 @@ type Agent struct {
 	// across task restarts, and a fresh single-use enroll token can't be minted on every restart.
 	WireMtlsClientCertPEM []byte // SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM / _FILE
 	WireMtlsClientKeyPEM  []byte // SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_PEM / _FILE
+
+	// AWS-IAM-authenticated enrollment (Vault AWS-auth / aws-iam-authenticator pattern): the agent
+	// presigns its own sts:GetCallerIdentity with ambient credentials (e.g. an ECS task role) and
+	// exchanges that for an enroll token — no static secret, no human minting a token, safe to call
+	// on every renewal/restart. Takes priority over WireMtlsClientCertPEM/WireMtlsEnrollToken when set.
+	WireMtlsIamAuthEnabled bool // SKYBRIDGE_WIRE_MTLS_IAM_AUTH (truthy)
 }
 
 // ClientTLSConfigured reports whether client-side TLS termination should be enabled.
@@ -153,13 +159,18 @@ func LoadAgent() Agent {
 
 		WireMtlsClientCertPEM: pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_FILE"),
 		WireMtlsClientKeyPEM:  pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_FILE"),
+
+		WireMtlsIamAuthEnabled: truthy(env("SKYBRIDGE_WIRE_MTLS_IAM_AUTH", "")),
 	}
 	return a
 }
 
 // WireMtlsConfigured reports whether the agent should attempt mTLS for the gateway tunnel instead
-// of (or on top of) the legacy bearer token — either via a pre-issued cert or the enroll flow.
+// of (or on top of) the legacy bearer token — via IAM auth, a pre-issued cert, or the enroll flow.
 func (a Agent) WireMtlsConfigured() bool {
+	if a.WireMtlsIamAuthEnabled {
+		return true
+	}
 	if len(a.WireMtlsClientCertPEM) > 0 && len(a.WireMtlsClientKeyPEM) > 0 {
 		return true
 	}

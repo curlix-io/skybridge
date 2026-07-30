@@ -333,15 +333,48 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 	var wireTLS *tls.Config
 	hasPresetCert := len(cfg.WireMtlsClientCertPEM) > 0 && len(cfg.WireMtlsClientKeyPEM) > 0
 	if cfg.WireMtlsConfigured() {
-		if hasPresetCert {
+		switch {
+		case cfg.WireMtlsIamAuthEnabled:
+			logger.Printf("skybridge-agent[tunnel]: wire mTLS via AWS IAM auth configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL)
+		case hasPresetCert:
 			logger.Printf("skybridge-agent[tunnel]: wire mTLS configured with a pre-issued client cert — will present it instead of the bearer token.")
-		} else {
+		default:
 			logger.Printf("skybridge-agent[tunnel]: wire mTLS enrollment configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL)
 		}
 	}
 
 	for ctx.Err() == nil {
-		if hasPresetCert {
+		if cfg.WireMtlsIamAuthEnabled {
+			material, merr := wiremtls.EnsureMaterialViaIAM(ctx,
+				wiremtls.IamEnrollConfig{BaseURL: cfg.WireMtlsEnrollURL, TenantID: cfg.OrgID, AgentID: cfg.AgentID},
+				wiremtls.EnrollConfig{
+					BaseURL:     cfg.WireMtlsEnrollURL,
+					TenantID:    cfg.OrgID,
+					AgentID:     cfg.AgentID,
+					TrustDomain: cfg.WireMtlsTrustDomain,
+					TLSDir:      cfg.WireMtlsTLSDir,
+					CABundlePEM: cfg.WireMtlsCABundlePEM,
+				},
+			)
+			if merr != nil {
+				logger.Printf("wire mTLS IAM enroll: %v (retrying)", merr)
+				if !sleep(ctx, 3*time.Second) {
+					return nil
+				}
+				continue
+			}
+			if material != nil {
+				tlsCfg, terr := material.ClientTLSConfig()
+				if terr != nil {
+					logger.Printf("wire mTLS material invalid: %v (retrying)", terr)
+					if !sleep(ctx, 3*time.Second) {
+						return nil
+					}
+					continue
+				}
+				wireTLS = tlsCfg
+			}
+		} else if hasPresetCert {
 			material := &wiremtls.Material{
 				CABundlePEM:   cfg.WireMtlsCABundlePEM,
 				ClientCertPEM: cfg.WireMtlsClientCertPEM,
