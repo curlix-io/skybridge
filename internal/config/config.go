@@ -88,6 +88,11 @@ type Agent struct {
 	WireMtlsTLSDir      string // SKYBRIDGE_WIRE_MTLS_TLS_DIR (persists ca.pem/client.crt/client.key)
 	WireMtlsCABundlePEM []byte // SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM / _FILE (pins the enroll call's server TLS)
 	WireMtlsTrustDomain string // SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN (cosmetic; default wiremtls.DefaultTrustDomain)
+	// WireMtlsIdentitySecretARN mirrors the issued cert to this AWS Secrets Manager secret (see
+	// certstore package) so a replaced task recovers its identity without a fresh enroll token.
+	// WireMtlsIamAuthEnabled below is a stronger alternative for this same problem — no static
+	// secret at all — and takes priority when both are set.
+	WireMtlsIdentitySecretARN string // SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN
 
 	// Pre-issued client cert/key (e.g. injected from Secrets Manager), skipping the one-time-token
 	// enroll call entirely. Takes priority over WireMtlsEnrollToken/WireMtlsTLSDir — useful on
@@ -151,11 +156,12 @@ func LoadAgent() Agent {
 		UpstreamTLSCAPEM:      pemFromEnv("SKYBRIDGE_UPSTREAM_TLS_CA_PEM", "SKYBRIDGE_UPSTREAM_TLS_CA_FILE"),
 		UpstreamTLSServerName: env("SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME", ""),
 
-		WireMtlsEnrollURL:   env("SKYBRIDGE_WIRE_MTLS_ENROLL_URL", ""),
-		WireMtlsEnrollToken: env("SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN", ""),
-		WireMtlsTLSDir:      env("SKYBRIDGE_WIRE_MTLS_TLS_DIR", ""),
-		WireMtlsCABundlePEM: pemFromEnv("SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_FILE"),
-		WireMtlsTrustDomain: env("SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN", ""),
+		WireMtlsEnrollURL:         env("SKYBRIDGE_WIRE_MTLS_ENROLL_URL", ""),
+		WireMtlsEnrollToken:       env("SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN", ""),
+		WireMtlsTLSDir:            env("SKYBRIDGE_WIRE_MTLS_TLS_DIR", ""),
+		WireMtlsCABundlePEM:       pemFromEnv("SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_FILE"),
+		WireMtlsTrustDomain:       env("SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN", ""),
+		WireMtlsIdentitySecretARN: env("SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN", ""),
 
 		WireMtlsClientCertPEM: pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_FILE"),
 		WireMtlsClientKeyPEM:  pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_FILE"),
@@ -218,6 +224,10 @@ type Edge struct {
 	EnrollTarget string // Enroll endpoint host:port (defaults to GatewayAddr)
 	EnrollToken  string // one-time enrollment token
 	TrustDomain  string // SPIFFE trust domain placed in the CSR SAN (cosmetic)
+	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a
+	// replaced ECS task recovers its identity instead of re-enrolling with an already-used one-time
+	// token. See SKYBRIDGE_IDENTITY_SECRET_ARN.
+	IdentitySecretARN string
 
 	// Live read-only AWS access (executed locally at the edge).
 	AWSRegion        string
@@ -236,6 +246,9 @@ type Edge struct {
 	StudioDBPassword      string
 	StudioTLSDir          string
 	StudioTrustDomain     string
+	// StudioIdentitySecretARN mirrors StudioTLSDir's cert to Secrets Manager. See
+	// SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN.
+	StudioIdentitySecretARN string
 
 	// Optional co-located wire proxy. When non-empty the edge also runs the DB proxy (see Agent).
 	WireProxy Agent
@@ -244,31 +257,33 @@ type Edge struct {
 // LoadEdge reads the unified edge config from the environment.
 func LoadEdge() Edge {
 	return Edge{
-		GatewayAddr:           env("SKYBRIDGE_EDGE_GATEWAY", env("SKYBRIDGE_GATEWAY", "")),
-		TenantID:              env("SKYBRIDGE_ORG_ID", ""),
-		EdgeID:                env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", "")),
-		Token:                 env("SKYBRIDGE_TOKEN", ""),
-		Insecure:              truthy(env("SKYBRIDGE_EDGE_INSECURE", "")),
-		CABundle:              pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE"),
-		TLSDir:                env("SKYBRIDGE_TLS_DIR", ""),
-		EnrollTarget:          env("SKYBRIDGE_ENROLL_GATEWAY", ""),
-		EnrollToken:           env("SKYBRIDGE_ENROLLMENT_TOKEN", ""),
-		TrustDomain:           env("SKYBRIDGE_SPIFFE_TRUST_DOMAIN", ""),
-		AWSRegion:             env("SKYBRIDGE_AWS_REGION", ""),
-		AWSAssumeRoleARN:      env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
-		AWSExternalID:         env("SKYBRIDGE_AWS_EXTERNAL_ID", ""),
-		AWSBinary:             env("SKYBRIDGE_AWS_BINARY", ""),
-		StudioGateway:         env("SKYBRIDGE_STUDIO_GATEWAY", ""),
-		StudioEnrollGateway:   env("SKYBRIDGE_STUDIO_ENROLL_GATEWAY", ""),
-		StudioEnrollmentToken: env("SKYBRIDGE_STUDIO_ENROLLMENT_TOKEN", ""),
-		StudioAgentID:         env("SKYBRIDGE_STUDIO_AGENT_ID", env("SKYBRIDGE_EDGE_ID", "")),
-		StudioMaxSessions:     atoiDefault(env("SKYBRIDGE_STUDIO_MAX_SESSIONS", "8"), 8),
-		StudioTargetsJSON:     env("SKYBRIDGE_STUDIO_TARGETS", ""),
-		StudioDBUser:          env("SKYBRIDGE_STUDIO_DB_USER", ""),
-		StudioDBPassword:      env("SKYBRIDGE_STUDIO_DB_PASSWORD", ""),
-		StudioTLSDir:          env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
-		StudioTrustDomain:     env("SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN", "curlix.studio-agent"),
-		WireProxy:             LoadAgent(),
+		GatewayAddr:             env("SKYBRIDGE_EDGE_GATEWAY", env("SKYBRIDGE_GATEWAY", "")),
+		TenantID:                env("SKYBRIDGE_ORG_ID", ""),
+		EdgeID:                  env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", "")),
+		Token:                   env("SKYBRIDGE_TOKEN", ""),
+		Insecure:                truthy(env("SKYBRIDGE_EDGE_INSECURE", "")),
+		CABundle:                pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE"),
+		TLSDir:                  env("SKYBRIDGE_TLS_DIR", ""),
+		EnrollTarget:            env("SKYBRIDGE_ENROLL_GATEWAY", ""),
+		EnrollToken:             env("SKYBRIDGE_ENROLLMENT_TOKEN", ""),
+		TrustDomain:             env("SKYBRIDGE_SPIFFE_TRUST_DOMAIN", ""),
+		IdentitySecretARN:       env("SKYBRIDGE_IDENTITY_SECRET_ARN", ""),
+		AWSRegion:               env("SKYBRIDGE_AWS_REGION", ""),
+		AWSAssumeRoleARN:        env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
+		AWSExternalID:           env("SKYBRIDGE_AWS_EXTERNAL_ID", ""),
+		AWSBinary:               env("SKYBRIDGE_AWS_BINARY", ""),
+		StudioGateway:           env("SKYBRIDGE_STUDIO_GATEWAY", ""),
+		StudioEnrollGateway:     env("SKYBRIDGE_STUDIO_ENROLL_GATEWAY", ""),
+		StudioEnrollmentToken:   env("SKYBRIDGE_STUDIO_ENROLLMENT_TOKEN", ""),
+		StudioAgentID:           env("SKYBRIDGE_STUDIO_AGENT_ID", env("SKYBRIDGE_EDGE_ID", "")),
+		StudioMaxSessions:       atoiDefault(env("SKYBRIDGE_STUDIO_MAX_SESSIONS", "8"), 8),
+		StudioTargetsJSON:       env("SKYBRIDGE_STUDIO_TARGETS", ""),
+		StudioDBUser:            env("SKYBRIDGE_STUDIO_DB_USER", ""),
+		StudioDBPassword:        env("SKYBRIDGE_STUDIO_DB_PASSWORD", ""),
+		StudioTLSDir:            env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
+		StudioTrustDomain:       env("SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN", "curlix.studio-agent"),
+		StudioIdentitySecretARN: env("SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN", ""),
+		WireProxy:               LoadAgent(),
 	}
 }
 

@@ -11,8 +11,8 @@ import (
 	"sync"
 	"time"
 
-	studiov1 "github.com/curlix-io/skybridge/internal/genpb/curlix/studiogateway/v1"
 	"github.com/curlix-io/skybridge/internal/edge/dbquery"
+	studiov1 "github.com/curlix-io/skybridge/internal/genpb/curlix/studiogateway/v1"
 	"github.com/curlix-io/skybridge/internal/mask"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
@@ -30,23 +30,27 @@ type tlsMaterial struct {
 
 // Config is the Studio Gateway call-home client configuration.
 type Config struct {
-	Target       string
-	TenantID     string
-	AgentID      string
-	Token        string
-	Insecure     bool
-	Reconnect    bool
-	MaxBackoff   time.Duration
-	MaxSessions  int
-	Targets      []Target
-	DBUser       string // fallback when target.user empty
-	DBPassword   string // fallback when target.password empty
-	Masker       mask.Masker
-	CABundlePEM  []byte
-	TLSDir       string
-	EnrollTarget string
-	EnrollToken  string
-	TrustDomain  string
+	Target      string
+	TenantID    string
+	AgentID     string
+	Token       string
+	Insecure    bool
+	Reconnect   bool
+	MaxBackoff  time.Duration
+	MaxSessions int
+	Targets     []Target
+	DBUser      string // fallback when target.user empty
+	DBPassword  string // fallback when target.password empty
+	Masker      mask.Masker
+	CABundlePEM []byte
+	TLSDir      string
+	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a
+	// replaced task (fresh disk) recovers its identity instead of re-enrolling with an already-used
+	// one-time token. See SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN.
+	IdentitySecretARN string
+	EnrollTarget      string
+	EnrollToken       string
+	TrustDomain       string
 }
 
 // Client maintains the Studio Gateway Connect stream.
@@ -135,9 +139,9 @@ func (c *Client) serve(ctx context.Context, client studiov1.StudioGatewayClient,
 	bindings := make([]*studiov1.TargetBinding, 0, len(c.cfg.Targets))
 	for _, t := range c.cfg.Targets {
 		bindings = append(bindings, &studiov1.TargetBinding{
-			DbType:        t.DBType,
-			AwsAccountId:  t.AWSAccountID,
-			DatabaseName:  t.DatabaseName,
+			DbType:       t.DBType,
+			AwsAccountId: t.AWSAccountID,
+			DatabaseName: t.DatabaseName,
 		})
 	}
 	if err := ss.send(&studiov1.AgentMessage{

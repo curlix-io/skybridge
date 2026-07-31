@@ -44,22 +44,23 @@ func main() {
 
 	if cfg.StudioEnabled() {
 		studioCfg := studiotransport.Config{
-			Target:       cfg.StudioGateway,
-			TenantID:     cfg.TenantID,
-			AgentID:      cfg.StudioAgentID,
-			Token:        cfg.Token,
-			Insecure:     cfg.Insecure,
-			Reconnect:    true,
-			MaxSessions:  cfg.StudioMaxSessions,
-			Targets:      studiotransport.ParseTargets(cfg.StudioTargetsJSON),
-			DBUser:       cfg.StudioDBUser,
-			DBPassword:   cfg.StudioDBPassword,
-			Masker:       masker,
-			CABundlePEM:  cfg.CABundle,
-			TLSDir:       cfg.StudioTLSDir,
-			EnrollTarget: cfg.StudioEnrollGateway,
-			EnrollToken:  cfg.StudioEnrollmentToken,
-			TrustDomain:  cfg.StudioTrustDomain,
+			Target:            cfg.StudioGateway,
+			TenantID:          cfg.TenantID,
+			AgentID:           cfg.StudioAgentID,
+			Token:             cfg.Token,
+			Insecure:          cfg.Insecure,
+			Reconnect:         true,
+			MaxSessions:       cfg.StudioMaxSessions,
+			Targets:           studiotransport.ParseTargets(cfg.StudioTargetsJSON),
+			DBUser:            cfg.StudioDBUser,
+			DBPassword:        cfg.StudioDBPassword,
+			Masker:            masker,
+			CABundlePEM:       cfg.CABundle,
+			TLSDir:            cfg.StudioTLSDir,
+			IdentitySecretARN: cfg.StudioIdentitySecretARN,
+			EnrollTarget:      cfg.StudioEnrollGateway,
+			EnrollToken:       cfg.StudioEnrollmentToken,
+			TrustDomain:       cfg.StudioTrustDomain,
 		}
 		if studioCfg.TLSDir == "" {
 			studioCfg.TLSDir = cfg.TLSDir
@@ -97,17 +98,18 @@ func main() {
 	})
 
 	client := transport.New(transport.Config{
-		Target:       cfg.GatewayAddr,
-		TenantID:     cfg.TenantID,
-		ConnectorID:  cfg.EdgeID,
-		Token:        cfg.Token,
-		Insecure:     cfg.Insecure,
-		Reconnect:    true,
-		CABundlePEM:  cfg.CABundle,
-		TLSDir:       cfg.TLSDir,
-		EnrollTarget: cfg.EnrollTarget,
-		EnrollToken:  cfg.EnrollToken,
-		TrustDomain:  cfg.TrustDomain,
+		Target:            cfg.GatewayAddr,
+		TenantID:          cfg.TenantID,
+		ConnectorID:       cfg.EdgeID,
+		Token:             cfg.Token,
+		Insecure:          cfg.Insecure,
+		Reconnect:         true,
+		CABundlePEM:       cfg.CABundle,
+		TLSDir:            cfg.TLSDir,
+		IdentitySecretARN: cfg.IdentitySecretARN,
+		EnrollTarget:      cfg.EnrollTarget,
+		EnrollToken:       cfg.EnrollToken,
+		TrustDomain:       cfg.TrustDomain,
 	}, reg, logger)
 
 	if err := client.Run(ctx); err != nil && ctx.Err() == nil {

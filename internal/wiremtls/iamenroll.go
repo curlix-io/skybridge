@@ -12,6 +12,8 @@ import (
 
 	awsconfig "github.com/aws/aws-sdk-go-v2/config"
 	"github.com/aws/aws-sdk-go-v2/service/sts"
+
+	"github.com/curlix-io/skybridge/internal/certstore"
 )
 
 // IamEnrollConfig configures the AWS-IAM-authenticated enroll-token bootstrap: the agent presigns
@@ -116,10 +118,12 @@ const IamEnrollTokenValidFor = time.Hour
 // the operability gap where a single-use human-minted token can't survive Fargate's ephemeral
 // storage across restarts/redeploys.
 func EnsureMaterialViaIAM(ctx context.Context, iamCfg IamEnrollConfig, cfg EnrollConfig) (*Material, error) {
-	_, certPath, keyPath := tlsPaths(cfg.TLSDir)
-	cachedCert := readFileOrNil(certPath)
-	cachedKey := readFileOrNil(keyPath)
-	if len(cachedCert) > 0 && len(cachedKey) > 0 && CertValid(cachedCert, CertRenewSkew) {
+	store := certstore.FromEnv(tlsDir(cfg.TLSDir), cfg.IdentitySecretARN)
+	stored, err := store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if stored != nil && CertValid(stored.ClientCertPEM, CertRenewSkew) {
 		return EnsureMaterial(ctx, cfg)
 	}
 

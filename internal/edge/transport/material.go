@@ -5,13 +5,12 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
-	"os"
-	"path/filepath"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 
+	"github.com/curlix-io/skybridge/internal/certstore"
 	connectorv1 "github.com/curlix-io/skybridge/internal/genpb/curlix/connector/v1"
 )
 
@@ -26,38 +25,40 @@ type tlsMaterial struct {
 // certRenewSkew is how far ahead of expiry a cert is considered too stale to reuse (re-enroll).
 const certRenewSkew = time.Hour
 
-// ensureTLSMaterial loads valid mTLS material from disk, enrolling via the gateway if necessary.
-// Returns (nil, nil) when no CA is configured, meaning the caller should use bearer mode.
+// ensureTLSMaterial loads valid mTLS material from the identity store, enrolling via the gateway
+// if necessary. Returns (nil, nil) when no CA is configured, meaning the caller should use bearer
+// mode.
 func (c *Client) ensureTLSMaterial(ctx context.Context) (*tlsMaterial, error) {
 	ca := c.cfg.CABundlePEM
 	if len(ca) == 0 && c.cfg.TLSDir == "" {
 		return nil, nil // no mTLS configured at all -> bearer
 	}
 
-	caPath, certPath, keyPath := c.tlsPaths()
-	storedCA := readFileOrNil(caPath)
-	cert := readFileOrNil(certPath)
-	key := readFileOrNil(keyPath)
+	store := certstore.FromEnv(c.tlsDir(), c.cfg.IdentitySecretARN)
+	stored, err := store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	pickCA := func() []byte {
-		if len(storedCA) > 0 {
-			return storedCA
+		if stored != nil && len(stored.CABundlePEM) > 0 {
+			return stored.CABundlePEM
 		}
 		return ca
 	}
 
-	if len(cert) > 0 && len(key) > 0 && certValid(cert, certRenewSkew) {
-		return &tlsMaterial{caBundlePEM: pickCA(), clientCertPEM: cert, clientKeyPEM: key}, nil
+	if stored != nil && certValid(stored.ClientCertPEM, certRenewSkew) {
+		return &tlsMaterial{caBundlePEM: pickCA(), clientCertPEM: stored.ClientCertPEM, clientKeyPEM: stored.ClientKeyPEM}, nil
 	}
 
 	if len(ca) == 0 {
-		return nil, nil // no CA -> bearer (disk may hold a stale cert we can't trust)
+		return nil, nil // no CA -> bearer (stored material may be stale/untrusted)
 	}
 
 	if c.cfg.EnrollToken == "" {
-		if len(cert) > 0 && len(key) > 0 {
+		if stored != nil {
 			// Expired but no token to renew — try anyway; the gateway rejects if invalid.
-			return &tlsMaterial{caBundlePEM: pickCA(), clientCertPEM: cert, clientKeyPEM: key}, nil
+			return &tlsMaterial{caBundlePEM: pickCA(), clientCertPEM: stored.ClientCertPEM, clientKeyPEM: stored.ClientKeyPEM}, nil
 		}
 		return nil, errors.New("mTLS configured (CA bundle present) but no client cert and no SKYBRIDGE_ENROLLMENT_TOKEN to enroll")
 	}
@@ -66,13 +67,7 @@ func (c *Client) ensureTLSMaterial(ctx context.Context) (*tlsMaterial, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := writeSecret(caPath, m.caBundlePEM, 0o644); err != nil {
-		return nil, err
-	}
-	if err := writeSecret(certPath, m.clientCertPEM, 0o644); err != nil {
-		return nil, err
-	}
-	if err := writeSecret(keyPath, m.clientKeyPEM, 0o600); err != nil {
+	if err := store.Save(ctx, &certstore.Material{CABundlePEM: m.caBundlePEM, ClientCertPEM: m.clientCertPEM, ClientKeyPEM: m.clientKeyPEM}); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -120,12 +115,11 @@ func (c *Client) enroll(ctx context.Context) (*tlsMaterial, error) {
 	}, nil
 }
 
-func (c *Client) tlsPaths() (caPath, certPath, keyPath string) {
-	dir := c.cfg.TLSDir
-	if dir == "" {
-		dir = "/var/lib/skybridge/tls"
+func (c *Client) tlsDir() string {
+	if c.cfg.TLSDir != "" {
+		return c.cfg.TLSDir
 	}
-	return filepath.Join(dir, "ca.pem"), filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
+	return "/var/lib/skybridge/tls"
 }
 
 func certValid(certPEM []byte, skew time.Duration) bool {
@@ -138,19 +132,4 @@ func certValid(certPEM []byte, skew time.Duration) bool {
 		return false
 	}
 	return time.Now().Add(skew).Before(cert.NotAfter)
-}
-
-func readFileOrNil(path string) []byte {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	return b
-}
-
-func writeSecret(path string, data []byte, mode os.FileMode) error {
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, mode)
 }

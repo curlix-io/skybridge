@@ -348,12 +348,13 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			material, merr := wiremtls.EnsureMaterialViaIAM(ctx,
 				wiremtls.IamEnrollConfig{BaseURL: cfg.WireMtlsEnrollURL, TenantID: cfg.OrgID, AgentID: cfg.AgentID},
 				wiremtls.EnrollConfig{
-					BaseURL:     cfg.WireMtlsEnrollURL,
-					TenantID:    cfg.OrgID,
-					AgentID:     cfg.AgentID,
-					TrustDomain: cfg.WireMtlsTrustDomain,
-					TLSDir:      cfg.WireMtlsTLSDir,
-					CABundlePEM: cfg.WireMtlsCABundlePEM,
+					BaseURL:           cfg.WireMtlsEnrollURL,
+					TenantID:          cfg.OrgID,
+					AgentID:           cfg.AgentID,
+					TrustDomain:       cfg.WireMtlsTrustDomain,
+					TLSDir:            cfg.WireMtlsTLSDir,
+					CABundlePEM:       cfg.WireMtlsCABundlePEM,
+					IdentitySecretARN: cfg.WireMtlsIdentitySecretARN,
 				},
 			)
 			if merr != nil {
@@ -391,13 +392,14 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			wireTLS = tlsCfg
 		} else if cfg.WireMtlsConfigured() {
 			material, merr := wiremtls.EnsureMaterial(ctx, wiremtls.EnrollConfig{
-				BaseURL:     cfg.WireMtlsEnrollURL,
-				TenantID:    cfg.OrgID,
-				AgentID:     cfg.AgentID,
-				EnrollToken: cfg.WireMtlsEnrollToken,
-				TrustDomain: cfg.WireMtlsTrustDomain,
-				TLSDir:      cfg.WireMtlsTLSDir,
-				CABundlePEM: cfg.WireMtlsCABundlePEM,
+				BaseURL:           cfg.WireMtlsEnrollURL,
+				TenantID:          cfg.OrgID,
+				AgentID:           cfg.AgentID,
+				EnrollToken:       cfg.WireMtlsEnrollToken,
+				TrustDomain:       cfg.WireMtlsTrustDomain,
+				TLSDir:            cfg.WireMtlsTLSDir,
+				CABundlePEM:       cfg.WireMtlsCABundlePEM,
+				IdentitySecretARN: cfg.WireMtlsIdentitySecretARN,
 			})
 			if merr != nil {
 				logger.Printf("wire mTLS enroll: %v (retrying)", merr)

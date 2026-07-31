@@ -17,6 +17,7 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 
 	agentv1 "github.com/curlix-io/skybridge/internal/genpb/curlix/agent/v1"
@@ -40,12 +41,24 @@ type Config struct {
 	Reconnect   bool          // reconnect with backoff on stream loss
 	MaxBackoff  time.Duration // cap for reconnect backoff (default 30s)
 
+	// gRPC keepalive: detects a dead/killed gateway (crash, ECS task replacement) without waiting
+	// on OS TCP keepalive (hours) or an incidental LB idle-timeout reset. Must stay in lockstep
+	// with the gateway's _DATA_SERVER_KEEPALIVE_OPTIONS (integrations/skybridge-gateway/src/curlix/
+	// connector/gateway.py) — KeepaliveTime here should stay above the server's
+	// min_ping_interval_without_data_ms or healthy pings risk an ENHANCE_YOUR_CALM.
+	KeepaliveTime    time.Duration // ping interval when the stream is idle (default 20s)
+	KeepaliveTimeout time.Duration // time to wait for a ping ack before declaring the peer dead (default 10s)
+
 	// mTLS (hardened path). When CABundlePEM is empty and TLSDir is unset, the client uses bearer.
-	CABundlePEM  []byte // CA bundle trusted for the gateway (enables mTLS)
-	TLSDir       string // directory holding/persisting ca.pem, client.crt, client.key
-	EnrollTarget string // Enroll endpoint host:port (defaults to Target)
-	EnrollToken  string // one-time enrollment token (needed to obtain the first cert)
-	TrustDomain  string // SPIFFE trust domain placed in the CSR SAN (cosmetic; default skybridge.edge)
+	CABundlePEM []byte // CA bundle trusted for the gateway (enables mTLS)
+	TLSDir      string // directory holding/persisting ca.pem, client.crt, client.key
+	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a
+	// replaced task (fresh disk) recovers its identity instead of re-enrolling with an already-used
+	// one-time token. See SKYBRIDGE_IDENTITY_SECRET_ARN.
+	IdentitySecretARN string
+	EnrollTarget      string // Enroll endpoint host:port (defaults to Target)
+	EnrollToken       string // one-time enrollment token (needed to obtain the first cert)
+	TrustDomain       string // SPIFFE trust domain placed in the CSR SAN (cosmetic; default skybridge.edge)
 }
 
 // Client maintains the call-home connection and serves dispatched tool work.
@@ -65,6 +78,12 @@ func New(cfg Config, reg *edge.Registry, logger *log.Logger) *Client {
 	}
 	if cfg.MaxBackoff <= 0 {
 		cfg.MaxBackoff = 30 * time.Second
+	}
+	if cfg.KeepaliveTime <= 0 {
+		cfg.KeepaliveTime = 20 * time.Second
+	}
+	if cfg.KeepaliveTimeout <= 0 {
+		cfg.KeepaliveTimeout = 10 * time.Second
 	}
 	return &Client{cfg: cfg, reg: reg, logger: logger, runs: map[string]context.CancelFunc{}}
 }
@@ -116,7 +135,14 @@ func (c *Client) dial(material *tlsMaterial) (*grpc.ClientConn, error) {
 	default:
 		creds = credentials.NewTLS(nil) // system roots
 	}
-	return grpc.NewClient(c.cfg.Target, grpc.WithTransportCredentials(creds))
+	return grpc.NewClient(c.cfg.Target,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                c.cfg.KeepaliveTime,
+			Timeout:             c.cfg.KeepaliveTimeout,
+			PermitWithoutStream: true, // Connect is a single long-lived, often-idle stream
+		}),
+	)
 }
 
 // serve runs one Connect stream: register, then handle gateway messages until the stream ends. When

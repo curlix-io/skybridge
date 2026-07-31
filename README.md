@@ -10,6 +10,10 @@ drivers), and **masks PII at the source** — so raw rows never leave your netwo
 - One edge binary (`skybridge-edge`) also dials home for **live read-only AWS reads**, so everything
   that must run inside your network is a single install.
 
+**Jump to:** [How it works](#how-it-works) · [Quick start](#quick-start) · [Configure](#configure) ·
+[The `skybridge-edge` binary](#the-skybridge-edge-binary) ·
+[Deploying on AWS](#deploying-on-aws-cloudformation) · [Layout](#layout)
+
 ## How it works
 
 ```mermaid
@@ -228,6 +232,8 @@ internal/tunnel         egress multiplexed transport
 internal/gateway        agent registry + relay + optional session recording
 internal/edge           edge tool dispatch: envelope, read-only AWS policy, executor
 internal/edge/transport egress-only gRPC call-home client (Connect/serve/reconnect)
+internal/certstore      persists issued mTLS identity (local disk, optionally mirrored to AWS
+                         Secrets Manager) so redeployed tasks skip re-enrollment
 internal/genpb          generated gRPC stubs (run `make gen` to refresh)
 internal/config         SKYBRIDGE_* environment config
 ```
@@ -247,11 +253,62 @@ SKYBRIDGE_AWS_REGION=us-east-1 \
 go run ./cmd/skybridge-edge
 ```
 
-**Auth.** By default the edge uses a bearer token over TLS (`SKYBRIDGE_TOKEN`). For the hardened
-path, provide a CA bundle (`SKYBRIDGE_CA_BUNDLE_PEM` or `_FILE`) and a one-time
-`SKYBRIDGE_ENROLLMENT_TOKEN`: the edge generates a keypair, calls `Enroll` to get a client cert,
-persists it under `SKYBRIDGE_TLS_DIR`, and connects with mTLS — re-enrolling automatically before
-expiry.
+**Deploying on AWS?** Use the ready-made CloudFormation template instead of setting these env vars
+by hand — see [Deploying on AWS (CloudFormation)](#deploying-on-aws-cloudformation) below.
+
+#### Auth: bearer token vs. mTLS
+
+| Mode | Set | Behavior |
+|---|---|---|
+| Bearer (default) | `SKYBRIDGE_TOKEN` | Simple shared secret over TLS. Fine for a quick start. |
+| mTLS (hardened) | `SKYBRIDGE_CA_BUNDLE_PEM`/`_FILE` + `SKYBRIDGE_ENROLLMENT_TOKEN` | The edge generates a keypair, calls `Enroll` once with the one-time token to get a signed client cert, then connects with mTLS. Preferred for production. |
+
+The issued cert is cached under `SKYBRIDGE_TLS_DIR` and reused on restart — no new token needed
+until it's actually close to expiry.
+
+#### Keeping mTLS identity alive across redeploys
+
+⚠️ **On ECS/Fargate, a plain `SKYBRIDGE_TLS_DIR` cache does not survive a redeploy.** Any task
+replacement (new image, new task definition, a CPU/memory bump — anything that spins up a fresh
+task) wipes that disk. Since `SKYBRIDGE_ENROLLMENT_TOKEN` is **single-use**, the new task can't just
+re-enroll: the token was already consumed by the task it replaced, and the deploy fails.
+
+**Fix:** point the edge at an AWS Secrets Manager secret and it will keep its identity there too,
+so a replacement task picks up right where the old one left off — no new token required.
+
+| Identity | Env var |
+|---|---|
+| Connector (edge → Connector Gateway) | `SKYBRIDGE_IDENTITY_SECRET_ARN` |
+| Query Studio (edge → Studio Gateway) | `SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN` |
+| Wire-mTLS (agent → relay gateway tunnel) | `SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN` |
+
+Point one of these at a secret ARN the task's IAM role can `GetSecretValue`/`PutSecretValue` on
+(`internal/certstore`), and the edge mirrors its cert there on first enrollment, then loads from it
+on every subsequent start.
+
+If you deploy via [`curlix-edge.yaml`](../curlix-connector/cloudformation/curlix-edge.yaml), this is
+already handled for you — the template provisions the secrets, the IAM permissions, and the env
+vars automatically. Nothing to configure.
+
+## Deploying on AWS (CloudFormation)
+
+Most customers never touch the env vars above directly — they deploy
+[`integrations/curlix-connector/cloudformation/curlix-edge.yaml`](../curlix-connector/cloudformation/curlix-edge.yaml),
+which stands up an ECS Fargate task running this binary with everything wired: enrollment secret,
+persisted-identity secret(s), IAM roles, security group, log group.
+
+```sh
+aws cloudformation create-stack \
+  --stack-name curlix-edge \
+  --template-body file://integrations/curlix-connector/cloudformation/curlix-edge.yaml \
+  --capabilities CAPABILITY_NAMED_IAM \
+  --parameters file://parameters.json
+```
+
+Get `parameters.json` (VPC/subnets pre-filled, enrollment token included) from **Curlix
+Administration → Connectors** when you mint a new connector. To move to a newer image, update the
+stack's `ConnectorImage` parameter and redeploy — the mTLS identity above means this no longer
+requires a fresh enrollment token.
 
 ## Docs
 

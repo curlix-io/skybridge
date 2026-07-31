@@ -6,6 +6,8 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"testing"
+
+	"github.com/curlix-io/skybridge/internal/certstore"
 )
 
 func TestEnsureMaterialViaIAM_ReusesCachedCertWithoutReenrolling(t *testing.T) {
@@ -14,11 +16,8 @@ func TestEnsureMaterialViaIAM_ReusesCachedCertWithoutReenrolling(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	_, certPath, keyPath := tlsPaths(dir)
-	if err := writeSecret(certPath, cert, 0o644); err != nil {
-		t.Fatal(err)
-	}
-	if err := writeSecret(keyPath, key, 0o600); err != nil {
+	store := certstore.FromEnv(dir, "")
+	if err := store.Save(context.Background(), &certstore.Material{ClientCertPEM: cert, ClientKeyPEM: key}); err != nil {
 		t.Fatal(err)
 	}
 

@@ -11,6 +11,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/curlix-io/skybridge/internal/certstore"
 )
 
 // CertRenewSkew is how far ahead of expiry a cert is considered too stale to reuse (re-enroll).
@@ -29,6 +31,10 @@ type EnrollConfig struct {
 	TrustDomain string
 	TLSDir      string // directory holding/persisting ca.pem, client.crt, client.key
 	CABundlePEM []byte // optional: pin the CA used for the enroll call itself (server-TLS only)
+	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a
+	// replaced task (fresh disk) recovers its identity instead of re-enrolling with an already-used
+	// one-time token. See SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN.
+	IdentitySecretARN string
 }
 
 // DefaultEnrollPath is used when EnrollConfig.Path is empty.
@@ -51,26 +57,27 @@ type enrollResponseBody struct {
 // (nil, nil) when no CA bundle is configured for the enroll call itself AND no cert is cached — the
 // caller should then fall back to the legacy bearer-token tunnel mode.
 func EnsureMaterial(ctx context.Context, cfg EnrollConfig) (*Material, error) {
-	caPath, certPath, keyPath := tlsPaths(cfg.TLSDir)
-	storedCA := readFileOrNil(caPath)
-	cert := readFileOrNil(certPath)
-	key := readFileOrNil(keyPath)
+	store := certstore.FromEnv(tlsDir(cfg.TLSDir), cfg.IdentitySecretARN)
+	stored, err := store.Load(ctx)
+	if err != nil {
+		return nil, err
+	}
 
 	pickCA := func() []byte {
-		if len(storedCA) > 0 {
-			return storedCA
+		if stored != nil && len(stored.CABundlePEM) > 0 {
+			return stored.CABundlePEM
 		}
 		return cfg.CABundlePEM
 	}
 
-	if len(cert) > 0 && len(key) > 0 && CertValid(cert, CertRenewSkew) {
-		return &Material{CABundlePEM: pickCA(), ClientCertPEM: cert, ClientKeyPEM: key}, nil
+	if stored != nil && CertValid(stored.ClientCertPEM, CertRenewSkew) {
+		return &Material{CABundlePEM: pickCA(), ClientCertPEM: stored.ClientCertPEM, ClientKeyPEM: stored.ClientKeyPEM}, nil
 	}
 
 	if cfg.EnrollToken == "" {
-		if len(cert) > 0 && len(key) > 0 {
+		if stored != nil {
 			// Expired but no token to renew — try anyway; the gateway rejects if invalid.
-			return &Material{CABundlePEM: pickCA(), ClientCertPEM: cert, ClientKeyPEM: key}, nil
+			return &Material{CABundlePEM: pickCA(), ClientCertPEM: stored.ClientCertPEM, ClientKeyPEM: stored.ClientKeyPEM}, nil
 		}
 		return nil, nil // no cert, no token -> caller falls back to bearer-token tunnel mode
 	}
@@ -79,13 +86,7 @@ func EnsureMaterial(ctx context.Context, cfg EnrollConfig) (*Material, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := writeSecret(caPath, m.CABundlePEM, 0o644); err != nil {
-		return nil, err
-	}
-	if err := writeSecret(certPath, m.ClientCertPEM, 0o644); err != nil {
-		return nil, err
-	}
-	if err := writeSecret(keyPath, m.ClientKeyPEM, 0o600); err != nil {
+	if err := store.Save(ctx, &certstore.Material{CABundlePEM: m.CABundlePEM, ClientCertPEM: m.ClientCertPEM, ClientKeyPEM: m.ClientKeyPEM}); err != nil {
 		return nil, err
 	}
 	return m, nil
@@ -152,31 +153,13 @@ func enroll(ctx context.Context, cfg EnrollConfig) (*Material, error) {
 	}, nil
 }
 
-func tlsPaths(dir string) (caPath, certPath, keyPath string) {
+func tlsDir(dir string) string {
 	if dir == "" {
 		// /var/lib isn't writable by the distroless "nonroot" image's default user; /tmp always is
-		// (standard Linux world-writable + sticky bit), and on Fargate it's ephemeral storage
-		// anyway — this cache never needs to survive a task restart, IAM/enroll-token re-enrollment
-		// handles that.
-		dir = filepath.Join(os.TempDir(), "skybridge", "wire-tls")
+		// (standard Linux world-writable + sticky bit). On Fargate this local cache is ephemeral
+		// anyway — IdentitySecretARN (certstore) or IAM/enroll-token re-enrollment covers surviving
+		// a task restart.
+		return filepath.Join(os.TempDir(), "skybridge", "wire-tls")
 	}
-	return filepath.Join(dir, "ca.pem"), filepath.Join(dir, "client.crt"), filepath.Join(dir, "client.key")
-}
-
-func readFileOrNil(path string) []byte {
-	b, err := os.ReadFile(path)
-	if err != nil {
-		return nil
-	}
-	return b
-}
-
-func writeSecret(path string, data []byte, mode os.FileMode) error {
-	if len(data) == 0 {
-		return nil
-	}
-	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-		return err
-	}
-	return os.WriteFile(path, data, mode)
+	return dir
 }
