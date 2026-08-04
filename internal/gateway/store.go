@@ -45,6 +45,7 @@ type SessionRecord struct {
 // attribute the session to its owner via the matching credential lease — reliable even when several
 // users share one resource role, since ephemeral logins are unique per grant. Empty when unknown.
 type SessionResult struct {
+	OrgID      string    `json:"organization_id"`
 	EndedAt    time.Time `json:"ended_at"`
 	BytesUp    int64     `json:"bytes_up"`   // client -> upstream (queries)
 	BytesDown  int64     `json:"bytes_down"` // upstream -> client (masked results)

@@ -372,6 +372,7 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 	up, down, rerr := relayCounted(client, stream, sniffer)
 
 	res := SessionResult{
+		OrgID:      orgID,
 		EndedAt:    time.Now().UTC(),
 		BytesUp:    up,
 		BytesDown:  down,
