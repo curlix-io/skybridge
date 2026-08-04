@@ -118,6 +118,7 @@ Authorization: Bearer <token>
 Content-Type: application/json
 
 {
+  "organization_id": "<tenant id>",         // required; same value as the start report
   "ended_at":    "2026-01-01T00:05:00Z",
   "bytes_up":    1024,
   "bytes_down":  2048,
