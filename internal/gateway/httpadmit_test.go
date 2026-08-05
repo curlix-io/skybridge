@@ -62,9 +62,9 @@ func TestHTTPWireAdmitterRejectsMissingOrgID(t *testing.T) {
 func TestHostFromTCPAddr(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{
-		"203.0.113.9:54321": "203.0.113.9",
+		"203.0.113.9:54321":   "203.0.113.9",
 		"[2001:db8::1]:15433": "2001:db8::1",
-		"203.0.113.9":       "203.0.113.9",
+		"203.0.113.9":         "203.0.113.9",
 	}
 	for in, want := range cases {
 		if got := gateway.HostFromTCPAddr(in); got != want {
