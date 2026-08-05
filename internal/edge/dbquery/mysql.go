@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	_ "github.com/go-sql-driver/mysql"
 	"github.com/curlix-io/skybridge/internal/mask"
+	_ "github.com/go-sql-driver/mysql"
 )
 
 func executeMySQL(ctx context.Context, target Target, database, q string, opts Options, masker mask.Masker) (map[string]any, error) {
