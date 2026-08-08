@@ -8,10 +8,10 @@ import (
 	"strings"
 	"time"
 
+	"github.com/curlix-io/skybridge/internal/mask"
 	"go.mongodb.org/mongo-driver/bson"
 	"go.mongodb.org/mongo-driver/mongo"
 	"go.mongodb.org/mongo-driver/mongo/options"
-	"github.com/curlix-io/skybridge/internal/mask"
 )
 
 var mongoFindRe = regexp.MustCompile(`(?is)^\s*db\.([a-zA-Z0-9_]+)\.find\s*\((.*)\)\s*(?:\.\s*limit\s*\(\s*(\d+)\s*\)\s*)?;?\s*$`)

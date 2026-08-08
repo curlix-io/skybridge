@@ -18,12 +18,12 @@ const ToolKubectl = "kubectl_exec"
 
 // Options configures the edge kubectl executor.
 type Options struct {
-	Kubeconfig  string        // path to a kubeconfig file (default: kubectl's own default resolution)
-	Context     string        // kubeconfig context to use (optional)
-	KubectlBin  string        // path to the kubectl binary (default "kubectl")
-	CLITimeout  time.Duration // per-invocation timeout (default 30s)
-	MaxStdout   int           // stdout cap in bytes (default 200000 — cluster JSON can be large)
-	MaxStderr   int           // stderr cap in bytes (default 4000)
+	Kubeconfig string        // path to a kubeconfig file (default: kubectl's own default resolution)
+	Context    string        // kubeconfig context to use (optional)
+	KubectlBin string        // path to the kubectl binary (default "kubectl")
+	CLITimeout time.Duration // per-invocation timeout (default 30s)
+	MaxStdout  int           // stdout cap in bytes (default 200000 — cluster JSON can be large)
+	MaxStderr  int           // stderr cap in bytes (default 4000)
 }
 
 func (o Options) withDefaults() Options {
