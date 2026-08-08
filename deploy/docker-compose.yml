@@ -5,9 +5,11 @@
 #   SKYBRIDGE_UPSTREAM=db.internal:5432 docker compose up -d
 #   psql "postgres://user:pass@localhost:15432/appdb"
 #
-# By default the agent runs as a governed passthrough (no content masking). To enable PII masking,
-# set SKYBRIDGE_MASK_ANALYZE_URL / SKYBRIDGE_MASK_ANONYMIZE_URL to any HTTP service that exposes
-# "analyze" and "anonymize" endpoints (see the commented "masker" service below for the shape).
+# PII masking is on by default via Microsoft Presidio (analyzer + anonymizer, below), matching
+# https://hoop.dev/docs/setup/deployment/presidio. The agent calls Presidio's "analyze"/"anonymize"
+# HTTP endpoints over the compose network; any other service exposing that same shape also works —
+# override SKYBRIDGE_MASK_ANALYZE_URL / SKYBRIDGE_MASK_ANONYMIZE_URL to point elsewhere, or set both
+# to empty to run as a governed passthrough with no content masking.
 name: skybridge
 
 services:
@@ -17,22 +19,80 @@ services:
       dockerfile: Dockerfile
     container_name: skybridge-agent
     restart: unless-stopped
+    depends_on:
+      presidio-analyzer:
+        condition: service_healthy
+      presidio-anonymizer:
+        condition: service_healthy
     environment:
       - SKYBRIDGE_DB_TYPE=${SKYBRIDGE_DB_TYPE:-postgres}
       - SKYBRIDGE_LISTEN=:15432
       - SKYBRIDGE_UPSTREAM=${SKYBRIDGE_UPSTREAM:?set the database host:port}
-      # Optional remote masker (off unless both URLs are set):
-      - SKYBRIDGE_MASK_ANALYZE_URL=${SKYBRIDGE_MASK_ANALYZE_URL:-}
-      - SKYBRIDGE_MASK_ANONYMIZE_URL=${SKYBRIDGE_MASK_ANONYMIZE_URL:-}
+      # Remote masker, Presidio by default (set both to empty to disable):
+      - SKYBRIDGE_MASK_ANALYZE_URL=${SKYBRIDGE_MASK_ANALYZE_URL:-http://presidio-analyzer:3000/analyze}
+      - SKYBRIDGE_MASK_ANONYMIZE_URL=${SKYBRIDGE_MASK_ANONYMIZE_URL:-http://presidio-anonymizer:3000/anonymize}
+      - SKYBRIDGE_MASK_LANGUAGE=${SKYBRIDGE_MASK_LANGUAGE:-en}
+      # Entities sent to /analyze. Empty falls back to a low-cost regex/rule-based set (no spaCy
+      # inference); add NER-backed types (PERSON, LOCATION, ORGANIZATION, NRP) only if you need
+      # them — they're expensive and prone to false positives on ordinary business data.
+      - SKYBRIDGE_MASK_ENTITIES=${SKYBRIDGE_MASK_ENTITIES:-}
+      # Per-entity /anonymize strategies (Presidio "anonymizers" object, JSON). Empty replaces every
+      # detected span with "[redacted]"; override to keep partial info, e.g.:
+      #   {"US_SSN":{"type":"mask","masking_char":"*","chars_to_mask":5,"from_end":false}}
+      - SKYBRIDGE_MASK_ANONYMIZERS=${SKYBRIDGE_MASK_ANONYMIZERS:-}
+      # best-effort (default) forwards a value unmasked if Presidio errors/is unreachable, so an
+      # outage never blocks legitimate queries. strict aborts the row/connection instead — use this
+      # for compliance-sensitive deployments where unmasked content must never reach the client
+      # (mirrors hoop.dev's DLP_MODE).
+      - SKYBRIDGE_MASK_MODE=${SKYBRIDGE_MASK_MODE:-best-effort}
       # Column overlay (off by default): JSON map of column name -> replacement token.
       - SKYBRIDGE_PII_OVERLAY=${SKYBRIDGE_PII_OVERLAY:-}
     ports:
       - "15432:15432"
 
-  # Optional masking backend. Any service exposing POST /analyze and POST /anonymize works; point the
-  # agent at it via SKYBRIDGE_MASK_ANALYZE_URL / SKYBRIDGE_MASK_ANONYMIZE_URL. Example:
+  # Presidio Analyzer: NLP-based PII detection (POST /analyze). Holds a spaCy model in memory; the
+  # heavyweight half of the pair. Image/version per Microsoft's releases:
+  # https://github.com/microsoft/presidio/releases
   #
-  # masker:
-  #   image: <your-pii-detection-service>
-  #   container_name: skybridge-masker
-  #   restart: unless-stopped
+  # The official image's entrypoint only reads WORKERS/PORT (`gunicorn -w $WORKERS -b 0.0.0.0:$PORT
+  # app:create_app()`) — threads/preload_app/timeout need a mounted Gunicorn config, so the command
+  # is overridden to load one. Values mirror hoop.dev's documented Helm chart defaults
+  # (https://hoop.dev/docs/setup/deployment/presidio): workers=2 needs preload_app=True or each
+  # worker loads its own ~750MB spaCy model copy at startup instead of sharing the master's via
+  # copy-on-write. cpu/memory limits below match that guide's `requests`/`limits` for this component.
+  presidio-analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:${PRESIDIO_VERSION:-latest}
+    container_name: skybridge-presidio-analyzer
+    restart: unless-stopped
+    command: ["gunicorn", "-c", "/gunicorn.conf.py", "app:create_app()"]
+    volumes:
+      - ./presidio-analyzer-gunicorn.conf.py:/gunicorn.conf.py:ro
+    cpus: "2.5"
+    mem_limit: "2048m"
+    mem_reservation: "1024m"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+
+  # Presidio Anonymizer: string substitution on the analyzer's detected spans (POST /anonymize). No
+  # ML model, negligible resource cost — same Gunicorn-config-override rationale as the analyzer
+  # above; values again mirror hoop.dev's documented defaults.
+  presidio-anonymizer:
+    image: mcr.microsoft.com/presidio-anonymizer:${PRESIDIO_VERSION:-latest}
+    container_name: skybridge-presidio-anonymizer
+    restart: unless-stopped
+    command: ["gunicorn", "-c", "/gunicorn.conf.py", "app:create_app()"]
+    volumes:
+      - ./presidio-anonymizer-gunicorn.conf.py:/gunicorn.conf.py:ro
+    cpus: "2.0"
+    mem_limit: "1024m"
+    mem_reservation: "512m"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 30s
+      retries: 3

@@ -67,6 +67,14 @@ func (h *HTTPStore) SessionEnded(ctx context.Context, sessionID string, res Sess
 	return h.post(ctx, h.basePath+"/"+sessionID+"/close", res, nil)
 }
 
+// SessionTranscript implements Store.
+func (h *HTTPStore) SessionTranscript(ctx context.Context, sessionID string, chunks TranscriptChunks) error {
+	if strings.TrimSpace(sessionID) == "" {
+		return nil
+	}
+	return h.post(ctx, h.basePath+"/"+sessionID+"/transcript", chunks, nil)
+}
+
 func (h *HTTPStore) post(ctx context.Context, path string, body any, out any) error {
 	payload, err := json.Marshal(body)
 	if err != nil {

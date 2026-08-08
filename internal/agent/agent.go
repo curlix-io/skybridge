@@ -20,7 +20,6 @@ import (
 
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/mask"
-	"github.com/curlix-io/skybridge/internal/pathlabel/label"
 	"github.com/curlix-io/skybridge/internal/tunnel"
 	"github.com/curlix-io/skybridge/internal/wire"
 	"github.com/curlix-io/skybridge/internal/wiremtls"
@@ -61,13 +60,13 @@ func (d Deps) withDefaults(cfg config.Agent) Deps {
 // proxyConn runs the right proxy path for one session: the credential-injection path when a resolver
 // is configured and the engine supports it, otherwise the verbatim passthrough that forwards the
 // client's own auth to the upstream.
-func proxyConn(ctx context.Context, engine wire.Engine, client, upstream net.Conn, masker mask.Masker, resolver wire.CredentialResolver) error {
+func proxyConn(ctx context.Context, engine wire.Engine, client, upstream net.Conn, masker mask.Masker, resolver wire.CredentialResolver, recorder wire.Recorder) error {
 	if resolver != nil {
 		if ie, ok := engine.(wire.InjectingEngine); ok {
-			return ie.ProxyInject(ctx, client, upstream, masker, resolver)
+			return ie.ProxyInject(ctx, client, upstream, masker, resolver, recorder)
 		}
 	}
-	return engine.Proxy(ctx, client, upstream, masker)
+	return engine.Proxy(ctx, client, upstream, masker, recorder)
 }
 
 // EngineFor selects a wire engine by database type (no client-TLS termination). The agent uses the
@@ -87,23 +86,26 @@ func BuildMasker(cfg config.Agent) mask.Masker {
 // OR a dynamic source URL is set (so later refreshes take effect even if the seed is empty); the
 // handle is nil when no overlay layer is active.
 //
-// A PathOverlay layer runs ahead of Overlay when a path-scoped Label store is populated (currently
-// only dbquery's one-shot exec path resolves table/collection identity to populate one — see
-// internal/pathlabel and internal/edge/dbquery/mask.go). It tries the exact resolved path first,
-// then falls back to Overlay's bare-key behavior on a miss, so this is strictly additive: nothing
-// PathOverlay would have caught goes uncaught by Overlay today, and it starts catching more
-// (nested-document, per-table-scoped fields) as soon as a Store is populated.
+// mask.NewPathOverlay (internal/mask/pathoverlay.go) is not wired into this chain yet: it needs a
+// populated label.Store to be anything but a permanent miss, and nothing today populates a shared
+// Store for the agent process (dbquery's one-shot exec path resolves table/collection identity
+// per-query independently — see internal/edge/dbquery/mask.go — but that's a separate call path,
+// not this chain). Wire it in here once a real backing store (e.g. control-plane-fetched, mirroring
+// startOverlaySync's pattern) exists; an always-empty MemStore would just be dead weight that also
+// breaks the "nothing configured -> mask.Noop" contract callers rely on.
 func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay) {
 	var maskers []mask.Masker
 	remote := mask.NewRemote(mask.RemoteConfig{
 		AnalyzeURL:   cfg.MaskAnalyzeURL,
 		AnonymizeURL: cfg.MaskAnonymizeURL,
 		Language:     cfg.MaskLanguage,
+		Entities:     cfg.MaskEntities,
+		Anonymizers:  cfg.MaskAnonymizers,
+		Strict:       cfg.MaskStrict(),
 	})
 	if remote.Enabled() {
 		maskers = append(maskers, remote)
 	}
-	maskers = append(maskers, mask.NewPathOverlay(label.NewMemStore()))
 	var overlay *mask.Overlay
 	if len(cfg.PIIOverlay) > 0 || cfg.PIIOverlayURL != "" {
 		overlay = mask.NewOverlay(cfg.PIIOverlay)
@@ -116,8 +118,10 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay) {
 }
 
 // logMaskingGuardrails emits startup warnings when the configured masking posture is weaker than an
-// operator likely intends. The wire proxy is fail-open (a miss forwards the value unchanged), so a
-// missing layer silently lets data through — these logs make that explicit at boot.
+// operator likely intends. By default (SKYBRIDGE_MASK_MODE=best-effort) the wire proxy is fail-open
+// — a masker miss or outage forwards the value unchanged — so a missing layer silently lets data
+// through; these logs make that explicit at boot. SKYBRIDGE_MASK_MODE=strict instead aborts the
+// row/connection on a masker failure rather than ever forwarding it unmasked.
 func logMaskingGuardrails(cfg config.Agent, logger *log.Logger) {
 	if logger == nil {
 		logger = log.Default()
@@ -141,6 +145,11 @@ func logMaskingGuardrails(cfg config.Agent, logger *log.Logger) {
 			"(SKYBRIDGE_MASK_ANALYZE_URL/SKYBRIDGE_MASK_ANONYMIZE_URL); only exact column-name overlay rules are " +
 			"masked — PII in free-text columns, JSON blobs, or unlisted columns will NOT be masked.")
 	}
+
+	if presidioOn && cfg.MaskStrict() {
+		logger.Printf("skybridge-agent: SKYBRIDGE_MASK_MODE=strict — a Presidio outage or error will abort " +
+			"the affected connection instead of forwarding data unmasked.")
+	}
 }
 
 // MaskingMode returns a short label describing the active masking layers.
@@ -162,6 +171,9 @@ func MaskingMode(cfg config.Agent) string {
 	}
 	if mode == "" {
 		return "none"
+	}
+	if cfg.MaskAnalyzeURL != "" && cfg.MaskStrict() {
+		mode += "(strict)"
 	}
 	return mode
 }
@@ -233,7 +245,9 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 			}
 			defer upstream.Close()
 			sessCtx := ContextWithWireClientIP(ctx, client.RemoteAddr().String())
-			if err := proxyConn(sessCtx, engine, client, upstream, masker, resolver); err != nil {
+			// Listener mode has no control-plane session id to tag a transcript with (it never
+			// goes through the gateway's SessionStarted call) — replay is tunnel-mode only for now.
+			if err := proxyConn(sessCtx, engine, client, upstream, masker, resolver, wire.NoopRecorder{}); err != nil {
 				logger.Printf("session ended: %v", err)
 			}
 		}()
@@ -494,11 +508,11 @@ func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps 
 		if err != nil {
 			return err
 		}
-		go serveStream(ctx, st, cfg, deps, logger)
+		go serveStream(ctx, st, sess, cfg, deps, logger)
 	}
 }
 
-func serveStream(ctx context.Context, st *tunnel.Stream, cfg config.Agent, deps Deps, logger *log.Logger) {
+func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, cfg config.Agent, deps Deps, logger *log.Logger) {
 	defer st.Close()
 	meta, err := tunnel.DecodeOpenMeta(st.Meta())
 	if err != nil {
@@ -508,6 +522,10 @@ func serveStream(ctx context.Context, st *tunnel.Stream, cfg config.Agent, deps 
 	if meta.Addr == "" || meta.DBType == "" {
 		logger.Printf("stream open: gateway sent no addr/db_type for target %q "+
 			"(upgrade the gateway or check its SKYBRIDGE_GW_CONTROL_PLANE_URL)", meta.Target)
+		return
+	}
+	if meta.DBType == "kubernetes" {
+		serveK8sStream(ctx, st, meta, cfg, logger)
 		return
 	}
 	engine, err := deps.Engine(meta.DBType)
@@ -531,7 +549,14 @@ func serveStream(ctx context.Context, st *tunnel.Stream, cfg config.Agent, deps 
 		}
 	}
 	defer upstream.Close()
-	if err := proxyConn(ctx, engine, st, upstream, deps.Masker, deps.Resolver); err != nil {
+	// Session replay (hoop.dev parity): the gateway already opened a control-plane session and
+	// put its id on OpenMeta (see gateway.go's ServeClient) — build a recorder tagged with it so
+	// the wire engine's already-masked traffic gets captured, then flush once the session ends.
+	// SessionReplayEnabled gates this independently of session recording itself (a deployment can
+	// record byte-count metadata without opting into full transcript capture).
+	recorder := newTranscriptRecorder(meta.SessionID, cfg)
+	defer flushTranscript(recorder, sess, logger)
+	if err := proxyConn(ctx, engine, st, upstream, deps.Masker, deps.Resolver, recorder); err != nil {
 		logger.Printf("target %q session ended: %v", meta.Target, err)
 	}
 }

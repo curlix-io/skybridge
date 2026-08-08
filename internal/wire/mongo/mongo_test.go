@@ -5,10 +5,19 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"testing"
 
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/wire"
 )
+
+// errMasker always fails, simulating a masking-service outage under strict mode.
+type errMasker struct{}
+
+func (errMasker) MaskRow(context.Context, []mask.Column, [][]byte) ([][]byte, error) {
+	return nil, mask.ErrMaskerUnavailable
+}
 
 func cstr(s string) []byte { return append([]byte(s), 0x00) }
 
@@ -70,7 +79,10 @@ func findReply() []byte {
 
 func TestTransformMessageMasksBatch(t *testing.T) {
 	bm := &bsonMasker{ctx: context.Background(), masker: mask.NewOverlay(map[string]string{"email": "[redacted]"})}
-	out := transformMessage(bm, findReply())
+	out, err := transformMessage(bm, findReply())
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if bytes.Contains(out, []byte("alice@example.com")) || bytes.Contains(out, []byte("bob@example.com")) {
 		t.Fatal("output still contains plaintext emails")
@@ -94,7 +106,10 @@ func TestTransformMessageMasksBatch(t *testing.T) {
 func TestTransformMessageNoopUnchanged(t *testing.T) {
 	bm := &bsonMasker{ctx: context.Background(), masker: mask.Noop{}}
 	in := findReply()
-	out := transformMessage(bm, in)
+	out, err := transformMessage(bm, in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !bytes.Equal(out, in) {
 		t.Fatal("Noop masker must leave the message byte-identical")
 	}
@@ -106,7 +121,11 @@ func TestTransformMessageNonOpMsgPassthrough(t *testing.T) {
 	msg := make([]byte, 20)
 	binary.LittleEndian.PutUint32(msg[12:16], 1)
 	binary.LittleEndian.PutUint32(msg[0:4], uint32(len(msg)))
-	if out := transformMessage(bm, msg); !bytes.Equal(out, msg) {
+	out, err := transformMessage(bm, msg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !bytes.Equal(out, msg) {
 		t.Fatal("non OP_MSG opcode was modified")
 	}
 }
@@ -119,7 +138,10 @@ func TestTransformMessageChecksumDropped(t *testing.T) {
 	binary.LittleEndian.PutUint32(in[0:4], uint32(len(in)))
 
 	bm := &bsonMasker{ctx: context.Background(), masker: mask.NewOverlay(map[string]string{"email": "[redacted]"})}
-	out := transformMessage(bm, in)
+	out, err := transformMessage(bm, in)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 
 	if binary.LittleEndian.Uint32(out[16:20])&flagChecksumPresent != 0 {
 		t.Fatal("checksumPresent flag should be cleared after modification")
@@ -132,12 +154,33 @@ func TestTransformMessageChecksumDropped(t *testing.T) {
 	}
 }
 
+func TestTransformMessageErrorsOnMaskerFailure(t *testing.T) {
+	bm := &bsonMasker{ctx: context.Background(), masker: errMasker{}}
+	_, err := transformMessage(bm, findReply())
+	if !errors.Is(err, mask.ErrMaskerUnavailable) {
+		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
+	}
+}
+
+func TestMaskServerAbortsOnMaskerFailure(t *testing.T) {
+	in := findReply()
+	var out bytes.Buffer
+	r := bufio.NewReader(bytes.NewReader(in))
+	err := maskServer(context.Background(), r, &out, errMasker{}, wire.NoopRecorder{})
+	if !errors.Is(err, mask.ErrMaskerUnavailable) {
+		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
+	}
+	if bytes.Contains(out.Bytes(), []byte("alice@example.com")) {
+		t.Fatal("unmasked email must never reach the client when the masker fails in strict mode")
+	}
+}
+
 func TestMaskServerEndToEnd(t *testing.T) {
 	in := findReply()
 	var out bytes.Buffer
 	r := bufio.NewReader(bytes.NewReader(in))
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
-	_ = maskServer(context.Background(), r, &out, overlay)
+	_ = maskServer(context.Background(), r, &out, overlay, wire.NoopRecorder{})
 
 	if bytes.Contains(out.Bytes(), []byte("alice@example.com")) {
 		t.Fatal("email leaked through maskServer")

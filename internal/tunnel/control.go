@@ -10,6 +10,11 @@ const (
 	KindRegister    = "register"     // agent -> gateway: announce identity (org-scoped; no target list)
 	KindRegisterAck = "register_ack" // gateway -> agent: accept/reject the registration
 	KindHeartbeat   = "heartbeat"    // both directions: liveness
+	// KindTranscript is agent -> gateway: a session-replay transcript flush (session replay design,
+	// hoop.dev parity). Chunks are already masked (the wire engine's Recorder only ever sees
+	// already-masked output) — the gateway relays them to the control plane unmodified via
+	// Store.SessionTranscript, never inspecting content itself.
+	KindTranscript = "transcript"
 )
 
 // Control is a control-channel message. There is no target list here: the gateway resolves a
@@ -23,6 +28,21 @@ type Control struct {
 	Token string `json:"token,omitempty"`
 	OK    bool   `json:"ok,omitempty"`
 	Error string `json:"error,omitempty"`
+
+	// KindTranscript fields.
+	SessionID        string            `json:"session_id,omitempty"`
+	TranscriptChunks []TranscriptChunk `json:"chunks,omitempty"`
+	Truncated        bool              `json:"truncated,omitempty"`
+}
+
+// TranscriptChunk is one input or output unit of a session-replay transcript, as produced by a
+// wire engine's Recorder (see internal/wire.Recorder) and relayed verbatim by the gateway to the
+// control plane.
+type TranscriptChunk struct {
+	Seq       int    `json:"seq"`
+	Direction string `json:"direction"` // "input" | "output"
+	Text      string `json:"text"`
+	Bytes     int    `json:"bytes"`
 }
 
 // Target describes a database, either from static listener-mode config (SKYBRIDGE_TARGETS) or as
@@ -60,6 +80,14 @@ type OpenMeta struct {
 	DBType         string `json:"db_type,omitempty"`
 	ResourceRoleID string `json:"resource_role_id,omitempty"`
 	ActorEmail     string `json:"actor_email,omitempty"`
+
+	// SessionID is the control-plane session id the gateway already opened (via SessionStarted)
+	// before calling Open — session replay (hoop.dev parity) needs it so the agent, which builds
+	// the transcript from already-masked traffic, can tag chunks with the session they belong to
+	// when it flushes them back over the tunnel control channel (see internal/agent/agent.go's
+	// serveStream). Empty when session recording (or replay specifically) is not enabled — the
+	// agent then runs a NoopRecorder.
+	SessionID string `json:"session_id,omitempty"`
 }
 
 // Encode serializes the open metadata for Session.Open.

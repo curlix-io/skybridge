@@ -190,11 +190,30 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 	go agentHeartbeatLoop(sess)
 
 	for {
-		if _, err := sess.NextControl(); err != nil {
+		ctrl, err := sess.NextControl()
+		if err != nil {
 			return err
 		}
-		// heartbeats (and future control messages) keep the loop alive; the registry stays valid
-		// until the session closes and NextControl returns an error.
+		if ctrl.Kind == tunnel.KindTranscript {
+			g.handleTranscript(ac, ctrl)
+		}
+		// heartbeats (and other control messages) otherwise just keep the loop alive; the registry
+		// stays valid until the session closes and NextControl returns an error.
+	}
+}
+
+// handleTranscript relays one agent-flushed session-replay transcript batch to the control plane
+// (best-effort, same posture as storeStarted/storeEnded — a recording failure must never affect
+// the live relay, which has already completed by the time a transcript arrives).
+func (g *Gateway) handleTranscript(ac *agentConn, ctrl tunnel.Control) {
+	if strings.TrimSpace(ctrl.SessionID) == "" {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), storeTimeout)
+	defer cancel()
+	chunks := TranscriptChunks{OrgID: ac.orgID, Chunks: ctrl.TranscriptChunks, Truncated: ctrl.Truncated}
+	if err := g.store.SessionTranscript(ctx, ctrl.SessionID, chunks); err != nil {
+		g.log.Printf("session transcript recording failed session=%q: %v", ctrl.SessionID, err)
 	}
 }
 

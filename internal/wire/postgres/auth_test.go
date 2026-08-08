@@ -267,7 +267,7 @@ func TestProxyInjectEndToEnd(t *testing.T) {
 
 	proxyErr := make(chan error, 1)
 	go func() {
-		proxyErr <- (&Engine{}).ProxyInject(context.Background(), agentClient, agentUpstream, columnMasker{redact: map[string]bool{"email": true}}, resolve)
+		proxyErr <- (&Engine{}).ProxyInject(context.Background(), agentClient, agentUpstream, columnMasker{redact: map[string]bool{"email": true}}, resolve, wire.NoopRecorder{})
 	}()
 
 	// Upstream side: complete SCRAM, then emit one masked-eligible result row.

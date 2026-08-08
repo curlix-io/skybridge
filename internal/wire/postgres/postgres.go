@@ -24,6 +24,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 
 	"github.com/curlix-io/skybridge/internal/mask"
 	"github.com/curlix-io/skybridge/internal/wire"
@@ -55,9 +56,12 @@ func NewWithClientTLS(cfg *tls.Config) *Engine { return &Engine{clientTLS: cfg} 
 func (*Engine) Name() string { return "postgres" }
 
 // Proxy implements wire.Engine.
-func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker) error {
+func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder wire.Recorder) error {
 	if masker == nil {
 		masker = mask.Noop{}
+	}
+	if recorder == nil {
+		recorder = wire.NoopRecorder{}
 	}
 	client, cr, err := negotiateStartup(client, e.clientTLS)
 	if err != nil {
@@ -65,14 +69,15 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	}
 
 	errc := make(chan error, 2)
-	// client -> server: forward verbatim (the StartupMessage and everything after are buffered in cr).
+	// client -> server: forward verbatim (the StartupMessage and everything after are buffered in
+	// cr), teeing raw bytes into the recorder for replay (opaque/best-effort — not re-parsed here).
 	go func() {
-		_, err := io.Copy(upstream, cr)
+		_, err := io.Copy(upstream, io.TeeReader(cr, wire.RecorderInputWriter(recorder)))
 		errc <- err
 	}()
 	// server -> client: parse + mask DataRows.
 	go func() {
-		errc <- pipeBackend(ctx, upstream, client, masker)
+		errc <- pipeBackend(ctx, upstream, client, masker, recorder)
 	}()
 
 	err = <-errc
@@ -91,9 +96,12 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 // ORIGINATES its own upstream auth (trust / cleartext / md5 / SCRAM-SHA-256). The client never holds
 // a credential the database would accept directly; after upstream auth succeeds, result rows are
 // masked exactly as in the verbatim path.
-func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve wire.CredentialResolver) error {
+func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve wire.CredentialResolver, recorder wire.Recorder) error {
 	if masker == nil {
 		masker = mask.Noop{}
+	}
+	if recorder == nil {
+		recorder = wire.NoopRecorder{}
 	}
 	if resolve == nil {
 		return errors.New("postgres: credential injection requires a resolver")
@@ -129,12 +137,12 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 	errc := make(chan error, 2)
 	// client -> upstream: forward queries verbatim (startup + auth already consumed from cr).
 	go func() {
-		_, err := io.Copy(upstream, cr)
+		_, err := io.Copy(upstream, io.TeeReader(cr, wire.RecorderInputWriter(recorder)))
 		errc <- err
 	}()
 	// upstream -> client: parse + mask DataRows, reusing the reader that buffered the post-auth tail.
 	go func() {
-		errc <- pipeBackendReader(ctx, ur, client, masker)
+		errc <- pipeBackendReader(ctx, ur, client, masker, recorder)
 	}()
 
 	err = <-errc
@@ -203,13 +211,13 @@ func negotiateStartup(client net.Conn, clientTLS *tls.Config) (net.Conn, *bufio.
 }
 
 // pipeBackend reads typed backend messages from server, masks DataRows, and writes to client.
-func pipeBackend(ctx context.Context, server io.Reader, client io.Writer, masker mask.Masker) error {
-	return pipeBackendReader(ctx, bufio.NewReaderSize(server, 1<<16), client, masker)
+func pipeBackend(ctx context.Context, server io.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder) error {
+	return pipeBackendReader(ctx, bufio.NewReaderSize(server, 1<<16), client, masker, recorder)
 }
 
 // pipeBackendReader is pipeBackend over an already-buffered reader. The injection path uses it so
 // the post-auth bytes the auth handshake left buffered in br are not lost.
-func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, masker mask.Masker) error {
+func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder) error {
 	bw := bufio.NewWriterSize(client, 1<<16)
 	var cols []mask.Column
 	header := make([]byte, 5)
@@ -233,9 +241,16 @@ func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, 
 		case 'T': // RowDescription
 			cols = parseRowDescription(payload)
 		case 'D': // DataRow
-			if masked, err := maskDataRow(ctx, payload, cols, masker); err == nil {
-				payload = masked
+			masked, values, err := maskDataRow(ctx, payload, cols, masker)
+			if err != nil {
+				if errors.Is(err, mask.ErrMaskerUnavailable) {
+					return err
+				}
+				// Protocol-parse drift: safe by construction, forward the original bytes unmasked.
+				break
 			}
+			payload = masked
+			recorder.RecordOutput(renderRow(cols, values))
 		}
 
 		if err := writeMessage(bw, typ, payload); err != nil {
@@ -288,17 +303,19 @@ func parseRowDescription(p []byte) []mask.Column {
 	return cols
 }
 
-// maskDataRow decodes a 'D' payload, runs the masker, and re-encodes it.
-func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.Masker) ([]byte, error) {
+// maskDataRow decodes a 'D' payload, runs the masker, and re-encodes it. Also returns the masked
+// field values (already decoded here) so the caller can render a replay-transcript line without
+// re-parsing the re-encoded payload.
+func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.Masker) ([]byte, [][]byte, error) {
 	if len(p) < 2 {
-		return p, nil
+		return p, nil, nil
 	}
 	n := int(binary.BigEndian.Uint16(p[0:2]))
 	off := 2
 	row := make([][]byte, n)
 	for i := 0; i < n; i++ {
 		if off+4 > len(p) {
-			return nil, errProtocol
+			return nil, nil, errProtocol
 		}
 		flen := int32(binary.BigEndian.Uint32(p[off : off+4]))
 		off += 4
@@ -307,7 +324,7 @@ func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.
 			continue
 		}
 		if off+int(flen) > len(p) {
-			return nil, errProtocol
+			return nil, nil, errProtocol
 		}
 		v := make([]byte, flen)
 		copy(v, p[off:off+int(flen)])
@@ -325,10 +342,10 @@ func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.
 	}
 	masked, err := masker.MaskRow(ctx, mc, row)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(masked) != n {
-		return nil, errProtocol
+		return nil, nil, errProtocol
 	}
 
 	out := make([]byte, 0, len(p))
@@ -346,7 +363,36 @@ func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.
 		out = append(out, l[:]...)
 		out = append(out, masked[i]...)
 	}
-	return out, nil
+	return out, masked, nil
+}
+
+// renderRow formats an already-masked row as "col1=val1, col2=val2, ..." for the replay
+// transcript — a best-effort human-readable line, not a re-encoding of the wire format.
+func renderRow(cols []mask.Column, values [][]byte) string {
+	if len(values) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, v := range values {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		name := ""
+		if i < len(cols) {
+			name = cols[i].Name
+		}
+		if name == "" {
+			name = fmt.Sprintf("col%d", i)
+		}
+		b.WriteString(name)
+		b.WriteByte('=')
+		if v == nil {
+			b.WriteString("NULL")
+		} else {
+			b.Write(v)
+		}
+	}
+	return b.String()
 }
 
 func indexZero(p []byte, from int) int {

@@ -66,7 +66,8 @@ SKYBRIDGE_PII_OVERLAY='{"email":"[redacted]","ssn":"[redacted]"}' \
 go run ./cmd/skybridge-agent
 ```
 
-**Run with Docker**:
+**Run with Docker** (brings up Microsoft Presidio's analyzer + anonymizer alongside the agent, per
+[hoop.dev's Presidio deployment guide](https://hoop.dev/docs/setup/deployment/presidio)):
 
 ```sh
 cd deploy
@@ -79,8 +80,11 @@ Then connect a native client through the agent (listening on `:15432` by default
 psql "postgres://user:pass@localhost:15432/appdb"
 ```
 
-That's it — result rows are masked before they reach the client. With no mask config the agent is a
-transparent, governed passthrough.
+That's it — result rows are masked before they reach the client, using Presidio's NER-based PII
+detection. Set `SKYBRIDGE_MASK_ANALYZE_URL`/`SKYBRIDGE_MASK_ANONYMIZE_URL` to empty to disable
+content masking (governed passthrough), or point them at a different `analyze`/`anonymize` service.
+Running with plain `go run` (no compose) has no mask URLs by default — set them explicitly to reach
+a Presidio instance you run yourself.
 
 ## How masking works
 
@@ -102,18 +106,9 @@ flowchart TD
         r1 --> r2
     end
 
-    remote --> pathoverlay
+    remote --> overlay
 
-    subgraph pathoverlay["2. PathOverlay — path-scoped label lookup"]
-        direction TB
-        p1["Lookup(objectID, resolved path)<br/>e.g. org1:mongo:app:orders / profile.contact.email"]
-        p2["miss → Lookup(objectID, bare column name)"]
-        p1 -.miss.-> p2
-    end
-
-    pathoverlay --> overlay
-
-    subgraph overlay["3. Overlay — flat column-name map"]
+    subgraph overlay["2. Overlay — flat column-name map"]
         direction TB
         o1["column name (case-insensitive) → replacement token<br/>e.g. email → [redacted]"]
     end
@@ -139,42 +134,37 @@ call entirely, since numbers/short codes are rarely worth a round trip. Best-eff
 transport error, non-200, or zero detected spans all fall through with the value untouched — see
 `internal/mask/remote.go`.
 
-**Layer 2 — `PathOverlay` (path-scoped labels, vendored from `pathlabel`).** A `label.Store` lookup
-keyed on `(ObjectID, FieldPath)` — `ObjectID` opaquely identifies a table/collection
-(`"{org}:{driver}:{database}:{table}"`), `FieldPath` is the field's resolved, index-erased document
-path (`internal/pathlabel/docpath`), e.g. `profile.contact.email` for a nested Mongo document, or
-just the column name for a flat SQL row. This is what lets `order.total` and `user.total` carry
-independent labels even though both columns are literally named `total` — something a bare
-key-name rule can never express. Only labels with `Source == manual` or `platform` ever redact live
-(a detector-*proposed* label is inert until a human confirms it — see
-`internal/pathlabel/label/label.go`); a `do_not_mask` label still defers to layer 1's content check
-having already run, so a field marked safe-by-default can't suppress an actual PII-shaped value
-that happens to land in it. A miss (unknown `ObjectID`, or no label at that exact path) falls back
-to a bare-key lookup under the same `ObjectID` before giving up — never harder-fails, never blocks
-layer 3. Today `dbquery`'s one-shot exec path (`internal/edge/dbquery/mask.go`) resolves full
-path/table identity for every query (Mongo documents are walked *nested*, not flattened first, so
-`profile.contact.email` is masked as its own path); the MySQL wire-proxy engine also resolves real
-per-column table identity from the column-definition packet on the wire. The Postgres and Mongo
-wire-proxy engines don't yet resolve table identity from the wire protocol (Postgres only has a
-numeric table OID on the wire, not a name; Mongo's response-masking path doesn't currently
-correlate back to the request's collection) — those connections pass an empty `ObjectID`, which
-`PathOverlay` treats as "no label available" and skips straight to layer 3, so masking coverage for
-those two wire-proxy paths is unchanged from before this layer existed.
-
-**Layer 3 — `Overlay` (flat column-name map).** The original, simplest layer: a case-insensitive
-`column name → replacement token` map (`SKYBRIDGE_PII_OVERLAY`, or fetched dynamically from the
-control plane via `SKYBRIDGE_PII_OVERLAY_URL` — see
+**Layer 2 — `Overlay` (flat column-name map).** A case-insensitive `column name → replacement
+token` map (`SKYBRIDGE_PII_OVERLAY`, or fetched dynamically from the control plane via
+`SKYBRIDGE_PII_OVERLAY_URL` — see
 [Dynamic PII overlay](#dynamic-pii-overlay-from-administration--pii)). No path awareness: `total`
-under `order` and `total` under `user` share one rule. Kept as the last, most conservative layer so
-existing overlay configs keep working unchanged even as `PathOverlay` picks up more precise cases
-above it.
+under `order` and `total` under `user` share one rule.
+
+### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`) — groundwork, not yet in the live chain
+
+`internal/pathlabel` (vendored from `github.com/curlix-io/pathlabel`) and `mask.PathOverlay`
+(`internal/mask/pathoverlay.go`) exist in this repo but are **not yet wired into the two layers
+above** — `buildMaskerWithOverlay` in `internal/agent/agent.go` doesn't include a `PathOverlay` in
+its chain, since doing so needs a real, populated `label.Store` to be anything but a permanent miss
+(an empty store is dead weight, and it would also break the "nothing configured → transparent
+passthrough" guarantee other code relies on).
+
+What *is* live today: `mask.Column` carries `ObjectID`/`Path` fields, and `internal/edge/dbquery`'s
+one-shot exec path (`internal/edge/dbquery/mask.go`) populates them for every query — it resolves
+per-query table/collection identity (`"{org}:{driver}:{database}:{table}"`) and walks Mongo
+documents *nested* rather than flattened first (`internal/pathlabel/docpath`), so a `profile.contact.email`
+leaf is addressable independently of a top-level `email` column. The MySQL wire-proxy engine also
+parses real per-column table identity off the wire (schema + `org_table` from the column-definition
+packet). This is groundwork for a future `PathOverlay` layer that can distinguish `order.total` from
+`user.total` — something a bare key-name rule can never express — but until a backing store exists,
+`Column.ObjectID`/`Path` are populated and otherwise unused by the two layers above.
 
 **Structured vs. unstructured, in one sentence:** layer 1 (`Remote`) is what actually gives you
 unstructured-text coverage (it doesn't care what the field is called or where it sits in a
-document); layers 2–3 (`PathOverlay`, `Overlay`) are structured-schema shortcuts — cheap, exact-match
-lookups by path or name — that skip the network round trip for fields a human (or a `pathlabel`
-detector, once confirmed) has already labelled. Both kinds of layer run on **every** row/document by
-default; there's no separate "structured mode" vs. "unstructured mode" to configure.
+document); layer 2 (`Overlay`) is a structured-schema shortcut — a cheap, exact-match lookup by
+column name — that skips the network round trip for fields a human has already labelled. Both
+layers run on **every** row/document by default; there's no separate "structured mode" vs.
+"unstructured mode" to configure.
 
 ## Configure
 
@@ -189,8 +179,12 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_PII_OVERLAY_URL` | — | control-plane endpoint to fetch the org's projected overlay (`GET /api/v1/data-studio/studio/native-access/pii-overlay`); enables dynamic, hot-swapped masking |
 | `SKYBRIDGE_PII_OVERLAY_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token for the overlay fetch |
 | `SKYBRIDGE_PII_OVERLAY_POLL_SECONDS` | `60` | overlay refresh interval (min 15s; `-1` = fetch once at startup) |
-| `SKYBRIDGE_MASK_ANALYZE_URL` | — | enable content masking: any `POST /analyze` service |
-| `SKYBRIDGE_MASK_ANONYMIZE_URL` | — | …paired `POST /anonymize` service |
+| `SKYBRIDGE_MASK_ANALYZE_URL` | — (`http://presidio-analyzer:3000/analyze` under `deploy/docker-compose.yml`) | enable content masking: any `POST /analyze` service — Microsoft Presidio by default |
+| `SKYBRIDGE_MASK_ANONYMIZE_URL` | — (`http://presidio-anonymizer:3000/anonymize` under compose) | …paired `POST /anonymize` service |
+| `SKYBRIDGE_MASK_LANGUAGE` | `en` | language passed to the analyzer |
+| `SKYBRIDGE_MASK_ENTITIES` | — (low-cost regex set: `EMAIL_ADDRESS,PHONE_NUMBER,CREDIT_CARD,US_SSN,IP_ADDRESS,IBAN_CODE,CRYPTO`) | comma-separated Presidio entity types to detect; NER-backed types (`PERSON`, `LOCATION`, `ORGANIZATION`, `NRP`) are opt-in — they run full spaCy inference per value and are prone to false positives on ordinary business data |
+| `SKYBRIDGE_MASK_ANONYMIZERS` | — (blanket `{"DEFAULT":{"type":"replace","new_value":"[redacted]"}}`) | JSON Presidio "anonymizers" object, one strategy per entity type — e.g. partial-mask an SSN instead of a flat replace |
+| `SKYBRIDGE_MASK_MODE` | `best-effort` | `best-effort` forwards a value unmasked if the remote masker errors/is unreachable (a masker outage never blocks a query); `strict` aborts the row/connection instead so unmasked content never reaches the client (mirrors hoop.dev's `DLP_MODE`) |
 | `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present a curlix session token, not a DB password) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /api/v1/data-studio/studio/native-access/proxy-exchange`) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN` | `SKYBRIDGE_TOKEN` | bearer for the exchange call |
@@ -350,6 +344,19 @@ SKYBRIDGE_AWS_REGION=us-east-1 \
 go run ./cmd/skybridge-edge
 ```
 
+Or set a single `SKYBRIDGE_KEY` instead of `SKYBRIDGE_EDGE_GATEWAY`/`SKYBRIDGE_ORG_ID`/`SKYBRIDGE_TOKEN`
+(the connector enrollment mint returns this as `customer_handoff.connector_key`):
+
+```sh
+SKYBRIDGE_KEY="curlix://org-123:<enrollment-token>@gateway.example.com?edge_id=edge-1" \
+SKYBRIDGE_AWS_REGION=us-east-1 \
+go run ./cmd/skybridge-edge
+```
+
+`SKYBRIDGE_KEY` only seeds defaults — any discrete `SKYBRIDGE_*` var above still overrides it, so
+existing deployments and scripts keep working unchanged. The connector-gateway (`:7100`) and enroll
+(`:7101`) ports are fixed by convention and derived from the key's bare host.
+
 **Deploying on AWS?** Use the ready-made CloudFormation template instead of setting these env vars
 by hand — see [Deploying on AWS (CloudFormation)](#deploying-on-aws-cloudformation) below.
 
@@ -397,15 +404,16 @@ persisted-identity secret(s), IAM roles, security group, log group.
 ```sh
 aws cloudformation create-stack \
   --stack-name curlix-edge \
-  --template-body file://integrations/curlix-connector/cloudformation/curlix-edge.yaml \
+  --template-body file://curlix-edge.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters file://parameters.json
 ```
 
 Get `parameters.json` (VPC/subnets pre-filled, enrollment token included) from **Curlix
-Administration → Connectors** when you mint a new connector. To move to a newer image, update the
-stack's `ConnectorImage` parameter and redeploy — the mTLS identity above means this no longer
-requires a fresh enrollment token.
+Administration → Connectors** when you mint a new connector. The `curlix-edge.yaml` template itself
+is shared directly by the Curlix team as part of onboarding — not a self-serve download today. To
+move to a newer image, update the stack's `ConnectorImage` parameter and redeploy — the mTLS
+identity above means this no longer requires a fresh enrollment token.
 
 ## Docs
 

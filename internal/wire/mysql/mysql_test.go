@@ -4,10 +4,19 @@ import (
 	"bufio"
 	"bytes"
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/wire"
 )
+
+// errMasker always fails, simulating a masking-service outage under strict mode.
+type errMasker struct{}
+
+func (errMasker) MaskRow(context.Context, []mask.Column, [][]byte) ([][]byte, error) {
+	return nil, mask.ErrMaskerUnavailable
+}
 
 func TestReadLenEncInt(t *testing.T) {
 	cases := []struct {
@@ -106,7 +115,10 @@ func TestMaskTextRow(t *testing.T) {
 	row = appendLenEncInt(row, uint64(len("alice@example.com")))
 	row = append(row, "alice@example.com"...)
 
-	out, ok := maskTextRow(context.Background(), row, cols, overlay)
+	out, _, ok, err := maskTextRow(context.Background(), row, cols, overlay)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !ok {
 		t.Fatal("maskTextRow returned ok=false")
 	}
@@ -126,9 +138,27 @@ func TestMaskTextRowPreservesNull(t *testing.T) {
 	cols := []mask.Column{{Name: "email", Text: true}}
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
 	row := []byte{0xFB} // single NULL
-	out, ok := maskTextRow(context.Background(), row, cols, overlay)
+	out, _, ok, err := maskTextRow(context.Background(), row, cols, overlay)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if !ok || len(out) != 1 || out[0] != 0xFB {
 		t.Fatalf("NULL not preserved: out=%v ok=%v", out, ok)
+	}
+}
+
+func TestMaskTextRowPropagatesMaskerError(t *testing.T) {
+	cols := []mask.Column{{Name: "email", Text: true}}
+	row := []byte{}
+	row = appendLenEncInt(row, uint64(len("alice@example.com")))
+	row = append(row, "alice@example.com"...)
+
+	_, _, ok, err := maskTextRow(context.Background(), row, cols, errMasker{})
+	if !errors.Is(err, mask.ErrMaskerUnavailable) {
+		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
+	}
+	if ok {
+		t.Fatal("ok must be false on masker error")
 	}
 }
 
@@ -168,7 +198,7 @@ func TestServerToClientMasksResultSet(t *testing.T) {
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
 	var out bytes.Buffer
 	sb := bufio.NewReader(&stream)
-	_ = s.serverToClient(context.Background(), sb, &out, overlay)
+	_ = s.serverToClient(context.Background(), sb, &out, overlay, wire.NoopRecorder{})
 
 	got := out.Bytes()
 	if bytes.Contains(got, []byte("alice@example.com")) || bytes.Contains(got, []byte("bob@example.com")) {
@@ -183,6 +213,30 @@ func TestServerToClientMasksResultSet(t *testing.T) {
 	}
 }
 
+// TestServerToClientAbortsOnMaskerFailure asserts a masker error stops the result set mid-stream
+// instead of forwarding the unmasked row to the client (strict-mode masking failure).
+func TestServerToClientAbortsOnMaskerFailure(t *testing.T) {
+	s := &state{caps: 0, queries: make(chan struct{}, 1)}
+	s.queries <- struct{}{}
+
+	var stream bytes.Buffer
+	stream.Write(pkt(1, []byte{0x01}))
+	stream.Write(pkt(2, colDef("email")))
+	stream.Write(pkt(3, eofPacket()))
+	stream.Write(pkt(4, textRow("alice@example.com")))
+	stream.Write(pkt(5, eofPacket()))
+
+	var out bytes.Buffer
+	sb := bufio.NewReader(&stream)
+	err := s.serverToClient(context.Background(), sb, &out, errMasker{}, wire.NoopRecorder{})
+	if !errors.Is(err, mask.ErrMaskerUnavailable) {
+		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
+	}
+	if bytes.Contains(out.Bytes(), []byte("alice@example.com")) {
+		t.Fatal("unmasked email must never reach the client when the masker fails in strict mode")
+	}
+}
+
 // TestServerToClientForwardsNonQuery verifies that without a pending query, packets pass through
 // untouched (e.g. handshake/auth/OK traffic).
 func TestServerToClientForwardsNonQuery(t *testing.T) {
@@ -192,7 +246,7 @@ func TestServerToClientForwardsNonQuery(t *testing.T) {
 
 	var out bytes.Buffer
 	sb := bufio.NewReader(bytes.NewReader(in))
-	_ = s.serverToClient(context.Background(), sb, &out, mask.Noop{})
+	_ = s.serverToClient(context.Background(), sb, &out, mask.Noop{}, wire.NoopRecorder{})
 
 	if !bytes.Equal(out.Bytes(), in) {
 		t.Fatalf("non-query traffic altered: got %v want %v", out.Bytes(), in)

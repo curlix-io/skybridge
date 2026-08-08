@@ -18,8 +18,44 @@ type Engine interface {
 	Name() string
 	// Proxy runs until either side closes or an unrecoverable protocol error occurs. It must not
 	// return until both directions are done; the caller closes the connections.
-	Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker) error
+	Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder Recorder) error
 }
+
+// Recorder captures a session replay transcript (session replay design, hoop.dev parity) as the
+// engine's already-masked traffic passes through it. Implementations buffer in memory and ship
+// the transcript to the control plane on session close — see internal/gateway/httpstore.go's
+// SessionTranscript. RecordInput receives raw client->server bytes (verbatim, before any protocol
+// parsing — replay displays these best-effort/opaque, same as the query the client actually
+// sent). RecordOutput receives a rendered, human-readable form of one already-masked result unit
+// (a decoded row for postgres/mysql, a coarser per-document summary for mongo — see that engine's
+// Proxy for why). Implementations must be safe for concurrent use (input and output run on
+// separate goroutines) and must never block the proxy loop on a slow control-plane flush.
+type Recorder interface {
+	RecordInput(raw []byte)
+	RecordOutput(text string)
+}
+
+// NoopRecorder discards everything. Default when session replay is disabled.
+type NoopRecorder struct{}
+
+// RecordInput implements Recorder.
+func (NoopRecorder) RecordInput(_ []byte) {}
+
+// RecordOutput implements Recorder.
+func (NoopRecorder) RecordOutput(_ string) {}
+
+// recorderWriter adapts a Recorder to an io.Writer so client->server bytes can be tee'd into it
+// with io.TeeReader/io.MultiWriter without changing the verbatim-forwarding copy loops.
+type recorderWriter struct{ rec Recorder }
+
+func (w recorderWriter) Write(p []byte) (int, error) {
+	w.rec.RecordInput(p)
+	return len(p), nil
+}
+
+// RecorderInputWriter adapts a Recorder to an io.Writer (see recorderWriter) for engines that tee
+// client->server bytes into the recorder via io.TeeReader/io.MultiWriter.
+func RecorderInputWriter(rec Recorder) io.Writer { return recorderWriter{rec: rec} }
 
 // UpstreamCredential is a database credential the agent uses to authenticate to the upstream when
 // credential injection (handoff) is enabled. Database, when empty, leaves the client's requested
@@ -44,7 +80,7 @@ type CredentialResolver func(ctx context.Context, startup map[string]string, sec
 // back to the verbatim Proxy path.
 type InjectingEngine interface {
 	Engine
-	ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve CredentialResolver) error
+	ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve CredentialResolver, recorder Recorder) error
 }
 
 // Passthrough is a transparent bidirectional copy with no inspection or masking. Engines that do

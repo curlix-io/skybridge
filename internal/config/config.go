@@ -4,6 +4,7 @@ package config
 
 import (
 	"encoding/json"
+	"log"
 	"os"
 	"strconv"
 	"strings"
@@ -15,6 +16,12 @@ import (
 const (
 	ModeListener = "listener" // agent itself listens for native clients (clients reach the agent)
 	ModeTunnel   = "tunnel"   // agent dials the relay gateway and serves streams over an egress tunnel
+)
+
+// Masking failure-handling modes (SKYBRIDGE_MASK_MODE). See Agent.MaskMode.
+const (
+	ModeBestEffort = "best-effort"
+	ModeStrict     = "strict"
 )
 
 // Agent is the resolved configuration for an egress-side Skybridge agent.
@@ -43,7 +50,25 @@ type Agent struct {
 	MaskAnalyzeURL   string // empty disables the default remote masker
 	MaskAnonymizeURL string
 	MaskLanguage     string
-	PIIOverlay       map[string]string // column->token overlay you define (off by default)
+	// MaskEntities restricts /analyze to these Presidio entity types (SKYBRIDGE_MASK_ENTITIES,
+	// comma-separated, e.g. "EMAIL_ADDRESS,US_SSN,CREDIT_CARD"). Empty means the masker falls back
+	// to a low-cost regex/rule-based default set rather than Presidio's all-45-recognizers default —
+	// NER-backed types (PERSON, LOCATION, ORGANIZATION, NRP) require full spaCy inference per value
+	// and are prone to false positives on ordinary business data (see Presidio's NER entity cost
+	// tiers, e.g. https://hoop.dev/docs/setup/deployment/presidio). Opt into those explicitly.
+	MaskEntities []string
+	// MaskAnonymizers is Presidio's /anonymize "anonymizers" object verbatim (SKYBRIDGE_MASK_ANONYMIZERS,
+	// JSON), letting each entity type get its own strategy (e.g. partial-mask SSNs, hash emails)
+	// instead of one blanket replace. Empty uses a single DEFAULT replace-with-"[redacted]" rule.
+	MaskAnonymizers map[string]any
+	// MaskMode controls what happens when the remote masker itself fails (Presidio unreachable,
+	// errors, malformed response) — SKYBRIDGE_MASK_MODE, "best-effort" (default) or "strict".
+	// best-effort forwards the value unmasked so a masker outage never blocks legitimate queries
+	// (hoop.dev's DLP_MODE=best-effort). strict fails the row/connection instead of ever letting
+	// unmasked content reach the client — hoop.dev's DLP_MODE=strict. A detection MISS (the masker
+	// ran fine and found nothing) is not a failure in either mode; only masker errors are affected.
+	MaskMode   string
+	PIIOverlay map[string]string // column->token overlay you define (off by default)
 
 	// Dynamic overlay source (optional). When PIIOverlayURL is set the agent fetches the org's
 	// projected column->token overlay from the control plane at startup and re-fetches on an
@@ -62,6 +87,16 @@ type Agent struct {
 	InjectCredentials       bool   // SKYBRIDGE_INJECT_CREDENTIALS
 	CredentialExchangeURL   string // SKYBRIDGE_CREDENTIAL_EXCHANGE_URL (POST endpoint on the control plane)
 	CredentialExchangeToken string // bearer for the exchange call (defaults to SKYBRIDGE_TOKEN)
+
+	// Kubernetes API proxy credential exchange (docs/design/kubernetes-access-broker.md). Separate
+	// URL from CredentialExchangeURL above: the K8s exchange resolves a bearer token per HTTP
+	// request (no persistent login step), while the DB exchange resolves once per connection login —
+	// different request/response shapes, so a distinct endpoint rather than overloading one.
+	K8sCredentialExchangeURL string // SKYBRIDGE_K8S_CREDENTIAL_EXCHANGE_URL (defaults to unset — Kubernetes targets are unservable without it)
+	// Client-side TLS termination for the Kubernetes API proxy target — always required (kubectl only
+	// speaks HTTPS to a cluster API server; there is no plaintext client mode like Postgres/MySQL).
+	K8sClientTLSCertPEM []byte // SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM / _FILE
+	K8sClientTLSKeyPEM  []byte // SKYBRIDGE_K8S_CLIENT_TLS_KEY_PEM / _FILE
 
 	// Client-side TLS termination (Postgres). When a cert+key is provided (or a self-signed cert is
 	// requested) the agent accepts the native client's SSLRequest and completes a TLS handshake, so
@@ -106,6 +141,21 @@ type Agent struct {
 	// exchanges that for an enroll token — no static secret, no human minting a token, safe to call
 	// on every renewal/restart. Takes priority over WireMtlsClientCertPEM/WireMtlsEnrollToken when set.
 	WireMtlsIamAuthEnabled bool // SKYBRIDGE_WIRE_MTLS_IAM_AUTH (truthy)
+
+	// Session replay (hoop.dev parity, session replay design). When enabled AND the gateway put a
+	// SessionID on OpenMeta (control-plane session recording is on there too), the agent's wire
+	// engines capture a transcript of already-masked input/output and flush it back over the
+	// tunnel control channel on session end. Off by default — belt-and-suspenders alongside the
+	// control plane's own CURLIX_STUDIO_SESSION_REPLAY_ENABLED flag, since this recorder runs on
+	// customer infra. Tunnel mode only (listener mode has no control-plane session id).
+	SessionReplayEnabled  bool // SKYBRIDGE_SESSION_REPLAY_ENABLED
+	SessionReplayMaxBytes int  // SKYBRIDGE_SESSION_REPLAY_MAX_BYTES (0 → default 5 MiB)
+}
+
+// MaskStrict reports whether a masker failure should abort the row/connection (SKYBRIDGE_MASK_MODE=strict)
+// rather than forward the value unmasked. Any value other than "strict" is treated as best-effort.
+func (a Agent) MaskStrict() bool {
+	return strings.ToLower(strings.TrimSpace(a.MaskMode)) == ModeStrict
 }
 
 // ClientTLSConfigured reports whether client-side TLS termination should be enabled.
@@ -139,6 +189,9 @@ func LoadAgent() Agent {
 		MaskAnalyzeURL:        env("SKYBRIDGE_MASK_ANALYZE_URL", ""),
 		MaskAnonymizeURL:      env("SKYBRIDGE_MASK_ANONYMIZE_URL", ""),
 		MaskLanguage:          env("SKYBRIDGE_MASK_LANGUAGE", "en"),
+		MaskEntities:          parseEntities(env("SKYBRIDGE_MASK_ENTITIES", "")),
+		MaskAnonymizers:       parseAnonymizers(env("SKYBRIDGE_MASK_ANONYMIZERS", "")),
+		MaskMode:              strings.ToLower(env("SKYBRIDGE_MASK_MODE", ModeBestEffort)),
 		PIIOverlay:            parseOverlay(env("SKYBRIDGE_PII_OVERLAY", "")),
 		PIIOverlayURL:         env("SKYBRIDGE_PII_OVERLAY_URL", ""),
 		PIIOverlayToken:       env("SKYBRIDGE_PII_OVERLAY_TOKEN", env("SKYBRIDGE_TOKEN", "")),
@@ -147,6 +200,10 @@ func LoadAgent() Agent {
 		InjectCredentials:       truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
 		CredentialExchangeURL:   env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),
 		CredentialExchangeToken: env("SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+
+		K8sCredentialExchangeURL: env("SKYBRIDGE_K8S_CREDENTIAL_EXCHANGE_URL", ""),
+		K8sClientTLSCertPEM:      pemFromEnv("SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM", "SKYBRIDGE_K8S_CLIENT_TLS_CERT_FILE"),
+		K8sClientTLSKeyPEM:       pemFromEnv("SKYBRIDGE_K8S_CLIENT_TLS_KEY_PEM", "SKYBRIDGE_K8S_CLIENT_TLS_KEY_FILE"),
 
 		ClientTLSCertPEM:    pemFromEnv("SKYBRIDGE_CLIENT_TLS_CERT_PEM", "SKYBRIDGE_CLIENT_TLS_CERT_FILE"),
 		ClientTLSKeyPEM:     pemFromEnv("SKYBRIDGE_CLIENT_TLS_KEY_PEM", "SKYBRIDGE_CLIENT_TLS_KEY_FILE"),
@@ -167,6 +224,9 @@ func LoadAgent() Agent {
 		WireMtlsClientKeyPEM:  pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_FILE"),
 
 		WireMtlsIamAuthEnabled: truthy(env("SKYBRIDGE_WIRE_MTLS_IAM_AUTH", "")),
+
+		SessionReplayEnabled:  truthy(env("SKYBRIDGE_SESSION_REPLAY_ENABLED", "")),
+		SessionReplayMaxBytes: atoiDefault(env("SKYBRIDGE_SESSION_REPLAY_MAX_BYTES", ""), 5<<20),
 	}
 	return a
 }
@@ -235,6 +295,11 @@ type Edge struct {
 	AWSExternalID    string
 	AWSBinary        string
 
+	// Governed kubectl access (executed locally at the edge — see internal/edge/k8sexec).
+	K8sKubeconfig string
+	K8sContext    string
+	K8sBinary     string
+
 	// Studio execution agent (Query Studio dispatch — curlix.studiogateway.v1 on :7200).
 	StudioGateway         string // SKYBRIDGE_STUDIO_GATEWAY host:port
 	StudioEnrollGateway   string // SKYBRIDGE_STUDIO_ENROLL_GATEWAY (defaults to StudioGateway)
@@ -254,24 +319,39 @@ type Edge struct {
 	WireProxy Agent
 }
 
-// LoadEdge reads the unified edge config from the environment.
+// LoadEdge reads the unified edge config from the environment. When SKYBRIDGE_KEY is set (a
+// single curlix://org:token@host DSN, see dsn.go), its decoded fields seed the defaults below —
+// any discrete SKYBRIDGE_* var still takes priority over the key, so existing deployments and the
+// CloudFormation/mTLS-enroll paths (which don't use a key at all) are unaffected.
 func LoadEdge() Edge {
+	key, err := parseEdgeKey(env("SKYBRIDGE_KEY", ""))
+	if err != nil {
+		log.Printf("skybridge-edge: %v — ignoring SKYBRIDGE_KEY", err)
+		key = EdgeKey{}
+	}
+	caBundle := pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE")
+	if len(caBundle) == 0 {
+		caBundle = key.CABundlePEM
+	}
 	return Edge{
-		GatewayAddr:             env("SKYBRIDGE_EDGE_GATEWAY", env("SKYBRIDGE_GATEWAY", "")),
-		TenantID:                env("SKYBRIDGE_ORG_ID", ""),
-		EdgeID:                  env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", "")),
-		Token:                   env("SKYBRIDGE_TOKEN", ""),
+		GatewayAddr:             env("SKYBRIDGE_EDGE_GATEWAY", env("SKYBRIDGE_GATEWAY", hostPort(key.GatewayHost, "7100"))),
+		TenantID:                env("SKYBRIDGE_ORG_ID", key.OrgID),
+		EdgeID:                  env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", key.EdgeID)),
+		Token:                   env("SKYBRIDGE_TOKEN", key.EnrollmentToken),
 		Insecure:                truthy(env("SKYBRIDGE_EDGE_INSECURE", "")),
-		CABundle:                pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE"),
+		CABundle:                caBundle,
 		TLSDir:                  env("SKYBRIDGE_TLS_DIR", ""),
-		EnrollTarget:            env("SKYBRIDGE_ENROLL_GATEWAY", ""),
-		EnrollToken:             env("SKYBRIDGE_ENROLLMENT_TOKEN", ""),
+		EnrollTarget:            env("SKYBRIDGE_ENROLL_GATEWAY", hostPort(key.GatewayHost, "7101")),
+		EnrollToken:             env("SKYBRIDGE_ENROLLMENT_TOKEN", key.EnrollmentToken),
 		TrustDomain:             env("SKYBRIDGE_SPIFFE_TRUST_DOMAIN", ""),
 		IdentitySecretARN:       env("SKYBRIDGE_IDENTITY_SECRET_ARN", ""),
-		AWSRegion:               env("SKYBRIDGE_AWS_REGION", ""),
+		AWSRegion:               env("SKYBRIDGE_AWS_REGION", key.AWSRegion),
 		AWSAssumeRoleARN:        env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
 		AWSExternalID:           env("SKYBRIDGE_AWS_EXTERNAL_ID", ""),
 		AWSBinary:               env("SKYBRIDGE_AWS_BINARY", ""),
+		K8sKubeconfig:           env("SKYBRIDGE_K8S_KUBECONFIG", ""),
+		K8sContext:              env("SKYBRIDGE_K8S_CONTEXT", ""),
+		K8sBinary:               env("SKYBRIDGE_K8S_BINARY", ""),
 		StudioGateway:           env("SKYBRIDGE_STUDIO_GATEWAY", ""),
 		StudioEnrollGateway:     env("SKYBRIDGE_STUDIO_ENROLL_GATEWAY", ""),
 		StudioEnrollmentToken:   env("SKYBRIDGE_STUDIO_ENROLLMENT_TOKEN", ""),
@@ -420,6 +500,34 @@ func defaultListen(dbType string) string {
 	default:
 		return ":15432"
 	}
+}
+
+func parseEntities(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.ToUpper(strings.TrimSpace(part))
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func parseAnonymizers(raw string) map[string]any {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var m map[string]any
+	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		log.Printf("skybridge: invalid SKYBRIDGE_MASK_ANONYMIZERS (ignoring): %v", err)
+		return nil
+	}
+	return m
 }
 
 func parseOverlay(raw string) map[string]string {
