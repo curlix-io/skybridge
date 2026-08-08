@@ -8,7 +8,18 @@ import (
 	"testing"
 )
 
+// setStaticAWSCreds makes PresignGetCallerIdentity deterministic in CI, where there's no ambient
+// IMDS/task role to satisfy the SDK's default credential chain. Presigning only needs *some*
+// static credentials to sign against — it never calls STS over the network.
+func setStaticAWSCreds(t *testing.T) {
+	t.Helper()
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key-id")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-access-key")
+	t.Setenv("AWS_REGION", "us-west-2")
+}
+
 func TestEnrollTokenViaIAM_RequestBodyHasExpectedFields(t *testing.T) {
+	setStaticAWSCreds(t)
 	var captured map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if err := json.NewDecoder(r.Body).Decode(&captured); err != nil {
@@ -43,6 +54,7 @@ func TestEnrollTokenViaIAM_RequestBodyHasExpectedFields(t *testing.T) {
 }
 
 func TestEnrollTokenViaIAM_MergesExtraFields(t *testing.T) {
+	setStaticAWSCreds(t)
 	var captured map[string]any
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&captured)
