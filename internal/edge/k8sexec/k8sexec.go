@@ -12,8 +12,8 @@ import (
 	"github.com/curlix-io/skybridge/internal/edge"
 )
 
-// ToolKubectl is the SaaS-side tool name this package handles — MUST match the backend's
-// edge_tool_names() (backend/src/curlix/ai_agent/tool_executor.py).
+// ToolKubectl is the control-plane-side tool name this package handles — MUST match whatever
+// name your dispatcher uses for this tool.
 const ToolKubectl = "kubectl_exec"
 
 // Options configures the edge kubectl executor.

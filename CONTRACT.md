@@ -82,8 +82,7 @@ Optional. When the gateway is configured with a control-plane URL it reports the
 relayed native session over HTTP. The control plane remains the **single writer** of the durable
 session store; the gateway holds no database driver.
 
-Base path defaults to `/api/v1/data-studio/studio/native-sessions` and is configurable
-(`SKYBRIDGE_GW_SESSION_PATH`).
+Base path defaults to `/api/v1/sessions` and is configurable (`SKYBRIDGE_GW_SESSION_PATH`).
 
 ### Start
 
@@ -123,7 +122,7 @@ Content-Type: application/json
   "bytes_up":    1024,
   "bytes_down":  2048,
   "status":      "executed",
-  "db_username": "curlix_s_9f2a",  // optional; login sniffed from the handshake (see Attribution)
+  "db_username": "svc_s_9f2a",  // optional; login sniffed from the handshake (see Attribution)
   "error":       ""
 }
 ```
@@ -142,15 +141,15 @@ Response `200`.
 ## 3. Credential exchange (agent → control plane)
 
 Optional. Used only when credential injection is enabled (`SKYBRIDGE_INJECT_CREDENTIALS=true`). After
-the agent terminates a native client's login (the client presented an opaque curlix **session token**
+the agent terminates a native client's login (the client presented an opaque **session token**
 as its password), it exchanges that token for a freshly-minted upstream credential. The agent — not
 the gateway — performs this exchange, so it works identically in listener and tunnel mode and the
 gateway stays a pure byte relay. The minted secret exists in clear only in this response and never
 reaches the native client.
 
 ```
-POST {SKYBRIDGE_CREDENTIAL_EXCHANGE_URL}      (default control-plane route:
-Authorization: Bearer <token>                  /api/v1/data-studio/studio/native-access/proxy-exchange)
+POST {SKYBRIDGE_CREDENTIAL_EXCHANGE_URL}      (your control-plane's proxy-exchange route)
+Authorization: Bearer <token>
 Content-Type: application/json
 
 {
@@ -165,7 +164,7 @@ Response `200`:
 
 ```json
 {
-  "username": "curlix_s_ab12cd",     // upstream DB role to authenticate as
+  "username": "svc_s_ab12cd",     // upstream DB role to authenticate as
   "password": "…",                    // minted secret (used only to originate upstream auth)
   "database": "appdb"                 // optional; overrides the client's requested database
 }
@@ -179,7 +178,7 @@ authentication error shown to the native client (e.g. a Postgres `ErrorResponse`
 - The control plane **re-authorizes** the bound actor at exchange time (access may have been revoked
   since the token was minted) and records a credential **lease** so the minted credential is torn
   down on session end / by the sweep, exactly like the in-app execute path.
-- The exchange is gated by `CURLIX_STUDIO_CREDENTIAL_BROKER_ENFORCE`; the token is short-lived and
+- Whether the exchange is enforced is a control-plane policy decision; the token is short-lived and
   may be exchanged multiple times within its window (native clients open several pooled connections).
 - Engines that do not implement injection (currently Mongo) ignore this contract and forward the
   client's own auth verbatim. Postgres and MySQL implement it. MySQL additionally requires client TLS
@@ -216,8 +215,7 @@ against the organization's **Allowed tenant IPs** (same KV as HTTP `/api/v1`) **
 wire handshake. The check is best-effort from the relay's perspective: a denial closes the TCP
 connection; an allow proceeds to byte relay and (when enabled) credential injection.
 
-Base path defaults to `/api/v1/data-studio/studio/native-access/wire-admit` and is configurable
-(`SKYBRIDGE_GW_WIRE_ADMIT_PATH`).
+Base path defaults to `/api/v1/wire-admit` and is configurable (`SKYBRIDGE_GW_WIRE_ADMIT_PATH`).
 
 ```
 POST {baseURL}{basePath}

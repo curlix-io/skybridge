@@ -12,8 +12,8 @@ drivers), and **masks PII at the source** — so raw rows never leave your netwo
 
 **Jump to:** [How it works](#how-it-works) · [Quick start](#quick-start) ·
 [How masking works](#how-masking-works) · [Configure](#configure) ·
-[The `skybridge-edge` binary](#the-skybridge-edge-binary) ·
-[Deploying on AWS](#deploying-on-aws-cloudformation) · [Layout](#layout)
+[The `skybridge-edge` binary](#the-skybridge-edge-binary) · [Layout](#layout) ·
+[REDACTION.md](./REDACTION.md) (deep dive, with a live demo GIF)
 
 ## How it works
 
@@ -49,30 +49,32 @@ dials out, nothing dials in):
 - **Listener** — native clients connect straight to the agent. Simplest setup.
 - **Tunnel** — the agent dials **out** to a gateway; clients connect to the gateway, which relays
   already-masked bytes over the tunnel. Masking still happens at the agent.
-- **Edge** — `skybridge-edge` dials **out** to the SaaS Connector Gateway and runs dispatched
+- **Edge** — `skybridge-edge` dials **out** to a Connector Gateway and runs dispatched
   **read-only tool calls** locally — chiefly live AWS reads against your account — and can co-host the
   wire proxy in the same process. One install for everything that must run inside your network. See
   [The `skybridge-edge` binary](#the-skybridge-edge-binary) below.
 
 ## Quick start
 
-Put the agent in front of your database and point a native client at it. Pick one:
+Put the agent in front of your database and point a native client at it.
 
-**Run with Go** (needs Go ≥ 1.26, no build step):
+### Fastest path: column redaction, no external services
+
+Needs only Go ≥ 1.26 — no Docker, no Presidio, no network calls. This uses the column-name
+`Overlay` layer only (see [How masking works](#how-masking-works)); it won't catch PII embedded in
+free text, but it's the quickest way to see redaction working end to end.
 
 ```sh
 SKYBRIDGE_UPSTREAM=db.internal:5432 \
-SKYBRIDGE_PII_OVERLAY='{"email":"[redacted]","ssn":"[redacted]"}' \
+SKYBRIDGE_PII_OVERLAY_FILE=./examples/pii-overlay.yaml \
 go run ./cmd/skybridge-agent
 ```
 
-**Run with Docker** (brings up Microsoft Presidio's analyzer + anonymizer alongside the agent, per
-[hoop.dev's Presidio deployment guide](https://hoop.dev/docs/setup/deployment/presidio)):
-
-```sh
-cd deploy
-SKYBRIDGE_UPSTREAM=db.internal:5432 docker compose up
-```
+[`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml) is a column → replacement-token map in
+YAML (or JSON — both parse the same way); copy it, add your own columns, and point
+`SKYBRIDGE_PII_OVERLAY_FILE` at your copy. A file is easier to author, diff, and commit than the
+one-line inline alternative, `SKYBRIDGE_PII_OVERLAY='{"email":"[redacted]","ssn":"[redacted]"}'`
+(still supported; the file wins if both are set).
 
 Then connect a native client through the agent (listening on `:15432` by default):
 
@@ -80,13 +82,30 @@ Then connect a native client through the agent (listening on `:15432` by default
 psql "postgres://user:pass@localhost:15432/appdb"
 ```
 
+### Full path: add content-detection masking (catches PII in free text too)
+
+The column overlay above only matches by column *name*. To also catch PII-shaped values wherever
+they appear — free-text notes, JSON blobs, unlisted columns — layer on the `Remote` masker, a thin
+client for any Presidio-compatible `analyze`/`anonymize` service. The bundled Docker Compose setup
+brings up Microsoft Presidio's analyzer + anonymizer alongside the agent, per
+[hoop.dev's Presidio deployment guide](https://hoop.dev/docs/setup/deployment/presidio):
+
+```sh
+cd deploy
+SKYBRIDGE_UPSTREAM=db.internal:5432 docker compose up
+```
+
 That's it — result rows are masked before they reach the client, using Presidio's NER-based PII
-detection. Set `SKYBRIDGE_MASK_ANALYZE_URL`/`SKYBRIDGE_MASK_ANONYMIZE_URL` to empty to disable
-content masking (governed passthrough), or point them at a different `analyze`/`anonymize` service.
-Running with plain `go run` (no compose) has no mask URLs by default — set them explicitly to reach
-a Presidio instance you run yourself.
+detection, plus any `SKYBRIDGE_PII_OVERLAY`/`SKYBRIDGE_PII_OVERLAY_FILE` rules you set via the
+compose file's env vars. Set `SKYBRIDGE_MASK_ANALYZE_URL`/`SKYBRIDGE_MASK_ANONYMIZE_URL` to empty to
+disable content masking (governed passthrough), or point them at a different `analyze`/`anonymize`
+service. Running with plain `go run` (no compose) has no mask URLs by default — set them explicitly
+to reach a Presidio instance you run yourself.
 
 ## How masking works
+
+> For a deeper dive — including a live demo GIF, the anonymizer-strategy config, and exactly what's
+> live vs. groundwork in the path-scoped labels layer — see [REDACTION.md](./REDACTION.md).
 
 Every result row/document passes through a **chain of maskers**, each implementing the same
 interface (`mask.Masker.MaskRow`, in `internal/mask/mask.go`). A miss at any layer is not fatal —
@@ -137,12 +156,12 @@ transport error, non-200, or zero detected spans all fall through with the value
 **Layer 2 — `Overlay` (flat column-name map).** A case-insensitive `column name → replacement
 token` map (`SKYBRIDGE_PII_OVERLAY`, or fetched dynamically from the control plane via
 `SKYBRIDGE_PII_OVERLAY_URL` — see
-[Dynamic PII overlay](#dynamic-pii-overlay-from-administration--pii)). No path awareness: `total`
+[Dynamic PII overlay](#dynamic-pii-overlay-fetched-from-your-control-plane)). No path awareness: `total`
 under `order` and `total` under `user` share one rule.
 
 ### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`) — groundwork, not yet in the live chain
 
-`internal/pathlabel` (vendored from `github.com/curlix-io/pathlabel`) and `mask.PathOverlay`
+`internal/pathlabel` and `mask.PathOverlay`
 (`internal/mask/pathoverlay.go`) exist in this repo but are **not yet wired into the two layers
 above** — `buildMaskerWithOverlay` in `internal/agent/agent.go` doesn't include a `PathOverlay` in
 its chain, since doing so needs a real, populated `label.Store` to be anything but a permanent miss
@@ -166,6 +185,49 @@ column name — that skips the network round trip for fields a human has already
 layers run on **every** row/document by default; there's no separate "structured mode" vs.
 "unstructured mode" to configure.
 
+### Redaction in action: SQL rows, JSON, BSON, and free text
+
+Same masking chain, four shapes of data. Left is what the database returns; right is what the
+client actually receives.
+
+**A SQL row (column overlay — matches by column name, no external service needed):**
+
+```
+ id |         email          | ssn                          id |       email       |     ssn
+----+-------------------------+-----                →      ----+-------------------+-------------
+ 42 | alice@example.com      | 123-45-6789                 42 | [redacted]        | [redacted]
+```
+
+**A free-text column (content detection — `Remote`/Presidio catches PII regardless of column name):**
+
+```
+notes: "Called customer, callback number is 555-867-5309, said email jane@doe.com bounced"
+   →
+notes: "Called customer, callback number is [redacted], said email [redacted] bounced"
+```
+
+**A JSON blob stored in a text column (`Remote` inspects the value itself, so it doesn't care that
+it's JSON rather than prose):**
+
+```
+payload: '{"name":"Jane Doe","contact":"jane@doe.com"}'
+   →
+payload: '{"name":"Jane Doe","contact":"[redacted]"}'
+```
+
+**A nested Mongo/BSON document (path-scoped labels — lets `order.total` and `user.total` carry
+independent rules despite sharing a field name; see `PathOverlay` above, currently wired into the
+`dbquery` one-shot exec path, not yet the live Postgres/Mongo wire-proxy):**
+
+```
+{ "profile": { "email": "jane@doe.com", "name": "Jane" }, "order": { "total": 42 } }
+   →
+{ "profile": { "email": "[redacted]", "name": "Jane" }, "order": { "total": 42 } }
+```
+
+Only `profile.email` is redacted — `order.total` and `profile.name` carry no label, so they fall
+through every layer untouched, exactly as the fallthrough-on-miss contract guarantees.
+
 ## Configure
 
 Set these as environment variables (full list in `internal/config/config.go`):
@@ -176,7 +238,8 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_DB_TYPE` | `postgres` | `postgres`, `mysql`, or `mongodb` |
 | `SKYBRIDGE_LISTEN` | `:15432` / `:13306` / `:27018` | local address clients connect to |
 | `SKYBRIDGE_PII_OVERLAY` | — | JSON `{ "column": "[redacted]" }` map you define (static) |
-| `SKYBRIDGE_PII_OVERLAY_URL` | — | control-plane endpoint to fetch the org's projected overlay (`GET /api/v1/data-studio/studio/native-access/pii-overlay`); enables dynamic, hot-swapped masking |
+| `SKYBRIDGE_PII_OVERLAY_FILE` | — | path to a YAML or JSON file with the same column->token map (see [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml)) — easier to author/diff/commit than inline JSON; takes priority over `SKYBRIDGE_PII_OVERLAY` when both are set, falling back to it if the file is missing/invalid |
+| `SKYBRIDGE_PII_OVERLAY_URL` | — | control-plane endpoint to fetch the org's projected overlay (`GET /your-control-plane/pii-overlay`); enables dynamic, hot-swapped masking |
 | `SKYBRIDGE_PII_OVERLAY_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token for the overlay fetch |
 | `SKYBRIDGE_PII_OVERLAY_POLL_SECONDS` | `60` | overlay refresh interval (min 15s; `-1` = fetch once at startup) |
 | `SKYBRIDGE_MASK_ANALYZE_URL` | — (`http://presidio-analyzer:3000/analyze` under `deploy/docker-compose.yml`) | enable content masking: any `POST /analyze` service — Microsoft Presidio by default |
@@ -185,8 +248,8 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_MASK_ENTITIES` | — (low-cost regex set: `EMAIL_ADDRESS,PHONE_NUMBER,CREDIT_CARD,US_SSN,IP_ADDRESS,IBAN_CODE,CRYPTO`) | comma-separated Presidio entity types to detect; NER-backed types (`PERSON`, `LOCATION`, `ORGANIZATION`, `NRP`) are opt-in — they run full spaCy inference per value and are prone to false positives on ordinary business data |
 | `SKYBRIDGE_MASK_ANONYMIZERS` | — (blanket `{"DEFAULT":{"type":"replace","new_value":"[redacted]"}}`) | JSON Presidio "anonymizers" object, one strategy per entity type — e.g. partial-mask an SSN instead of a flat replace |
 | `SKYBRIDGE_MASK_MODE` | `best-effort` | `best-effort` forwards a value unmasked if the remote masker errors/is unreachable (a masker outage never blocks a query); `strict` aborts the row/connection instead so unmasked content never reaches the client (mirrors hoop.dev's `DLP_MODE`) |
-| `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present a curlix session token, not a DB password) |
-| `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /api/v1/data-studio/studio/native-access/proxy-exchange`) |
+| `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present an opaque session token, not a DB password) |
+| `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /your-control-plane/proxy-exchange`) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN` | `SKYBRIDGE_TOKEN` | bearer for the exchange call |
 | `SKYBRIDGE_CLIENT_TLS_CERT_FILE` / `_PEM` | — | server cert (Postgres) — enables terminating client TLS so the token isn't sent in cleartext |
 | `SKYBRIDGE_CLIENT_TLS_KEY_FILE` / `_PEM` | — | matching private key |
@@ -201,9 +264,9 @@ Switch databases by changing `SKYBRIDGE_DB_TYPE`; everything else is identical.
 
 By default the agent forwards the client's authentication to the database verbatim, so the native
 client presents a real database credential. With **credential injection** enabled, the client instead
-presents an **opaque curlix session token as its password**; the agent terminates that login locally,
-exchanges the token with the control plane for a freshly-minted, short-lived upstream credential, and
-**originates its own upstream authentication** with it (Postgres: trust / cleartext / md5 /
+presents an **opaque session token as its password**; the agent terminates that login locally,
+exchanges the token with your control plane for a freshly-minted, short-lived upstream credential,
+and **originates its own upstream authentication** with it (Postgres: trust / cleartext / md5 /
 SCRAM-SHA-256; MySQL: mysql_native_password / caching_sha2_password). The client therefore never holds
 a credential the database would accept directly, and result rows are still masked inline.
 
@@ -212,15 +275,16 @@ SKYBRIDGE_DB_TYPE=postgres \
 SKYBRIDGE_UPSTREAM=db.internal:5432 \
 SKYBRIDGE_INJECT_CREDENTIALS=true \
 SKYBRIDGE_TOKEN=<agent-service-bearer> \
-SKYBRIDGE_CREDENTIAL_EXCHANGE_URL=https://app.example.com/api/v1/data-studio/studio/native-access/proxy-exchange \
+SKYBRIDGE_CREDENTIAL_EXCHANGE_URL=https://app.example.com/your-control-plane/proxy-exchange \
 go run ./cmd/skybridge-agent
 ```
 
-The user first mints a session token from curlix
-(`POST /api/v1/data-studio/studio/connections/{role_id}/proxy-session`), then in pgAdmin/psql/DBeaver points the
-client at the **Skybridge listener** (not the database), uses any username, and pastes the session
-token **as the password**. Injection covers **Postgres** and **MySQL**; Mongo falls back to verbatim
-auth passthrough (logged at startup).
+Your control plane mints the session token however it likes (e.g. a `proxy-session` endpoint that
+returns a short-lived token for a given role/connection); the user then, in pgAdmin/psql/DBeaver,
+points the client at the **Skybridge listener** (not the database), uses any username, and pastes
+the session token **as the password**. Injection covers **Postgres** and **MySQL**; Mongo falls back
+to verbatim auth passthrough (logged at startup). See `CredentialExchangeURL`'s request/response
+shape in `CONTRACT.md` §3 to implement the control-plane side.
 
 **MySQL specifics.** MySQL's default auth is challenge-response, so the token cannot be recovered from
 it. The agent therefore terminates client TLS and switches the client to the **`mysql_clear_password`**
@@ -239,7 +303,7 @@ self-signed one) and connect the client with `sslmode=require`.
 # dev: ephemeral self-signed cert; clients use sslmode=require (no chain verification)
 SKYBRIDGE_DB_TYPE=postgres SKYBRIDGE_UPSTREAM=db.internal:5432 \
 SKYBRIDGE_INJECT_CREDENTIALS=true SKYBRIDGE_TOKEN=… \
-SKYBRIDGE_CREDENTIAL_EXCHANGE_URL=https://app.example.com/api/v1/data-studio/studio/native-access/proxy-exchange \
+SKYBRIDGE_CREDENTIAL_EXCHANGE_URL=https://app.example.com/your-control-plane/proxy-exchange \
 SKYBRIDGE_CLIENT_TLS_SELF_SIGNED=true \
 go run ./cmd/skybridge-agent
 # then: psql "host=localhost port=15432 user=me sslmode=require"  (password = the session token)
@@ -289,25 +353,26 @@ differently:
   while `prefer` falls back to a plaintext upstream. If the *client* itself speaks TLS to the agent,
   that connection drops to transparent passthrough (no masking, no upstream-TLS interception).
 
-### Dynamic PII overlay (from Administration → PII)
+### Dynamic PII overlay (fetched from your control plane)
 
-`SKYBRIDGE_PII_OVERLAY` is a static map. To keep native-client masking in sync with the column rules
-you define in **Administration → PII**, point the agent at the control plane instead:
+`SKYBRIDGE_PII_OVERLAY` / `SKYBRIDGE_PII_OVERLAY_FILE` are static. To keep native-client masking in
+sync with column rules your own admin surface manages, point the agent at an HTTP endpoint instead:
 
 ```sh
 SKYBRIDGE_ORG_ID=<org-uuid> \
 SKYBRIDGE_TOKEN=<org-scoped-bearer> \
-SKYBRIDGE_PII_OVERLAY_URL=https://app.example.com/api/v1/data-studio/studio/native-access/pii-overlay \
+SKYBRIDGE_PII_OVERLAY_URL=https://app.example.com/your-control-plane/pii-overlay \
 go run ./cmd/skybridge-agent
 ```
 
 The agent fetches `{ "columns": { "<column>": "<token>" } }` at startup and re-fetches every
-`SKYBRIDGE_PII_OVERLAY_POLL_SECONDS`, hot-swapping the overlay in place (no restart). Curlix projects
-the org's merged PII schema into per-category tokens (e.g. `email → [email]`, `ssn → [ssn]`),
-excluding business identifiers / operational columns. A failed fetch leaves the last-known (or static
-`SKYBRIDGE_PII_OVERLAY`) rules intact. Note the wire overlay does **full-cell** replacement only; it
-cannot do the partial / value-shape redaction the in-process execute pipeline performs, so token
-counts differ between the two paths by design.
+`SKYBRIDGE_PII_OVERLAY_POLL_SECONDS`, hot-swapping the overlay in place (no restart). Your control
+plane decides what "columns" contains — e.g. projecting a per-org PII schema into per-category
+tokens (`email → [email]`, `ssn → [ssn]`), excluding business identifiers / operational columns. A
+failed fetch leaves the last-known (or static `SKYBRIDGE_PII_OVERLAY`) rules intact. See
+`internal/agent/overlay_source.go` for the exact request/response contract, including
+`SKYBRIDGE_PII_OVERLAY_ORG_HEADER` if you need a header name other than the default
+`X-Organization-Id`.
 
 ## Layout
 
@@ -317,8 +382,7 @@ cmd/skybridge-gateway   relay gateway: agent endpoint + client listeners
 cmd/skybridge-edge      unified edge: call-home transport + AWS reads + optional wire proxy
 internal/wire           wire engines: postgres, mysql, mongo
 internal/mask           masking pipeline: remote (Presidio) masker + path overlay + column overlay
-internal/pathlabel      vendored from github.com/curlix-io/pathlabel: docpath (nested-document
-                         path walking) + label (path-scoped Store/Label types)
+internal/pathlabel      docpath (nested-document path walking) + label (path-scoped Store/Label types)
 internal/tunnel         egress multiplexed transport
 internal/gateway        agent registry + relay + optional session recording
 internal/edge           edge tool dispatch: envelope, read-only AWS policy, executor
@@ -348,7 +412,7 @@ Or set a single `SKYBRIDGE_KEY` instead of `SKYBRIDGE_EDGE_GATEWAY`/`SKYBRIDGE_O
 (the connector enrollment mint returns this as `customer_handoff.connector_key`):
 
 ```sh
-SKYBRIDGE_KEY="curlix://org-123:<enrollment-token>@gateway.example.com?edge_id=edge-1" \
+SKYBRIDGE_KEY="skybridge://org-123:<enrollment-token>@gateway.example.com?edge_id=edge-1" \
 SKYBRIDGE_AWS_REGION=us-east-1 \
 go run ./cmd/skybridge-edge
 ```
@@ -356,9 +420,6 @@ go run ./cmd/skybridge-edge
 `SKYBRIDGE_KEY` only seeds defaults — any discrete `SKYBRIDGE_*` var above still overrides it, so
 existing deployments and scripts keep working unchanged. The connector-gateway (`:7100`) and enroll
 (`:7101`) ports are fixed by convention and derived from the key's bare host.
-
-**Deploying on AWS?** Use the ready-made CloudFormation template instead of setting these env vars
-by hand — see [Deploying on AWS (CloudFormation)](#deploying-on-aws-cloudformation) below.
 
 #### Auth: bearer token vs. mTLS
 
@@ -389,31 +450,6 @@ so a replacement task picks up right where the old one left off — no new token
 Point one of these at a secret ARN the task's IAM role can `GetSecretValue`/`PutSecretValue` on
 (`internal/certstore`), and the edge mirrors its cert there on first enrollment, then loads from it
 on every subsequent start.
-
-If you deploy via [`curlix-edge.yaml`](../curlix-connector/cloudformation/curlix-edge.yaml), this is
-already handled for you — the template provisions the secrets, the IAM permissions, and the env
-vars automatically. Nothing to configure.
-
-## Deploying on AWS (CloudFormation)
-
-Most customers never touch the env vars above directly — they deploy
-[`integrations/curlix-connector/cloudformation/curlix-edge.yaml`](../curlix-connector/cloudformation/curlix-edge.yaml),
-which stands up an ECS Fargate task running this binary with everything wired: enrollment secret,
-persisted-identity secret(s), IAM roles, security group, log group.
-
-```sh
-aws cloudformation create-stack \
-  --stack-name curlix-edge \
-  --template-body file://curlix-edge.yaml \
-  --capabilities CAPABILITY_NAMED_IAM \
-  --parameters file://parameters.json
-```
-
-Get `parameters.json` (VPC/subnets pre-filled, enrollment token included) from **Curlix
-Administration → Connectors** when you mint a new connector. The `curlix-edge.yaml` template itself
-is shared directly by the Curlix team as part of onboarding — not a self-serve download today. To
-move to a newer image, update the stack's `ConnectorImage` parameter and redeploy — the mTLS
-identity above means this no longer requires a fresh enrollment token.
 
 ## Docs
 

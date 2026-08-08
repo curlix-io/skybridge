@@ -1,7 +1,5 @@
 // Package docpath walks map[string]any/[]any document trees and produces
-// index-erased, resolved-path leaves (see github.com/curlix-io/pathlabel design
-// doc §3.1). Vendored from github.com/curlix-io/pathlabel for use by
-// internal/mask's path-scoped overlay.
+// index-erased, resolved-path leaves, for use by internal/mask's path-scoped overlay.
 package docpath
 
 import (
@@ -11,15 +9,14 @@ import (
 
 // Leaf is a single string value or key encountered while walking a document.
 //
-// Path is the index-erased resolved path to the leaf (see §3.1): array
-// indices are always rendered as "[]", never a literal index, since array
-// position has no stable identity across documents in a schemaless collection.
+// Path is the index-erased resolved path to the leaf: array indices are always
+// rendered as "[]", never a literal index, since array position has no stable
+// identity across documents in a schemaless collection.
 //
-// IsKey distinguishes a leaf representing a map key itself (§3.1.1, for
-// documents that use PII as a key, e.g. {"user@email.com": {...}}) from an
-// ordinary value leaf. For a key leaf, Path is the path of the enclosing map
-// (i.e. the key's own parent path, not including the key itself), and Value
-// equals Key.
+// IsKey distinguishes a leaf representing a map key itself (for documents that
+// use PII as a key, e.g. {"user@email.com": {...}}) from an ordinary value
+// leaf. For a key leaf, Path is the path of the enclosing map (i.e. the key's
+// own parent path, not including the key itself), and Value equals Key.
 type Leaf struct {
 	Path  string
 	Key   string
@@ -65,8 +62,7 @@ func walk(node any, path string, emit func(Leaf)) {
 // root is not one of those two shapes.
 //
 // Because array indices are erased in Path, match is evaluated against every
-// leaf independently — there is no way to target "the 3rd element"
-// specifically, consistent with §3.1's index-erasure rationale.
+// leaf independently — there is no way to target "the 3rd element" specifically.
 func Replace(doc any, match func(Leaf) bool, replace func(Leaf) string) int {
 	count := 0
 	replaceIn(doc, "", func(l Leaf) (string, bool) {

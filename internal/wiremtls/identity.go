@@ -1,8 +1,8 @@
-// Package wiremtls implements mTLS identity for the Skybridge wire gateway↔agent tunnel (Phase 2,
-// docs/design/identity-aware-network-access.md). It replaces the plaintext SKYBRIDGE_GW_TOKEN
-// shared-secret check with a per-agent client certificate carrying a SPIFFE URI SAN:
+// Package wiremtls implements mTLS identity for the Skybridge wire gateway↔agent tunnel. It replaces
+// the plaintext SKYBRIDGE_GW_TOKEN shared-secret check with a per-agent client certificate carrying
+// a SPIFFE URI SAN:
 //
-//	spiffe://curlix.wire-agent/tenant/<tenant_id>/agent/<agent_id>
+//	spiffe://skybridge.wire-agent/tenant/<tenant_id>/agent/<agent_id>
 //
 // The cert is obtained via a one-time-token HTTP enroll bootstrap against the control plane (see
 // EnrollHTTP), not gRPC — the wire tunnel is raw TCP with hand-rolled framing (internal/tunnel), so
@@ -27,7 +27,7 @@ import (
 
 // DefaultTrustDomain is the SPIFFE trust domain placed in the CSR's URI SAN. The CSR SAN is only
 // informational — the gateway's CA sets the authoritative identity SAN when it signs.
-const DefaultTrustDomain = "curlix.wire-agent"
+const DefaultTrustDomain = "skybridge.wire-agent"
 
 // SpiffeID builds spiffe://<trust-domain>/tenant/<tenant>/agent/<agent>.
 func SpiffeID(trustDomain, tenant, agentID string) string {
@@ -61,7 +61,7 @@ func GenerateKeyAndCSR(trustDomain, tenant, agentID string) (keyPEM, csrPEM []by
 	}
 	cn := strings.TrimSpace(agentID)
 	if cn == "" {
-		cn = "curlix-wire-agent"
+		cn = "skybridge-wire-agent"
 	}
 	tmpl := &x509.CertificateRequest{
 		Subject:            pkix.Name{CommonName: cn},

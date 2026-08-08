@@ -10,13 +10,11 @@ import (
 // EdgeKey is the decoded form of a SKYBRIDGE_KEY connection string — one copy-pasteable value
 // instead of six separate SKYBRIDGE_* env vars for the common case (mirrors hoop.dev's HOOP_KEY).
 //
-// Format: curlix://<org_id>:<enrollment_token>@<gateway-host>[?edge_id=<id>&region=<aws-region>&ca=<base64-pem>]
+// Format: skybridge://<org_id>:<enrollment_token>@<gateway-host>[?edge_id=<id>&region=<aws-region>&ca=<base64-pem>]
 // The connector-gateway (7100) and enroll (7101) ports are fixed by convention and derived from
 // the bare host — they are never part of the DSN. The CA bundle, when present, is the mTLS trust
 // root PEM standard-base64-encoded (it contains newlines and `+`/`/` bytes that don't survive
-// unescaped in a URL query value) — see the CLI mTLS header decoder
-// (curlix_auth.cli_mtls.middleware._decode_client_cert_header) for the same convention on the
-// Python encode side.
+// unescaped in a URL query value) — the encode side must apply the same convention.
 type EdgeKey struct {
 	OrgID           string
 	EnrollmentToken string
@@ -38,8 +36,8 @@ func parseEdgeKey(raw string) (EdgeKey, error) {
 	if err != nil {
 		return EdgeKey{}, fmt.Errorf("invalid SKYBRIDGE_KEY: %w", err)
 	}
-	if u.Scheme != "curlix" {
-		return EdgeKey{}, fmt.Errorf("invalid SKYBRIDGE_KEY: expected curlix:// scheme, got %q", u.Scheme)
+	if u.Scheme != "skybridge" {
+		return EdgeKey{}, fmt.Errorf("invalid SKYBRIDGE_KEY: expected skybridge:// scheme, got %q", u.Scheme)
 	}
 	if u.Host == "" {
 		return EdgeKey{}, fmt.Errorf("invalid SKYBRIDGE_KEY: missing gateway host")

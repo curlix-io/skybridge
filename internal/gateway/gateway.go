@@ -134,7 +134,7 @@ func (g *Gateway) ListenAgents(ctx context.Context, ln net.Listener) error {
 // conn is a *tls.Conn with a verified client cert (the gateway's agent listener wraps ln in a
 // wiremtls.ServerConfig-based tls.Config), the cert's SPIFFE identity is authoritative and the
 // plaintext bearer token check is skipped entirely — mirrors the connector gateway's mTLS-vs-bearer
-// dual mode (see integrations/skybridge-gateway/src/curlix/connector/gateway.py:Connect).
+// dual mode.
 func (g *Gateway) ServeAgent(conn net.Conn) error {
 	sess := tunnel.Server(conn)
 	defer sess.Close()

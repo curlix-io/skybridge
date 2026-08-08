@@ -2,7 +2,7 @@
 //
 // In the default proxy path the agent forwards the client->upstream auth handshake verbatim, so the
 // native client presents a real database credential. Credential *injection* flips that: the client
-// presents an opaque curlix session token as its password, the agent terminates that client auth
+// presents an opaque session token as its password, the agent terminates that client auth
 // locally, exchanges the token for a freshly-minted upstream credential, and then ORIGINATES its own
 // upstream auth handshake with that credential. The client therefore never holds a credential the
 // database would accept directly.
@@ -94,7 +94,7 @@ const sniffStartupCap = 64 << 10
 
 // requestClientPassword asks the connected client for a cleartext password and returns it. It reads
 // the client's reply from br (the same buffered reader negotiateStartup/readStartupParams already use
-// on the client connection) so no buffered bytes are dropped. The returned value is the opaque curlix
+// on the client connection) so no buffered bytes are dropped. The returned value is the opaque
 // session token the client presented; the agent does not send AuthenticationOk here — it does so only
 // after the upstream auth succeeds (sendClientAuthOK).
 func requestClientPassword(w io.Writer, br *bufio.Reader) (string, error) {
@@ -417,8 +417,9 @@ func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
 }
 
 // saslPrep is a minimal SASLprep: Postgres applies SASLprep to the password, but for the ASCII
-// passwords curlix's brokers mint it is the identity function. We deliberately do not pull in a full
-// stringprep table; non-ASCII passwords are passed through unchanged (documented limitation).
+// passwords a credential broker typically mints it is the identity function. We deliberately do not
+// pull in a full stringprep table; non-ASCII passwords are passed through unchanged (documented
+// limitation).
 func saslPrep(password string) string { return password }
 
 // parseErrorResponse extracts the human-readable message ('M' field) from an ErrorResponse payload.

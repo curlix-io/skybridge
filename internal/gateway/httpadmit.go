@@ -24,7 +24,7 @@ type NoopWireAdmitter struct{}
 func (NoopWireAdmitter) Admit(context.Context, string, string, string) error { return nil }
 
 // DefaultWireAdmitPath is used when NewHTTPWireAdmitter is given an empty basePath.
-const DefaultWireAdmitPath = "/api/v1/data-studio/studio/native-access/wire-admit"
+const DefaultWireAdmitPath = "/api/v1/wire-admit"
 
 // HTTPWireAdmitter calls the control plane wire-admit route before relaying a native client.
 type HTTPWireAdmitter struct {

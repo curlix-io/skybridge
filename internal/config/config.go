@@ -9,7 +9,9 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/curlix-io/skybridge/internal/gateway"
 	"github.com/curlix-io/skybridge/internal/tunnel"
+	"gopkg.in/yaml.v3"
 )
 
 // Mode selects how the agent exposes databases.
@@ -67,8 +69,12 @@ type Agent struct {
 	// (hoop.dev's DLP_MODE=best-effort). strict fails the row/connection instead of ever letting
 	// unmasked content reach the client — hoop.dev's DLP_MODE=strict. A detection MISS (the masker
 	// ran fine and found nothing) is not a failure in either mode; only masker errors are affected.
-	MaskMode   string
-	PIIOverlay map[string]string // column->token overlay you define (off by default)
+	MaskMode string
+	// PIIOverlay is the column->token overlay you define (off by default): from SKYBRIDGE_PII_OVERLAY
+	// (inline JSON) or SKYBRIDGE_PII_OVERLAY_FILE (a path to a YAML or JSON file — easier to author,
+	// diff, and commit than one-line JSON in an env var). The file takes priority when both are set;
+	// an unreadable/invalid file falls back to the inline env var rather than failing startup.
+	PIIOverlay map[string]string
 
 	// Dynamic overlay source (optional). When PIIOverlayURL is set the agent fetches the org's
 	// projected column->token overlay from the control plane at startup and re-fetches on an
@@ -77,13 +83,16 @@ type Agent struct {
 	PIIOverlayURL         string // GET endpoint, e.g. https://app/api/v1/data-studio/studio/native-access/pii-overlay
 	PIIOverlayToken       string // bearer token for the fetch (defaults to SKYBRIDGE_TOKEN)
 	PIIOverlayPollSeconds int    // refresh interval in seconds (0 → default 60; <0 → fetch once)
+	// PIIOverlayOrgHeader overrides the request header carrying the org id on the dynamic overlay
+	// fetch (SKYBRIDGE_PII_OVERLAY_ORG_HEADER). Empty uses agent.DefaultOrgHeader.
+	PIIOverlayOrgHeader string
 
-	// Credential handoff / injection (design "skybridge-go-wire-proxy" §7 phase 3). When enabled the
-	// agent terminates the native client's login locally (the client presents an opaque curlix
-	// session token as its password instead of a database credential), exchanges that token with the
-	// control plane for a freshly-minted upstream credential, and originates its own upstream auth.
-	// The client therefore never holds a credential the database would accept directly. Disabled by
-	// default: the agent forwards the client's auth verbatim, as before.
+	// Credential handoff / injection. When enabled the agent terminates the native client's login
+	// locally (the client presents an opaque session token as its password instead of a database
+	// credential), exchanges that token with the control plane for a freshly-minted upstream
+	// credential, and originates its own upstream auth. The client therefore never holds a credential
+	// the database would accept directly. Disabled by default: the agent forwards the client's auth
+	// verbatim, as before.
 	InjectCredentials       bool   // SKYBRIDGE_INJECT_CREDENTIALS
 	CredentialExchangeURL   string // SKYBRIDGE_CREDENTIAL_EXCHANGE_URL (POST endpoint on the control plane)
 	CredentialExchangeToken string // bearer for the exchange call (defaults to SKYBRIDGE_TOKEN)
@@ -118,7 +127,7 @@ type Agent struct {
 	// When WireMtlsEnrollURL (or a cached cert under WireMtlsTLSDir) is available, RunTunnel dials
 	// the gateway over TLS presenting this agent's client cert instead of the plaintext
 	// SKYBRIDGE_TOKEN shared secret. Falls back to bearer-token tunnel mode when unset.
-	WireMtlsEnrollURL   string // SKYBRIDGE_WIRE_MTLS_ENROLL_URL (control-plane origin, e.g. https://app.curlix.io)
+	WireMtlsEnrollURL   string // SKYBRIDGE_WIRE_MTLS_ENROLL_URL (control-plane origin, e.g. https://app.example.com)
 	WireMtlsEnrollToken string // SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN (one-time token to bootstrap the first cert)
 	WireMtlsTLSDir      string // SKYBRIDGE_WIRE_MTLS_TLS_DIR (persists ca.pem/client.crt/client.key)
 	WireMtlsCABundlePEM []byte // SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM / _FILE (pins the enroll call's server TLS)
@@ -145,9 +154,9 @@ type Agent struct {
 	// Session replay (hoop.dev parity, session replay design). When enabled AND the gateway put a
 	// SessionID on OpenMeta (control-plane session recording is on there too), the agent's wire
 	// engines capture a transcript of already-masked input/output and flush it back over the
-	// tunnel control channel on session end. Off by default — belt-and-suspenders alongside the
-	// control plane's own CURLIX_STUDIO_SESSION_REPLAY_ENABLED flag, since this recorder runs on
-	// customer infra. Tunnel mode only (listener mode has no control-plane session id).
+	// tunnel control channel on session end. Off by default — belt-and-suspenders alongside any
+	// equivalent flag your control plane exposes, since this recorder runs on customer infra.
+	// Tunnel mode only (listener mode has no control-plane session id).
 	SessionReplayEnabled  bool // SKYBRIDGE_SESSION_REPLAY_ENABLED
 	SessionReplayMaxBytes int  // SKYBRIDGE_SESSION_REPLAY_MAX_BYTES (0 → default 5 MiB)
 }
@@ -192,10 +201,11 @@ func LoadAgent() Agent {
 		MaskEntities:          parseEntities(env("SKYBRIDGE_MASK_ENTITIES", "")),
 		MaskAnonymizers:       parseAnonymizers(env("SKYBRIDGE_MASK_ANONYMIZERS", "")),
 		MaskMode:              strings.ToLower(env("SKYBRIDGE_MASK_MODE", ModeBestEffort)),
-		PIIOverlay:            parseOverlay(env("SKYBRIDGE_PII_OVERLAY", "")),
+		PIIOverlay:            loadPIIOverlay(),
 		PIIOverlayURL:         env("SKYBRIDGE_PII_OVERLAY_URL", ""),
 		PIIOverlayToken:       env("SKYBRIDGE_PII_OVERLAY_TOKEN", env("SKYBRIDGE_TOKEN", "")),
 		PIIOverlayPollSeconds: atoiDefault(env("SKYBRIDGE_PII_OVERLAY_POLL_SECONDS", ""), 60),
+		PIIOverlayOrgHeader:   env("SKYBRIDGE_PII_OVERLAY_ORG_HEADER", ""),
 
 		InjectCredentials:       truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
 		CredentialExchangeURL:   env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),
@@ -300,7 +310,7 @@ type Edge struct {
 	K8sContext    string
 	K8sBinary     string
 
-	// Studio execution agent (Query Studio dispatch — curlix.studiogateway.v1 on :7200).
+	// Studio execution agent (Query Studio dispatch, on :7200).
 	StudioGateway         string // SKYBRIDGE_STUDIO_GATEWAY host:port
 	StudioEnrollGateway   string // SKYBRIDGE_STUDIO_ENROLL_GATEWAY (defaults to StudioGateway)
 	StudioEnrollmentToken string
@@ -320,7 +330,7 @@ type Edge struct {
 }
 
 // LoadEdge reads the unified edge config from the environment. When SKYBRIDGE_KEY is set (a
-// single curlix://org:token@host DSN, see dsn.go), its decoded fields seed the defaults below —
+// single skybridge://org:token@host DSN, see dsn.go), its decoded fields seed the defaults below —
 // any discrete SKYBRIDGE_* var still takes priority over the key, so existing deployments and the
 // CloudFormation/mTLS-enroll paths (which don't use a key at all) are unaffected.
 func LoadEdge() Edge {
@@ -361,7 +371,7 @@ func LoadEdge() Edge {
 		StudioDBUser:            env("SKYBRIDGE_STUDIO_DB_USER", ""),
 		StudioDBPassword:        env("SKYBRIDGE_STUDIO_DB_PASSWORD", ""),
 		StudioTLSDir:            env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
-		StudioTrustDomain:       env("SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN", "curlix.studio-agent"),
+		StudioTrustDomain:       env("SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN", "skybridge.studio-agent"),
 		StudioIdentitySecretARN: env("SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN", ""),
 		WireProxy:               LoadAgent(),
 	}
@@ -393,8 +403,8 @@ type Gateway struct {
 	// native-session lifecycle to the configured path; otherwise sessions are not recorded.
 	ControlPlaneURL   string
 	ControlPlaneToken string
-	SessionPath       string // base path for session lifecycle reports (default /api/v1/data-studio/studio/native-sessions)
-	WireAdmitPath     string // base path for wire client IP admission (default /api/v1/data-studio/studio/native-access/wire-admit)
+	SessionPath       string // base path for session lifecycle reports (default gateway.DefaultSessionPath)
+	WireAdmitPath     string // base path for wire client IP admission (default gateway.DefaultWireAdmitPath)
 	WireTargetPath    string // base path for live target resolution (default gateway.DefaultWireTargetPath)
 	RequireOrgID      bool   // reject agent registration / client relay without organization_id
 	ClientConnPerMin  int    // max new native client connections per client IP per minute (0 = unlimited)
@@ -451,9 +461,9 @@ func LoadGateway() Gateway {
 		Clients:             parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
 		ControlPlaneURL:     cpURL,
 		ControlPlaneToken:   env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
-		SessionPath:         env("SKYBRIDGE_GW_SESSION_PATH", "/api/v1/data-studio/studio/native-sessions"),
-		WireAdmitPath:       env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", "/api/v1/data-studio/studio/native-access/wire-admit"),
-		WireTargetPath:      env("SKYBRIDGE_GW_WIRE_TARGET_PATH", "/api/v1/data-studio/studio/native-access/wire-targets"),
+		SessionPath:         env("SKYBRIDGE_GW_SESSION_PATH", gateway.DefaultSessionPath),
+		WireAdmitPath:       env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", gateway.DefaultWireAdmitPath),
+		WireTargetPath:      env("SKYBRIDGE_GW_WIRE_TARGET_PATH", gateway.DefaultWireTargetPath),
 		RequireOrgID:        requireOrgID,
 		ClientConnPerMin:    clientConnPerMin,
 		OrgConnPerMin:       orgConnPerMin,
@@ -538,6 +548,27 @@ func parseOverlay(raw string) map[string]string {
 	var m map[string]string
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
 		return nil
+	}
+	return m
+}
+
+// loadPIIOverlay resolves the column->token overlay from SKYBRIDGE_PII_OVERLAY_FILE (a YAML or JSON
+// file — friendlier to author/review/commit than one-line JSON in an env var) when set, otherwise
+// from the inline SKYBRIDGE_PII_OVERLAY env var. The file path wins if both are set.
+func loadPIIOverlay() map[string]string {
+	path := strings.TrimSpace(os.Getenv("SKYBRIDGE_PII_OVERLAY_FILE"))
+	if path == "" {
+		return parseOverlay(env("SKYBRIDGE_PII_OVERLAY", ""))
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		log.Printf("skybridge: SKYBRIDGE_PII_OVERLAY_FILE %q: %v (ignoring)", path, err)
+		return parseOverlay(env("SKYBRIDGE_PII_OVERLAY", ""))
+	}
+	var m map[string]string
+	if err := yaml.Unmarshal(raw, &m); err != nil {
+		log.Printf("skybridge: SKYBRIDGE_PII_OVERLAY_FILE %q: invalid YAML/JSON: %v (ignoring)", path, err)
+		return parseOverlay(env("SKYBRIDGE_PII_OVERLAY", ""))
 	}
 	return m
 }

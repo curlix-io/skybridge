@@ -1,3 +1,5 @@
+//go:build querystudio
+
 package dbquery
 
 import (

@@ -1,3 +1,5 @@
+//go:build querystudio
+
 package studiotransport
 
 import (
@@ -6,7 +8,7 @@ import (
 	"strings"
 )
 
-const defaultTrustDomain = "curlix.studio-agent"
+const defaultTrustDomain = "skybridge.studio-agent"
 
 func spiffeID(trustDomain, tenant, agent string) string {
 	td := strings.TrimSpace(trustDomain)

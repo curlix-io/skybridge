@@ -24,9 +24,9 @@ import (
 	"github.com/curlix-io/skybridge/internal/wiremtls"
 )
 
-// testCA is a minimal self-signed CA for exercising the wire mTLS path without any Python
-// dependency — it signs an agent client cert carrying the wiremtls SPIFFE SAN, mirroring what
-// backend/src/curlix/wire_mtls/pki.py does server-side in production.
+// testCA is a minimal self-signed CA for exercising the wire mTLS path in-process — it signs an
+// agent client cert carrying the wiremtls SPIFFE SAN, mirroring what a real control-plane CA does
+// server-side in production.
 type testCA struct {
 	cert *x509.Certificate
 	key  *ecdsa.PrivateKey
@@ -202,8 +202,7 @@ func TestEndToEndTunnelRelayMTLS(t *testing.T) {
 
 // TestServeAgentRejectsCertOrgMismatch proves a registering agent cannot claim an org_id that
 // disagrees with its verified client certificate — the cert is authoritative, mirroring the
-// connector gateway's Connect servicer (see integrations/skybridge-gateway/src/curlix/connector/
-// gateway.py).
+// connector gateway's own Connect servicer.
 func TestServeAgentRejectsCertOrgMismatch(t *testing.T) {
 	ca := newTestCA(t)
 	serverCert := ca.issueServerCert(t)

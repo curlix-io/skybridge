@@ -1,0 +1,13 @@
+# Example SKYBRIDGE_PII_OVERLAY_FILE — column name -> replacement token, matched
+# case-insensitively. Copy this, edit the columns you have, and point the agent at it:
+#
+#   SKYBRIDGE_PII_OVERLAY_FILE=./examples/pii-overlay.yaml \
+#   SKYBRIDGE_UPSTREAM=db.internal:5432 \
+#   go run ./cmd/skybridge-agent
+#
+# No Presidio, no Docker, no network calls — this layer only matches by column name (see the
+# masking pipeline in README.md for how it composes with the content-detection layer).
+email: "[redacted]"
+ssn: "[redacted]"
+phone: "[redacted]"
+credit_card: "[redacted]"

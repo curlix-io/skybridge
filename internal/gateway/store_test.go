@@ -38,11 +38,11 @@ func TestHTTPStoreReportsLifecycle(t *testing.T) {
 		defer mu.Unlock()
 		authSeen = r.Header.Get("Authorization")
 		switch {
-		case r.URL.Path == "/api/v1/data-studio/studio/native-sessions" && r.Method == http.MethodPost:
+		case r.URL.Path == gateway.DefaultSessionPath && r.Method == http.MethodPost:
 			_ = json.NewDecoder(r.Body).Decode(&startBody)
 			w.WriteHeader(http.StatusCreated)
 			_, _ = io.WriteString(w, `{"id":"sess-123"}`)
-		case r.Method == http.MethodPost && len(r.URL.Path) > len("/api/v1/data-studio/studio/native-sessions/"):
+		case r.Method == http.MethodPost && len(r.URL.Path) > len(gateway.DefaultSessionPath+"/"):
 			closePath = r.URL.Path
 			_ = json.NewDecoder(r.Body).Decode(&endBody)
 			w.WriteHeader(http.StatusOK)
@@ -78,7 +78,7 @@ func TestHTTPStoreReportsLifecycle(t *testing.T) {
 	if startBody.ResourceRoleID != "role-1" || startBody.ActorEmail != "owner@example.com" {
 		t.Fatalf("attribution not serialized: %+v", startBody)
 	}
-	if closePath != "/api/v1/data-studio/studio/native-sessions/sess-123/close" {
+	if closePath != gateway.DefaultSessionPath+"/sess-123/close" {
 		t.Fatalf("close path = %q", closePath)
 	}
 	if endBody.BytesDown != 2048 || endBody.Status != "executed" {

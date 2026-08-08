@@ -1,10 +1,12 @@
+//go:build querystudio
+
 package studiotransport
 
 import "testing"
 
 func TestSpiffeIDDefaults(t *testing.T) {
 	got := spiffeID("", "org-1", "")
-	want := "spiffe://curlix.studio-agent/tenant/org-1/agent/studio-agent"
+	want := "spiffe://skybridge.studio-agent/tenant/org-1/agent/studio-agent"
 	if got != want {
 		t.Fatalf("spiffeID() = %q, want %q", got, want)
 	}
@@ -33,15 +35,15 @@ func TestParseSPIFFERejectsWrongTrustDomain(t *testing.T) {
 }
 
 func TestParseSPIFFERejectsMissingAgentMarker(t *testing.T) {
-	if _, _, ok := parseSPIFFE("spiffe://curlix.studio-agent/tenant/org-1"); ok {
+	if _, _, ok := parseSPIFFE("spiffe://skybridge.studio-agent/tenant/org-1"); ok {
 		t.Fatal("expected rejection when /agent/ marker is missing")
 	}
 }
 
 func TestParseSPIFFERejectsEmptyTenantOrAgent(t *testing.T) {
 	cases := []string{
-		"spiffe://curlix.studio-agent/tenant//agent/a1",
-		"spiffe://curlix.studio-agent/tenant/org-1/agent/",
+		"spiffe://skybridge.studio-agent/tenant//agent/a1",
+		"spiffe://skybridge.studio-agent/tenant/org-1/agent/",
 	}
 	for _, c := range cases {
 		if _, _, ok := parseSPIFFE(c); ok {

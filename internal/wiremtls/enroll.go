@@ -23,7 +23,7 @@ const enrollTimeout = 15 * time.Second
 // EnrollConfig configures the HTTP enroll bootstrap call. EnrollURL is the control-plane origin +
 // path (defaults to ".../api/v1/skybridge/wire-mtls/enroll" when Path is empty).
 type EnrollConfig struct {
-	BaseURL     string // control-plane origin, e.g. https://app.curlix.io
+	BaseURL     string // control-plane origin, e.g. https://app.example.com
 	Path        string // defaults to DefaultEnrollPath
 	TenantID    string
 	AgentID     string

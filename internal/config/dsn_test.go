@@ -17,11 +17,11 @@ func TestParseEdgeKeyEmptyReturnsZeroValue(t *testing.T) {
 }
 
 func TestParseEdgeKeyFull(t *testing.T) {
-	k, err := parseEdgeKey("curlix://org-1:tok-abc@gw.curlix.io?edge_id=edge-1&region=us-east-1")
+	k, err := parseEdgeKey("skybridge://org-1:tok-abc@gw.example.com?edge_id=edge-1&region=us-east-1")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	want := EdgeKey{OrgID: "org-1", EnrollmentToken: "tok-abc", GatewayHost: "gw.curlix.io", EdgeID: "edge-1", AWSRegion: "us-east-1"}
+	want := EdgeKey{OrgID: "org-1", EnrollmentToken: "tok-abc", GatewayHost: "gw.example.com", EdgeID: "edge-1", AWSRegion: "us-east-1"}
 	if !reflect.DeepEqual(k, want) {
 		t.Fatalf("got %+v, want %+v", k, want)
 	}
@@ -30,7 +30,7 @@ func TestParseEdgeKeyFull(t *testing.T) {
 func TestParseEdgeKeyWithCABundle(t *testing.T) {
 	pem := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(pem))
-	k, err := parseEdgeKey("curlix://org-1:tok-abc@gw.curlix.io?ca=" + encoded)
+	k, err := parseEdgeKey("skybridge://org-1:tok-abc@gw.example.com?ca=" + encoded)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -40,7 +40,7 @@ func TestParseEdgeKeyWithCABundle(t *testing.T) {
 }
 
 func TestParseEdgeKeyWithoutCABundleLeavesItEmpty(t *testing.T) {
-	k, err := parseEdgeKey("curlix://org-1:tok-abc@gw.curlix.io")
+	k, err := parseEdgeKey("skybridge://org-1:tok-abc@gw.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -50,17 +50,17 @@ func TestParseEdgeKeyWithoutCABundleLeavesItEmpty(t *testing.T) {
 }
 
 func TestParseEdgeKeyMalformedCABundleErrors(t *testing.T) {
-	if _, err := parseEdgeKey("curlix://org-1:tok-abc@gw.curlix.io?ca=not-valid-base64!!!"); err == nil {
+	if _, err := parseEdgeKey("skybridge://org-1:tok-abc@gw.example.com?ca=not-valid-base64!!!"); err == nil {
 		t.Fatal("expected error for malformed ca parameter")
 	}
 }
 
 func TestParseEdgeKeyMinimal(t *testing.T) {
-	k, err := parseEdgeKey("curlix://org-1:tok-abc@gw.curlix.io")
+	k, err := parseEdgeKey("skybridge://org-1:tok-abc@gw.example.com")
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
-	if k.OrgID != "org-1" || k.EnrollmentToken != "tok-abc" || k.GatewayHost != "gw.curlix.io" {
+	if k.OrgID != "org-1" || k.EnrollmentToken != "tok-abc" || k.GatewayHost != "gw.example.com" {
 		t.Fatalf("unexpected result: %+v", k)
 	}
 	if k.EdgeID != "" || k.AWSRegion != "" {
@@ -69,25 +69,25 @@ func TestParseEdgeKeyMinimal(t *testing.T) {
 }
 
 func TestParseEdgeKeyWrongSchemeErrors(t *testing.T) {
-	if _, err := parseEdgeKey("grpcs://org-1:tok@gw.curlix.io"); err == nil {
-		t.Fatal("expected error for non-curlix scheme")
+	if _, err := parseEdgeKey("grpcs://org-1:tok@gw.example.com"); err == nil {
+		t.Fatal("expected error for wrong scheme")
 	}
 }
 
 func TestParseEdgeKeyMissingHostErrors(t *testing.T) {
-	if _, err := parseEdgeKey("curlix://org-1:tok@"); err == nil {
+	if _, err := parseEdgeKey("skybridge://org-1:tok@"); err == nil {
 		t.Fatal("expected error for missing host")
 	}
 }
 
 func TestParseEdgeKeyMissingOrgIDErrors(t *testing.T) {
-	if _, err := parseEdgeKey("curlix://gw.curlix.io"); err == nil {
+	if _, err := parseEdgeKey("skybridge://gw.example.com"); err == nil {
 		t.Fatal("expected error for missing org id")
 	}
 }
 
 func TestParseEdgeKeyMalformedURLErrors(t *testing.T) {
-	if _, err := parseEdgeKey("curlix://%zz"); err == nil {
+	if _, err := parseEdgeKey("skybridge://%zz"); err == nil {
 		t.Fatal("expected error for malformed URL")
 	}
 }
@@ -99,18 +99,18 @@ func TestHostPortEmptyHost(t *testing.T) {
 }
 
 func TestHostPortAppendsPort(t *testing.T) {
-	if got := hostPort("gw.curlix.io", "7100"); got != "gw.curlix.io:7100" {
+	if got := hostPort("gw.example.com", "7100"); got != "gw.example.com:7100" {
 		t.Fatalf("got %q", got)
 	}
 }
 
 func TestLoadEdgeFromSkybridgeKey(t *testing.T) {
-	t.Setenv("SKYBRIDGE_KEY", "curlix://org-1:tok-abc@gw.curlix.io?edge_id=edge-1&region=us-east-1")
+	t.Setenv("SKYBRIDGE_KEY", "skybridge://org-1:tok-abc@gw.example.com?edge_id=edge-1&region=us-east-1")
 	e := LoadEdge()
-	if e.GatewayAddr != "gw.curlix.io:7100" {
+	if e.GatewayAddr != "gw.example.com:7100" {
 		t.Fatalf("expected GatewayAddr from key, got %q", e.GatewayAddr)
 	}
-	if e.EnrollTarget != "gw.curlix.io:7101" {
+	if e.EnrollTarget != "gw.example.com:7101" {
 		t.Fatalf("expected EnrollTarget from key, got %q", e.EnrollTarget)
 	}
 	if e.TenantID != "org-1" {
@@ -131,7 +131,7 @@ func TestLoadEdgeFromSkybridgeKey(t *testing.T) {
 }
 
 func TestLoadEdgeDiscreteVarsOverrideSkybridgeKey(t *testing.T) {
-	t.Setenv("SKYBRIDGE_KEY", "curlix://org-1:tok-abc@gw.curlix.io")
+	t.Setenv("SKYBRIDGE_KEY", "skybridge://org-1:tok-abc@gw.example.com")
 	t.Setenv("SKYBRIDGE_ORG_ID", "org-explicit")
 	t.Setenv("SKYBRIDGE_EDGE_GATEWAY", "explicit-gw:9999")
 	e := LoadEdge()
@@ -146,7 +146,7 @@ func TestLoadEdgeDiscreteVarsOverrideSkybridgeKey(t *testing.T) {
 func TestLoadEdgeCABundleFromSkybridgeKey(t *testing.T) {
 	pem := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(pem))
-	t.Setenv("SKYBRIDGE_KEY", "curlix://org-1:tok-abc@gw.curlix.io?ca="+encoded)
+	t.Setenv("SKYBRIDGE_KEY", "skybridge://org-1:tok-abc@gw.example.com?ca="+encoded)
 	e := LoadEdge()
 	if string(e.CABundle) != pem {
 		t.Fatalf("expected CABundle from key, got %q", string(e.CABundle))
@@ -156,7 +156,7 @@ func TestLoadEdgeCABundleFromSkybridgeKey(t *testing.T) {
 func TestLoadEdgeDiscreteCABundleOverridesSkybridgeKey(t *testing.T) {
 	pem := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(pem))
-	t.Setenv("SKYBRIDGE_KEY", "curlix://org-1:tok-abc@gw.curlix.io?ca="+encoded)
+	t.Setenv("SKYBRIDGE_KEY", "skybridge://org-1:tok-abc@gw.example.com?ca="+encoded)
 	t.Setenv("SKYBRIDGE_CA_BUNDLE_PEM", "explicit-pem")
 	e := LoadEdge()
 	if string(e.CABundle) != "explicit-pem" {

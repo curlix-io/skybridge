@@ -127,6 +127,57 @@ func TestLoadAgentPIIOverlayInvalidJSONReturnsNil(t *testing.T) {
 	}
 }
 
+func TestLoadAgentParsesPIIOverlayFileYAML(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlay.yaml")
+	yaml := "email: \"[EMAIL]\"\nssn: \"[SSN]\"\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
+	a := LoadAgent()
+	if a.PIIOverlay["email"] != "[EMAIL]" || a.PIIOverlay["ssn"] != "[SSN]" {
+		t.Fatalf("unexpected overlay: %v", a.PIIOverlay)
+	}
+}
+
+func TestLoadAgentPIIOverlayFileTakesPriorityOverInline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlay.yaml")
+	if err := os.WriteFile(path, []byte("email: \"[FROM-FILE]\"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
+	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
+	a := LoadAgent()
+	if a.PIIOverlay["email"] != "[FROM-FILE]" {
+		t.Fatalf("expected overlay file to take priority, got %v", a.PIIOverlay)
+	}
+}
+
+func TestLoadAgentPIIOverlayFileMissingFallsBackToInline(t *testing.T) {
+	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", filepath.Join(t.TempDir(), "missing.yaml"))
+	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
+	a := LoadAgent()
+	if a.PIIOverlay["email"] != "[FROM-ENV]" {
+		t.Fatalf("expected fallback to inline overlay, got %v", a.PIIOverlay)
+	}
+}
+
+func TestLoadAgentPIIOverlayFileInvalidYAMLFallsBackToInline(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlay.yaml")
+	if err := os.WriteFile(path, []byte(":\n  - not: [valid"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
+	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
+	a := LoadAgent()
+	if a.PIIOverlay["email"] != "[FROM-ENV]" {
+		t.Fatalf("expected fallback to inline overlay, got %v", a.PIIOverlay)
+	}
+}
+
 func TestLoadAgentParsesMaskEntitiesCSV(t *testing.T) {
 	t.Setenv("SKYBRIDGE_MASK_ENTITIES", " email_address ,US_SSN,,CREDIT_CARD")
 	a := LoadAgent()
@@ -302,7 +353,7 @@ func TestLoadEdgeDefaultsAndFallbacks(t *testing.T) {
 	if e.StudioMaxSessions != 8 {
 		t.Fatalf("expected default StudioMaxSessions 8, got %d", e.StudioMaxSessions)
 	}
-	if e.StudioTrustDomain != "curlix.studio-agent" {
+	if e.StudioTrustDomain != "skybridge.studio-agent" {
 		t.Fatalf("expected default studio trust domain, got %q", e.StudioTrustDomain)
 	}
 }
@@ -368,7 +419,7 @@ func TestLoadGatewayDefaults(t *testing.T) {
 }
 
 func TestLoadGatewayControlPlaneURLDefaultsRequireOrgIDAndRateLimit(t *testing.T) {
-	t.Setenv("SKYBRIDGE_GW_CONTROL_PLANE_URL", "https://app.curlix.io")
+	t.Setenv("SKYBRIDGE_GW_CONTROL_PLANE_URL", "https://app.example.com")
 	g := LoadGateway()
 	if !g.RequireOrgID {
 		t.Fatal("expected RequireOrgID to default true once a control plane URL is set")
@@ -379,7 +430,7 @@ func TestLoadGatewayControlPlaneURLDefaultsRequireOrgIDAndRateLimit(t *testing.T
 }
 
 func TestLoadGatewayExplicitRequireOrgIDOverridesDefault(t *testing.T) {
-	t.Setenv("SKYBRIDGE_GW_CONTROL_PLANE_URL", "https://app.curlix.io")
+	t.Setenv("SKYBRIDGE_GW_CONTROL_PLANE_URL", "https://app.example.com")
 	t.Setenv("SKYBRIDGE_GW_REQUIRE_ORG_ID", "false")
 	g := LoadGateway()
 	if g.RequireOrgID {

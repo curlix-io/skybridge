@@ -9,11 +9,10 @@ import (
 
 // PathOverlay is a Store-backed masking layer: it looks up a confirmed label for each column's
 // resolved path, falling back to a bare-key match when no path-scoped label exists or ObjectID is
-// unknown (e.g. wire-proxy call sites that don't yet resolve table/collection identity). This is
-// the lookup order from the pathlabel design doc §3.3, steps 2-3 — it supersedes Overlay's flat
-// column->token map (which becomes, in effect, a store populated entirely with MatchKeyAnyDepth
-// labels) without dropping any of Overlay's existing coverage: a miss here behaves exactly like a
-// miss in Overlay always did.
+// unknown (e.g. wire-proxy call sites that don't yet resolve table/collection identity). This
+// supersedes Overlay's flat column->token map (which becomes, in effect, a store populated entirely
+// with MatchKeyAnyDepth labels) without dropping any of Overlay's existing coverage: a miss here
+// behaves exactly like a miss in Overlay always did.
 type PathOverlay struct {
 	store label.Store
 }
@@ -80,8 +79,8 @@ func isConfirmed(s label.Source) bool {
 	return s == label.SourceManual || s == label.SourcePlatform
 }
 
-// profileToken maps a Label's Profile to a replacement token, per the pathlabel design doc's
-// vendor-agnostic three-way split (full_redact / partial_mask / do_not_mask). An empty or unknown
+// profileToken maps a Label's Profile to a replacement token, per label's vendor-agnostic
+// three-way split (full_redact / partial_mask / do_not_mask). An empty or unknown
 // Profile is treated as full_redact, since Category alone ("this path is labelled") is already a
 // stronger signal than an unlabelled path — the safe default is to act on it, not to require a
 // Profile a caller may not always set.

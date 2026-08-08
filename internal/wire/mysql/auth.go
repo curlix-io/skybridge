@@ -1,7 +1,7 @@
 // Credential handoff (design "skybridge-go-wire-proxy" §7 phase 3) for MySQL.
 //
 // In the default proxy path the agent forwards the client's auth verbatim. Credential *injection*
-// flips that: the native client presents an opaque curlix session token instead of a database
+// flips that: the native client presents an opaque session token instead of a database
 // password, the agent terminates that login locally, exchanges the token for a freshly-minted
 // upstream credential, and ORIGINATES its own upstream auth with it — so the client never holds a
 // credential the database would accept directly.
@@ -65,7 +65,7 @@ type clientHandshake struct {
 }
 
 // ProxyInject implements wire.InjectingEngine for MySQL: it terminates the client login (recovering
-// the curlix session token via mysql_clear_password over TLS), resolves an upstream credential, and
+// the session token via mysql_clear_password over TLS), resolves an upstream credential, and
 // originates the upstream auth itself, then masks result rows exactly as the verbatim path does.
 func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve wire.CredentialResolver, recorder wire.Recorder) error {
 	if masker == nil {
@@ -85,7 +85,7 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 
 	cred, err := resolve(ctx, map[string]string{"user": info.username, "database": info.database}, token)
 	if err != nil {
-		_ = writeClientError(client, info.nextSeq, 1045, "28000", "curlix: access denied for this session")
+		_ = writeClientError(client, info.nextSeq, 1045, "28000", "skybridge: access denied for this session")
 		return err
 	}
 
@@ -95,7 +95,7 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 	}
 	upstream, sb, err := authenticateUpstream(upstream, cred, db, e.upstreamTLS, e.upstreamRequired)
 	if err != nil {
-		_ = writeClientError(client, info.nextSeq, 1045, "28000", "curlix: upstream authentication failed")
+		_ = writeClientError(client, info.nextSeq, 1045, "28000", "skybridge: upstream authentication failed")
 		return err
 	}
 	if err := writePacket(client, info.nextSeq, okPayload()); err != nil {
@@ -185,7 +185,7 @@ func (e *Engine) serverGreeting(nonce []byte) []byte {
 
 	var b []byte
 	b = append(b, 0x0a) // protocol version 10
-	b = append(b, "8.0.0-curlix"...)
+	b = append(b, "8.0.0-skybridge"...)
 	b = append(b, 0)
 	b = append(b, 1, 0, 0, 0) // connection id
 	b = append(b, nonce[:8]...)

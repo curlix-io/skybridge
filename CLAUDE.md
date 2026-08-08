@@ -7,14 +7,15 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Skybridge is a Go data plane for **governed native database access**. An egress-only agent sits in
 front of a database, speaks the native wire protocols (Postgres, MySQL, MongoDB), and masks PII in
 result rows before they leave the network. `skybridge-edge` is the broader "single install" binary:
-it also dials home to a SaaS Connector/Studio Gateway for read-only AWS/k8s tool dispatch and can
-co-host the wire proxy in the same process.
+it also dials home to a Connector Gateway for read-only AWS/k8s tool dispatch, and can co-host the
+wire proxy in the same process.
 
-This directory is a **vendored working copy** of `github.com/curlix-io/skybridge` kept inside the
-Curlix monorepo (see `README-CURLIX.md`) so Studio Gateway convergence ships alongside SaaS API/UI
-changes. Changes here should eventually be pushed as equivalent commits to the upstream repo and
-tagged as a release — see "Sync upstream" in `README-CURLIX.md` before assuming this is the canonical
-source.
+Skybridge is a standalone Go module with no required dependency on any specific control plane or
+SaaS backend — clone it, `go build`, and run it against your own database. The default build has
+zero optional-integration code compiled in. An optional Query Studio dispatch add-on lives behind
+the `querystudio` Go build tag — see "Optional `querystudio` build tag" below — for anyone who wants
+to wire skybridge-edge up to a query-execution dispatch backend of their own; it is not required to
+use any part of the core wire proxy, masking pipeline, or tunnel/gateway relay.
 
 ## Commands
 
@@ -22,10 +23,14 @@ source.
 make build          # build all three binaries into bin/
 make agent          # build cmd/skybridge-agent only
 make gateway        # build cmd/skybridge-gateway only
-make edge           # build cmd/skybridge-edge only
+make edge           # build cmd/skybridge-edge only (default: no Query Studio extras)
+make edge-querystudio  # build cmd/skybridge-edge with Query Studio dispatch (-tags querystudio)
 make test           # go test ./...
+make test-querystudio  # go test -tags querystudio ./... (covers dbexec/dbquery/studiotransport)
 make race           # go test -race ./...
+make race-querystudio  # go test -race -tags querystudio ./...
 make vet            # go vet ./...
+make vet-querystudio   # go vet -tags querystudio ./...
 make fmt            # go fmt ./...
 make lint           # gofmt -l . check (what CI runs; fails on unformatted files)
 make tidy           # go mod tidy
@@ -54,9 +59,10 @@ the network.
 - **Tunnel** — `skybridge-agent` dials out to `skybridge-gateway`; clients connect to the gateway,
   which relays already-masked bytes over the tunnel (`internal/tunnel` — a length-prefixed framed
   transport documented in `CONTRACT.md`).
-- **Edge** — `skybridge-edge` dials out to the SaaS Connector Gateway (and optionally a Studio
-  Gateway) and executes dispatched read-only tool calls locally (AWS reads, k8s reads); it can also
-  co-host the wire proxy in the same process. This is the single binary most customers install.
+- **Edge** — `skybridge-edge` dials out to a Connector Gateway (and optionally, with the
+  `querystudio` build tag, a Query Studio gateway) and executes dispatched read-only tool calls
+  locally (AWS reads, k8s reads); it can also co-host the wire proxy in the same process. This is
+  the single binary most customers install.
 
 ### Layout
 
@@ -66,17 +72,16 @@ cmd/skybridge-gateway    relay gateway: agent endpoint + client listeners
 cmd/skybridge-edge       unified edge: call-home transport(s) + AWS/k8s tool exec + optional wire proxy
 internal/wire            wire engines: postgres, mysql, mongo, k8sapi — manual protocol parsing
 internal/mask            masking pipeline: remote (Presidio) masker + path overlay + column overlay
-internal/pathlabel       vendored from github.com/curlix-io/pathlabel: docpath (nested-document path
-                          walking) + label (path-scoped Store/Label types)
+internal/pathlabel       docpath (nested-document path walking) + label (path-scoped Store/Label types)
 internal/tunnel          egress multiplexed transport (agent <-> gateway)
 internal/gateway         agent registry + relay + optional control-plane session recording
 internal/edge            edge tool dispatch: envelope, read-only policy, executor
 internal/edge/awsexec    read-only AWS CLI / CloudWatch tool implementations
 internal/edge/k8sexec    read-only kubectl-style tool implementation + policy
-internal/edge/dbexec     db_query_{postgres,mysql,mongo} one-shot exec tools (Design B, Query Studio)
-internal/edge/dbquery    shared SQL/Mongo execute + PII masking used by dbexec and studiotransport
+internal/edge/dbexec     [querystudio tag] db_query_{postgres,mysql,mongo} one-shot exec tools
+internal/edge/dbquery    [querystudio tag] shared SQL/Mongo execute + PII masking for dbexec/studiotransport
 internal/edge/transport  egress-only gRPC call-home client to the Connector Gateway
-internal/edge/studiotransport  second egress-only gRPC dial to the Studio Gateway (:7200)
+internal/edge/studiotransport  [querystudio tag] second egress-only gRPC dial to a Query Studio gateway
 internal/edgeiam         edge enrollment / IAM helpers
 internal/certstore       persists issued mTLS identity (local disk, optionally mirrored to AWS
                           Secrets Manager) so redeployed tasks skip re-enrollment
@@ -114,32 +119,35 @@ unmasked value is never corrupted, only ever left as-is:
   boundary. Frame header is fixed 12 bytes, version-tagged; control messages are JSON discriminated
   by `kind` (`register`, `register_ack`, `heartbeat`).
 - **Gateway -> Control plane** (optional) — HTTP session-lifecycle recording
-  (`/api/v1/data-studio/studio/native-sessions`), best-effort, and IP-allowlist admission checks
-  before relaying a wire handshake (`/native-access/wire-admit`).
+  (default `/api/v1/sessions`), best-effort, and IP-allowlist admission checks before relaying a
+  wire handshake (default `/api/v1/wire-admit`); both paths are overridable.
 - **Agent -> Control plane credential exchange** (optional, `SKYBRIDGE_INJECT_CREDENTIALS=true`) —
   swaps a client-presented opaque session token for a freshly-minted upstream DB credential
   (`/native-access/proxy-exchange`). The agent originates its own upstream auth with the minted
   credential; the client never holds a credential the database would accept directly. Implemented for
   Postgres and MySQL; Mongo falls back to verbatim passthrough.
 
-### Curlix-specific additions on top of upstream `curlix-io/skybridge`
+### Optional `querystudio` build tag
 
-Per `README-CURLIX.md`, this vendored copy adds:
+Query Studio dispatch is an optional add-on behind `//go:build querystudio`, excluded from the
+default build/test/vet so the module has no required dependency on it:
 
-- `internal/edge/studiotransport/` — second outbound dial to Studio Gateway (`:7200`) for Query
+- `internal/edge/studiotransport/` — second outbound dial to a Studio Gateway (`:7200`) for Query
   Studio dispatch.
 - `internal/edge/dbexec/` + `internal/edge/dbquery/` — one-shot `db_query_{postgres,mysql,mongo}`
-  execute path used by `POST /studio/exec` (Design B), sharing the PII masking pipeline with
-  `studiotransport`.
-- `internal/certstore/` — cross-redeploy persistence of issued mTLS identity, mirrored to AWS Secrets
-  Manager via `SKYBRIDGE_IDENTITY_SECRET_ARN` / `SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN` /
-  `SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN` — needed because ECS/Fargate task replacement wipes local
-  disk and the one-time `SKYBRIDGE_ENROLLMENT_TOKEN` can't be reused.
-- `internal/genpb/curlix/studiogateway/v1/` — stubs generated from
-  `proto/curlix/studiogateway/v1/studio_gateway.proto`.
+  execute path used by `POST /studio/exec`, sharing the PII masking pipeline with `studiotransport`.
+- `internal/genpb/curlix/studiogateway/v1/` — generated gRPC stubs for the Studio Gateway protocol.
+- `cmd/skybridge-edge/main_querystudio.go` (built with the tag) vs. `main_noquerystudio.go` (the
+  default, no-op stub) implement `registerQueryStudioExtras`, the one hook `main.go` calls into.
 
-When syncing changes back upstream: land here, run `go test ./...`, then push equivalent commits to
-`curlix-io/skybridge`, tag a release, and bump `SKYBRIDGE_VERSION` in the connector Dockerfile.
+Build/test with `make edge-querystudio` / `make test-querystudio` / `make vet-querystudio` (or
+`-tags querystudio` directly). CI runs both the default and `-tags querystudio` legs so this surface
+stays covered.
+
+`internal/certstore/` (cross-redeploy mTLS identity persistence to AWS Secrets Manager via
+`SKYBRIDGE_IDENTITY_SECRET_ARN` / `SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN` /
+`SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN`) is generic infrastructure — used by both the core
+wire-mTLS enrollment path and the edge transport — and is **not** behind the build tag.
 
 ## Configuration
 

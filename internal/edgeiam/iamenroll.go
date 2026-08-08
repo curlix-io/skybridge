@@ -1,13 +1,13 @@
 // Package edgeiam presigns an sts:GetCallerIdentity call with the edge's ambient AWS credentials
 // (an ECS task role, in production) and exchanges it with the control plane for a short-lived
 // enrollment token — no human-minted, single-use token needed. Shared by every edge enrollment
-// surface (Skybridge connector, Query Studio, and the wire-mTLS tunnel — see
-// internal/wiremtls/iamenroll.go, which wraps this package for backward compatibility).
+// surface (connector, Query Studio, and the wire-mTLS tunnel — see internal/wiremtls/iamenroll.go,
+// which wraps this package for backward compatibility).
 //
 // The resulting token is fed into that surface's *existing*, unmodified cert-issuance call (gRPC
 // Enroll for connector/Studio, HTTP /enroll for wire-mTLS) — this package only replaces how the
-// token is obtained, not how it's redeemed. See backend/src/curlix/edge_agents/iam_auth.py for
-// the server-side verification this authenticates against.
+// token is obtained, not how it's redeemed. The control plane must implement the corresponding
+// server-side STS-replay verification for this to authenticate against.
 package edgeiam
 
 import (
@@ -31,7 +31,7 @@ const enrollTimeout = 15 * time.Second
 // (tenant_id/agent_id — connector_id is just this surface's name for "agent id"). Extra carries
 // any additional body fields a specific surface needs (e.g. connector's studio_agent_id).
 type IamEnrollConfig struct {
-	BaseURL  string // control-plane HTTPS origin, e.g. https://api.curlix.io
+	BaseURL  string // control-plane HTTPS origin, e.g. https://api.example.com
 	Path     string // e.g. /api/v1/skybridge/enrollments-iam or /api/v1/skybridge/wire-mtls/enroll-token-iam
 	TenantID string
 	AgentID  string

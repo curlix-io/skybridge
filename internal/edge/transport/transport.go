@@ -42,10 +42,10 @@ type Config struct {
 	MaxBackoff  time.Duration // cap for reconnect backoff (default 30s)
 
 	// gRPC keepalive: detects a dead/killed gateway (crash, ECS task replacement) without waiting
-	// on OS TCP keepalive (hours) or an incidental LB idle-timeout reset. Must stay in lockstep
-	// with the gateway's _DATA_SERVER_KEEPALIVE_OPTIONS (integrations/skybridge-gateway/src/curlix/
-	// connector/gateway.py) — KeepaliveTime here should stay above the server's
-	// min_ping_interval_without_data_ms or healthy pings risk an ENHANCE_YOUR_CALM.
+	// on OS TCP keepalive (hours) or an incidental LB idle-timeout reset. Must stay in lockstep with
+	// whatever server-side keepalive policy the gateway enforces — KeepaliveTime here should stay
+	// above the server's minimum ping interval without data, or healthy pings risk an
+	// ENHANCE_YOUR_CALM.
 	KeepaliveTime    time.Duration // ping interval when the stream is idle (default 20s)
 	KeepaliveTimeout time.Duration // time to wait for a ping ack before declaring the peer dead (default 10s)
 

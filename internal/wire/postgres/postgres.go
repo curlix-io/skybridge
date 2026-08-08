@@ -92,7 +92,7 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 
 // ProxyInject implements wire.InjectingEngine: credential handoff (design phase 3). Rather than
 // forwarding the client's auth verbatim, the agent terminates the client login locally (cleartext
-// password = an opaque curlix session token), resolves an upstream credential via resolve, and
+// password = an opaque session token), resolves an upstream credential via resolve, and
 // ORIGINATES its own upstream auth (trust / cleartext / md5 / SCRAM-SHA-256). The client never holds
 // a credential the database would accept directly; after upstream auth succeeds, result rows are
 // masked exactly as in the verbatim path.
@@ -121,13 +121,13 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 	cred, err := resolve(ctx, startup, token)
 	if err != nil {
 		// 28000 = invalid_authorization_specification: a clean "auth failed" for the native client.
-		_ = writeClientError(client, "28000", "curlix: access denied for this session")
+		_ = writeClientError(client, "28000", "skybridge: access denied for this session")
 		return err
 	}
 
 	ur := bufio.NewReaderSize(upstream, 1<<16)
 	if err := authenticateUpstream(upstream, ur, cred, startup["database"]); err != nil {
-		_ = writeClientError(client, "28000", "curlix: upstream authentication failed")
+		_ = writeClientError(client, "28000", "skybridge: upstream authentication failed")
 		return err
 	}
 	if err := sendClientAuthOK(client); err != nil {

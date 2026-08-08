@@ -1,7 +1,6 @@
 // Package k8sexec runs governed kubectl commands at the customer edge. Defense-in-depth mirror of
-// the control-plane policy (backend/src/curlix/commands/kubernetes/kubectl_policy.py) — the platform
-// validates first, but the edge never trusts a dispatched command blindly, same posture as
-// awsexec's read-only AWS CLI check.
+// whatever control-plane policy dispatches these commands — the platform validates first, but the
+// edge never trusts a dispatched command blindly, same posture as awsexec's read-only AWS CLI check.
 //
 // Scope: structured API calls only (get/describe/logs/apply/delete/patch/...). Interactive verbs
 // (exec/attach/cp/port-forward) are always rejected — see

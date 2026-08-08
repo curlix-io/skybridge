@@ -272,7 +272,7 @@ func logCredentialMode(cfg config.Agent, engine wire.Engine, resolver wire.Crede
 			"does not support it yet; falling back to verbatim auth passthrough.", engine.Name())
 		return
 	}
-	logger.Printf("skybridge-agent: credential injection ENABLED (clients present a curlix session token; the agent originates upstream auth).")
+	logger.Printf("skybridge-agent: credential injection ENABLED (clients present an opaque session token; the agent originates upstream auth).")
 	if !cfg.ClientTLSConfigured() {
 		logger.Printf("skybridge-agent: WARNING: client TLS is OFF, so the session token rides in the " +
 			"client's CLEARTEXT password. Run the listener on a trusted/in-network hop, or set " +
@@ -344,7 +344,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 	deps = deps.withDefaults(cfg)
 	if cfg.InjectCredentials {
 		if deps.Resolver != nil {
-			logger.Printf("skybridge-agent[tunnel]: credential injection ENABLED for Postgres targets (clients present a curlix session token).")
+			logger.Printf("skybridge-agent[tunnel]: credential injection ENABLED for Postgres targets (clients present an opaque session token).")
 			if !cfg.ClientTLSConfigured() {
 				logger.Printf("skybridge-agent[tunnel]: WARNING: client TLS is OFF; the session token rides in the client's CLEARTEXT password. Set SKYBRIDGE_CLIENT_TLS_* or keep the client link on a trusted hop.")
 			}

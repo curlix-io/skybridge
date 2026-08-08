@@ -3,7 +3,7 @@ package edge
 import "testing"
 
 func TestDecodeToolRequestValid(t *testing.T) {
-	goal := `{"__curlix_mcp_tool__":1,"name":"cloudwatch_metrics","arguments":{"ecs_cluster":"c","ecs_service":"s"}}`
+	goal := `{"__skybridge_mcp_tool__":1,"name":"cloudwatch_metrics","arguments":{"ecs_cluster":"c","ecs_service":"s"}}`
 	tc, ok := DecodeToolRequest(goal)
 	if !ok {
 		t.Fatal("expected valid envelope")
@@ -21,13 +21,13 @@ func TestDecodeToolRequestRejects(t *testing.T) {
 		"plain goal":       "why is checkout slow?",
 		"empty":            "",
 		"no sentinel":      `{"name":"x","arguments":{}}`,
-		"wrong version":    `{"__curlix_mcp_tool__":2,"name":"x"}`,
-		"empty name":       `{"__curlix_mcp_tool__":1,"name":"   "}`,
-		"name not string":  `{"__curlix_mcp_tool__":1,"name":5}`,
-		"not an object":    `["__curlix_mcp_tool__"]`,
-		"malformed json":   `{"__curlix_mcp_tool__":1,`,
-		"sentinel as text": "the __curlix_mcp_tool__ is great",
-		"missing name":     `{"__curlix_mcp_tool__":1,"arguments":{}}`,
+		"wrong version":    `{"__skybridge_mcp_tool__":2,"name":"x"}`,
+		"empty name":       `{"__skybridge_mcp_tool__":1,"name":"   "}`,
+		"name not string":  `{"__skybridge_mcp_tool__":1,"name":5}`,
+		"not an object":    `["__skybridge_mcp_tool__"]`,
+		"malformed json":   `{"__skybridge_mcp_tool__":1,`,
+		"sentinel as text": "the __skybridge_mcp_tool__ is great",
+		"missing name":     `{"__skybridge_mcp_tool__":1,"arguments":{}}`,
 	}
 	for name, goal := range cases {
 		if _, ok := DecodeToolRequest(goal); ok {
@@ -37,7 +37,7 @@ func TestDecodeToolRequestRejects(t *testing.T) {
 }
 
 func TestDecodeToolRequestMissingArgsDefaultsEmpty(t *testing.T) {
-	tc, ok := DecodeToolRequest(`{"__curlix_mcp_tool__":1,"name":"list_incidents"}`)
+	tc, ok := DecodeToolRequest(`{"__skybridge_mcp_tool__":1,"name":"list_incidents"}`)
 	if !ok {
 		t.Fatal("expected valid")
 	}

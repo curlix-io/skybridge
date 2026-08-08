@@ -1,3 +1,5 @@
+//go:build querystudio
+
 // Call-home (connection-reversal) contract for a Curlix Studio Agent.
 //
 // WHY THIS SHAPE: a Studio Agent runs next to the database (typically inside the customer network,
