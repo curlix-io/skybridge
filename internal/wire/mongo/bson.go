@@ -5,8 +5,11 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"fmt"
+	"strings"
 
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/wire"
 )
 
 // BSON element type bytes (subset we need to know to walk values).
@@ -38,9 +41,14 @@ var errBadBSON = errors.New("malformed bson")
 
 // bsonMasker walks BSON documents and masks the string field values inside query result batches.
 // Masking reuses the row masker (overlay by field name + remote masker on content), one string at a time.
+// recorder, when non-nil, receives a rendered summary of each already-masked result document for
+// session replay — see batch() below (coarser than postgres/mysql's per-column render, since BSON
+// documents are arbitrarily nested; a full recursive render is a later refinement, not required for
+// a first pass at Mongo replay).
 type bsonMasker struct {
-	ctx    context.Context
-	masker mask.Masker
+	ctx      context.Context
+	masker   mask.Masker
+	recorder wire.Recorder
 }
 
 type elemFn func(typ byte, name string, value []byte) ([]byte, error)
@@ -173,14 +181,58 @@ func (m *bsonMasker) cursor(doc []byte) ([]byte, error) {
 	})
 }
 
-// batch masks each result document inside a firstBatch/nextBatch array (array keys are "0","1",...).
+// batch masks each result document inside a firstBatch/nextBatch array (array keys are "0","1",...),
+// and — when a recorder is attached — records a rendered summary of the already-masked document
+// for session replay.
 func (m *bsonMasker) batch(arr []byte) ([]byte, error) {
 	return rewriteDoc(arr, func(typ byte, _ string, value []byte) ([]byte, error) {
-		if typ == bsonDoc {
-			return m.result(value)
+		if typ != bsonDoc {
+			return value, nil
+		}
+		masked, err := m.result(value)
+		if err != nil {
+			return value, err
+		}
+		if m.recorder != nil {
+			m.recorder.RecordOutput(renderTopLevelDoc(masked))
+		}
+		return masked, nil
+	})
+}
+
+// renderTopLevelDoc formats a masked BSON document's top-level scalar/string fields as
+// "field1=val1, field2=val2, ..." for the replay transcript — nested docs/arrays are rendered as
+// "<nested>" rather than recursively expanded (a later refinement, not required for a first pass).
+func renderTopLevelDoc(doc []byte) string {
+	var b strings.Builder
+	first := true
+	_, _ = rewriteDoc(doc, func(typ byte, name string, value []byte) ([]byte, error) {
+		if !first {
+			b.WriteString(", ")
+		}
+		first = false
+		b.WriteString(name)
+		b.WriteByte('=')
+		switch typ {
+		case bsonString, bsonJS, bsonSymbol:
+			if len(value) >= 5 {
+				l := int(binary.LittleEndian.Uint32(value))
+				if l >= 1 && 4+l <= len(value) {
+					b.Write(value[4 : 4+l-1])
+					break
+				}
+			}
+			b.WriteString("<string>")
+		case bsonDoc, bsonArray:
+			b.WriteString("<nested>")
+		case bsonNull, bsonUndefined:
+			b.WriteString("NULL")
+		default:
+			fmt.Fprintf(&b, "<%d bytes>", len(value))
 		}
 		return value, nil
 	})
+	return b.String()
 }
 
 // result masks every string field in a result document, recursing into nested docs/arrays.
@@ -197,7 +249,10 @@ func (m *bsonMasker) result(doc []byte) ([]byte, error) {
 	})
 }
 
-// maskString runs a single BSON string value (int32 length + bytes + NUL) through the masker.
+// maskString runs a single BSON string value (int32 length + bytes + NUL) through the masker. A
+// masker failure (e.g. mask.ErrMaskerUnavailable in strict mode) propagates as an error so the
+// caller aborts the connection instead of forwarding the raw value; a malformed BSON length or a
+// clean "nothing to mask" result is not an error.
 func (m *bsonMasker) maskString(name string, value []byte) ([]byte, error) {
 	if len(value) < 5 {
 		return value, nil
@@ -209,7 +264,10 @@ func (m *bsonMasker) maskString(name string, value []byte) ([]byte, error) {
 	s := value[4 : 4+l-1] // exclude trailing NUL
 	cols := []mask.Column{{Name: name, Text: true}}
 	out, err := m.masker.MaskRow(m.ctx, cols, [][]byte{append([]byte(nil), s...)})
-	if err != nil || len(out) != 1 || out[0] == nil || bytes.Equal(out[0], s) {
+	if err != nil {
+		return value, err
+	}
+	if len(out) != 1 || out[0] == nil || bytes.Equal(out[0], s) {
 		return value, nil
 	}
 	nv := make([]byte, 4, 4+len(out[0])+1)

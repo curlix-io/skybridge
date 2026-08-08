@@ -1,8 +1,10 @@
 package agent
 
 import (
+	"bytes"
 	"crypto/tls"
 	"io"
+	"log"
 	"net"
 	"testing"
 	"time"
@@ -177,5 +179,77 @@ func TestPolicyStartUpstreamTLSPostgres(t *testing.T) {
 		if _, ok := conn.(*tls.Conn); !ok {
 			t.Fatalf("expected *tls.Conn, got %T", conn)
 		}
+	}
+}
+
+func TestHostOnly(t *testing.T) {
+	cases := map[string]string{
+		"db.internal:5432": "db.internal",
+		"10.0.0.5:3306":    "10.0.0.5",
+		"no-port-here":     "no-port-here",
+	}
+	for addr, want := range cases {
+		if got := hostOnly(addr); got != want {
+			t.Errorf("hostOnly(%q) = %q, want %q", addr, got, want)
+		}
+	}
+}
+
+func TestIsMySQL(t *testing.T) {
+	if !isMySQL("mysql") || !isMySQL(" MySQL ") {
+		t.Fatal("expected mysql (any case/whitespace) to match")
+	}
+	if isMySQL("postgres") || isMySQL("") {
+		t.Fatal("expected non-mysql db types not to match")
+	}
+}
+
+func TestLogUpstreamTLSModeNoopWhenDisabled(t *testing.T) {
+	var buf bytes.Buffer
+	logUpstreamTLSMode(nil, []string{"postgres"}, log.New(&buf, "", 0))
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output when policy is disabled, got %q", buf.String())
+	}
+}
+
+func TestLogUpstreamTLSModeWarnsOnUnverifiedMode(t *testing.T) {
+	var buf bytes.Buffer
+	p := &upstreamTLSPolicy{mode: "require"}
+	logUpstreamTLSMode(p, []string{"postgres"}, log.New(&buf, "", 0))
+	if !bytes.Contains(buf.Bytes(), []byte("does NOT authenticate")) {
+		t.Fatalf("expected an unverified-mode note, got %q", buf.String())
+	}
+}
+
+func TestLogUpstreamTLSModeSilentOnVerifiedMode(t *testing.T) {
+	var buf bytes.Buffer
+	p := &upstreamTLSPolicy{mode: "verify-full"}
+	logUpstreamTLSMode(p, []string{"postgres"}, log.New(&buf, "", 0))
+	if bytes.Contains(buf.Bytes(), []byte("does NOT authenticate")) {
+		t.Fatalf("expected no unverified-mode note for verify-full, got %q", buf.String())
+	}
+}
+
+func TestLogUpstreamTLSModeWarnsOnUnsupportedDBType(t *testing.T) {
+	var buf bytes.Buffer
+	p := &upstreamTLSPolicy{mode: "require"}
+	logUpstreamTLSMode(p, []string{"oracle", "oracle", ""}, log.New(&buf, "", 0))
+	out := buf.String()
+	if !bytes.Contains(buf.Bytes(), []byte(`"oracle"`)) {
+		t.Fatalf("expected a warning naming the unsupported db type, got %q", out)
+	}
+	// The dedup/skip-empty logic should produce exactly one such warning line despite the repeat and
+	// the empty string in dbTypes.
+	if got := bytes.Count(buf.Bytes(), []byte("does not negotiate upstream TLS yet")); got != 1 {
+		t.Fatalf("expected exactly one dedup'd warning, got %d in %q", got, out)
+	}
+}
+
+func TestLogUpstreamTLSModeSilentForSupportedDBTypes(t *testing.T) {
+	var buf bytes.Buffer
+	p := &upstreamTLSPolicy{mode: "require"}
+	logUpstreamTLSMode(p, []string{"postgres", "mysql", "mongodb", "mongo", "postgresql"}, log.New(&buf, "", 0))
+	if bytes.Contains(buf.Bytes(), []byte("does not negotiate")) {
+		t.Fatalf("expected no unsupported-db-type warning for known engines, got %q", buf.String())
 	}
 }

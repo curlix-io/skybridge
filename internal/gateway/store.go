@@ -3,6 +3,8 @@ package gateway
 import (
 	"context"
 	"time"
+
+	"github.com/curlix-io/skybridge/internal/tunnel"
 )
 
 // Store records the lifecycle of native-access sessions the gateway relays. An external control
@@ -19,6 +21,25 @@ type Store interface {
 	SessionStarted(ctx context.Context, rec SessionRecord) (sessionID string, err error)
 	// SessionEnded is called when the relay finishes, with the byte volume and outcome.
 	SessionEnded(ctx context.Context, sessionID string, res SessionResult) error
+	// SessionTranscript forwards a session-replay transcript chunk batch, relayed unmodified from
+	// the agent (which built it from already-masked traffic on its side of the tunnel — see
+	// internal/agent/agent.go). Called on the agent's flush, over the same gateway<->agent tunnel
+	// control channel the session-lifecycle stream uses; the gateway itself never inspects the
+	// chunk content, only relays it to the control plane. Best-effort, same as SessionEnded.
+	SessionTranscript(ctx context.Context, sessionID string, chunks TranscriptChunks) error
+}
+
+// TranscriptChunks is one flush batch of session-replay chunks (already redacted/masked by the
+// time they reach here — see studio_session_transcripts.py on the control-plane side for the
+// storage/redaction contract). Truncated is set once the agent's own byte cap is hit; subsequent
+// batches for the same session stop being sent. OrgID is required by the control plane's RLS (the
+// session row it belongs to is org-scoped) — the gateway fills it in from the agent connection
+// that sent the transcript (see Gateway.handleTranscript), since the agent process itself serves
+// one org and doesn't otherwise stamp it on every control message.
+type TranscriptChunks struct {
+	OrgID     string                   `json:"organization_id"`
+	Chunks    []tunnel.TranscriptChunk `json:"chunks"`
+	Truncated bool                     `json:"truncated"`
 }
 
 // SessionRecord is what the gateway knows at the start of a native session.
@@ -62,3 +83,6 @@ func (NoopStore) SessionStarted(context.Context, SessionRecord) (string, error) 
 
 // SessionEnded implements Store.
 func (NoopStore) SessionEnded(context.Context, string, SessionResult) error { return nil }
+
+// SessionTranscript implements Store.
+func (NoopStore) SessionTranscript(context.Context, string, TranscriptChunks) error { return nil }

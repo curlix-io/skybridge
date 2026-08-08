@@ -67,9 +67,12 @@ type clientHandshake struct {
 // ProxyInject implements wire.InjectingEngine for MySQL: it terminates the client login (recovering
 // the curlix session token via mysql_clear_password over TLS), resolves an upstream credential, and
 // originates the upstream auth itself, then masks result rows exactly as the verbatim path does.
-func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve wire.CredentialResolver) error {
+func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve wire.CredentialResolver, recorder wire.Recorder) error {
 	if masker == nil {
 		masker = mask.Noop{}
+	}
+	if recorder == nil {
+		recorder = wire.NoopRecorder{}
 	}
 	if resolve == nil {
 		return errors.New("mysql: credential injection requires a resolver")
@@ -102,8 +105,8 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 	// Command phase: identical to the verbatim path, offset 0 (the agent ran both auths itself).
 	s := &state{caps: info.caps, queries: make(chan struct{}, 64)}
 	errc := make(chan error, 2)
-	go func() { errc <- s.clientToServer(cb, upstream) }()
-	go func() { errc <- s.serverToClient(ctx, sb, client, masker) }()
+	go func() { errc <- s.clientToServer(cb, upstream, recorder) }()
+	go func() { errc <- s.serverToClient(ctx, sb, client, masker, recorder) }()
 	err = <-errc
 	_ = client.Close()
 	_ = upstream.Close()

@@ -230,7 +230,7 @@ func runInjectScenario(t *testing.T, plugin, flow string, clientTLS bool) {
 
 	proxyErr := make(chan error, 1)
 	go func() {
-		proxyErr <- engine.ProxyInject(context.Background(), engineClient, engineUpstream, overlay, resolve)
+		proxyErr <- engine.ProxyInject(context.Background(), engineClient, engineUpstream, overlay, resolve, wire.NoopRecorder{})
 	}()
 	upErr := make(chan error, 1)
 	go func() { upErr <- runInjectUpstream(upstreamConn, plugin, flow, "s3cret") }()
