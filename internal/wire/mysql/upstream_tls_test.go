@@ -20,6 +20,7 @@ import (
 	"time"
 
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/wire"
 )
 
 func testServerTLS(t *testing.T) *tls.Config {
@@ -103,7 +104,7 @@ func TestProxyUpstreamTLSMasksOverEncryptedLink(t *testing.T) {
 
 	proxyErr := make(chan error, 1)
 	go func() {
-		proxyErr <- engine.Proxy(context.Background(), engineClient, engineUpstream, overlay)
+		proxyErr <- engine.Proxy(context.Background(), engineClient, engineUpstream, overlay, wire.NoopRecorder{})
 	}()
 
 	upErr := make(chan error, 1)
@@ -228,7 +229,7 @@ func TestProxyUpstreamTLSRequiredButServerLacksSSL(t *testing.T) {
 	engine := New().WithUpstreamTLS(&tls.Config{InsecureSkipVerify: true}, true) //nolint:gosec // test
 	proxyErr := make(chan error, 1)
 	go func() {
-		proxyErr <- engine.Proxy(context.Background(), engineClient, engineUpstream, mask.Noop{})
+		proxyErr <- engine.Proxy(context.Background(), engineClient, engineUpstream, mask.Noop{}, wire.NoopRecorder{})
 	}()
 
 	// Upstream greeting WITHOUT CLIENT_SSL.

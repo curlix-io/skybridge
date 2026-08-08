@@ -65,7 +65,8 @@ SKYBRIDGE_PII_OVERLAY='{"email":"[redacted]","ssn":"[redacted]"}' \
 go run ./cmd/skybridge-agent
 ```
 
-**Run with Docker**:
+**Run with Docker** (brings up Microsoft Presidio's analyzer + anonymizer alongside the agent, per
+[hoop.dev's Presidio deployment guide](https://hoop.dev/docs/setup/deployment/presidio)):
 
 ```sh
 cd deploy
@@ -78,8 +79,11 @@ Then connect a native client through the agent (listening on `:15432` by default
 psql "postgres://user:pass@localhost:15432/appdb"
 ```
 
-That's it — result rows are masked before they reach the client. With no mask config the agent is a
-transparent, governed passthrough.
+That's it — result rows are masked before they reach the client, using Presidio's NER-based PII
+detection. Set `SKYBRIDGE_MASK_ANALYZE_URL`/`SKYBRIDGE_MASK_ANONYMIZE_URL` to empty to disable
+content masking (governed passthrough), or point them at a different `analyze`/`anonymize` service.
+Running with plain `go run` (no compose) has no mask URLs by default — set them explicitly to reach
+a Presidio instance you run yourself.
 
 ## Configure
 
@@ -94,8 +98,12 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_PII_OVERLAY_URL` | — | control-plane endpoint to fetch the org's projected overlay (`GET /api/v1/data-studio/studio/native-access/pii-overlay`); enables dynamic, hot-swapped masking |
 | `SKYBRIDGE_PII_OVERLAY_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token for the overlay fetch |
 | `SKYBRIDGE_PII_OVERLAY_POLL_SECONDS` | `60` | overlay refresh interval (min 15s; `-1` = fetch once at startup) |
-| `SKYBRIDGE_MASK_ANALYZE_URL` | — | enable content masking: any `POST /analyze` service |
-| `SKYBRIDGE_MASK_ANONYMIZE_URL` | — | …paired `POST /anonymize` service |
+| `SKYBRIDGE_MASK_ANALYZE_URL` | — (`http://presidio-analyzer:3000/analyze` under `deploy/docker-compose.yml`) | enable content masking: any `POST /analyze` service — Microsoft Presidio by default |
+| `SKYBRIDGE_MASK_ANONYMIZE_URL` | — (`http://presidio-anonymizer:3000/anonymize` under compose) | …paired `POST /anonymize` service |
+| `SKYBRIDGE_MASK_LANGUAGE` | `en` | language passed to the analyzer |
+| `SKYBRIDGE_MASK_ENTITIES` | — (low-cost regex set: `EMAIL_ADDRESS,PHONE_NUMBER,CREDIT_CARD,US_SSN,IP_ADDRESS,IBAN_CODE,CRYPTO`) | comma-separated Presidio entity types to detect; NER-backed types (`PERSON`, `LOCATION`, `ORGANIZATION`, `NRP`) are opt-in — they run full spaCy inference per value and are prone to false positives on ordinary business data |
+| `SKYBRIDGE_MASK_ANONYMIZERS` | — (blanket `{"DEFAULT":{"type":"replace","new_value":"[redacted]"}}`) | JSON Presidio "anonymizers" object, one strategy per entity type — e.g. partial-mask an SSN instead of a flat replace |
+| `SKYBRIDGE_MASK_MODE` | `best-effort` | `best-effort` forwards a value unmasked if the remote masker errors/is unreachable (a masker outage never blocks a query); `strict` aborts the row/connection instead so unmasked content never reaches the client (mirrors hoop.dev's `DLP_MODE`) |
 | `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present a curlix session token, not a DB password) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /api/v1/data-studio/studio/native-access/proxy-exchange`) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN` | `SKYBRIDGE_TOKEN` | bearer for the exchange call |
@@ -253,6 +261,19 @@ SKYBRIDGE_AWS_REGION=us-east-1 \
 go run ./cmd/skybridge-edge
 ```
 
+Or set a single `SKYBRIDGE_KEY` instead of `SKYBRIDGE_EDGE_GATEWAY`/`SKYBRIDGE_ORG_ID`/`SKYBRIDGE_TOKEN`
+(the connector enrollment mint returns this as `customer_handoff.connector_key`):
+
+```sh
+SKYBRIDGE_KEY="curlix://org-123:<enrollment-token>@gateway.example.com?edge_id=edge-1" \
+SKYBRIDGE_AWS_REGION=us-east-1 \
+go run ./cmd/skybridge-edge
+```
+
+`SKYBRIDGE_KEY` only seeds defaults — any discrete `SKYBRIDGE_*` var above still overrides it, so
+existing deployments and scripts keep working unchanged. The connector-gateway (`:7100`) and enroll
+(`:7101`) ports are fixed by convention and derived from the key's bare host.
+
 **Deploying on AWS?** Use the ready-made CloudFormation template instead of setting these env vars
 by hand — see [Deploying on AWS (CloudFormation)](#deploying-on-aws-cloudformation) below.
 
@@ -300,15 +321,16 @@ persisted-identity secret(s), IAM roles, security group, log group.
 ```sh
 aws cloudformation create-stack \
   --stack-name curlix-edge \
-  --template-body file://integrations/curlix-connector/cloudformation/curlix-edge.yaml \
+  --template-body file://curlix-edge.yaml \
   --capabilities CAPABILITY_NAMED_IAM \
   --parameters file://parameters.json
 ```
 
 Get `parameters.json` (VPC/subnets pre-filled, enrollment token included) from **Curlix
-Administration → Connectors** when you mint a new connector. To move to a newer image, update the
-stack's `ConnectorImage` parameter and redeploy — the mTLS identity above means this no longer
-requires a fresh enrollment token.
+Administration → Connectors** when you mint a new connector. The `curlix-edge.yaml` template itself
+is shared directly by the Curlix team as part of onboarding — not a self-serve download today. To
+move to a newer image, update the stack's `ConnectorImage` parameter and redeploy — the mTLS
+identity above means this no longer requires a fresh enrollment token.
 
 ## Docs
 

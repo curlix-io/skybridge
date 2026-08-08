@@ -31,9 +31,11 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"strings"
 	"sync/atomic"
 
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/wire"
 )
 
 const (
@@ -102,9 +104,12 @@ type state struct {
 func (s *state) deprecateEOF() bool { return s.caps&capClientDeprecateEOF != 0 }
 
 // Proxy implements wire.Engine.
-func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker) error {
+func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder wire.Recorder) error {
 	if masker == nil {
 		masker = mask.Noop{}
+	}
+	if recorder == nil {
+		recorder = wire.NoopRecorder{}
 	}
 	cb := bufio.NewReaderSize(client, 1<<16)
 	sb := bufio.NewReaderSize(upstream, 1<<16)
@@ -147,8 +152,8 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	s := &state{caps: caps, queries: make(chan struct{}, 64)}
 	s.offset.Store(offset)
 	errc := make(chan error, 2)
-	go func() { errc <- s.clientToServer(cb, upstream) }()
-	go func() { errc <- s.serverToClient(ctx, sb, client, masker) }()
+	go func() { errc <- s.clientToServer(cb, upstream, recorder) }()
+	go func() { errc <- s.serverToClient(ctx, sb, client, masker, recorder) }()
 	err = <-errc
 	_ = client.Close()
 	_ = upstream.Close()
@@ -249,7 +254,7 @@ func passthrough(cb *bufio.Reader, sb *bufio.Reader, client, upstream net.Conn) 
 // clientToServer forwards verbatim and flags COM_QUERY so the response side parses the result set.
 // During the connection phase of an upstream-TLS session it shifts the sequence id by +offset to
 // account for the SSL-request packet the agent inserted.
-func (s *state) clientToServer(cb *bufio.Reader, upstream io.Writer) error {
+func (s *state) clientToServer(cb *bufio.Reader, upstream io.Writer, recorder wire.Recorder) error {
 	for {
 		seq, payload, full, err := readPacket(cb)
 		if err != nil {
@@ -260,6 +265,7 @@ func (s *state) clientToServer(cb *bufio.Reader, upstream io.Writer) error {
 			case s.queries <- struct{}{}:
 			default:
 			}
+			recorder.RecordInput(payload[1:]) // strip the COM_QUERY opcode byte
 		}
 		if err := writePacket(upstream, seq+byte(s.offset.Load()), payload); err != nil {
 			return err
@@ -267,7 +273,7 @@ func (s *state) clientToServer(cb *bufio.Reader, upstream io.Writer) error {
 	}
 }
 
-func (s *state) serverToClient(ctx context.Context, sb *bufio.Reader, client io.Writer, masker mask.Masker) error {
+func (s *state) serverToClient(ctx context.Context, sb *bufio.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder) error {
 	bw := bufio.NewWriterSize(client, 1<<16)
 	// Connection phase (only entered when the agent inserted an SSL-request packet for upstream TLS):
 	// relay auth packets with the sequence id shifted back by −offset until the auth result (OK/ERR),
@@ -306,7 +312,7 @@ func (s *state) serverToClient(ctx context.Context, sb *bufio.Reader, client io.
 		default:
 		}
 		if pending && !full {
-			if err := s.handleResultResponse(ctx, sb, bw, masker, seq, payload); err != nil {
+			if err := s.handleResultResponse(ctx, sb, bw, masker, recorder, seq, payload); err != nil {
 				_ = bw.Flush()
 				return err
 			}
@@ -328,10 +334,10 @@ func (s *state) serverToClient(ctx context.Context, sb *bufio.Reader, client io.
 
 // handleResultResponse consumes one (or more, for multi-statement) result sets, masking rows.
 // first{Seq,Payload} is the first packet of the response, already read by the caller.
-func (s *state) handleResultResponse(ctx context.Context, sb *bufio.Reader, bw *bufio.Writer, masker mask.Masker, firstSeq byte, firstPayload []byte) error {
+func (s *state) handleResultResponse(ctx context.Context, sb *bufio.Reader, bw *bufio.Writer, masker mask.Masker, recorder wire.Recorder, firstSeq byte, firstPayload []byte) error {
 	seq, payload := firstSeq, firstPayload
 	for {
-		more, done, err := s.handleOneResultSet(ctx, sb, bw, masker, seq, payload)
+		more, done, err := s.handleOneResultSet(ctx, sb, bw, masker, recorder, seq, payload)
 		if err != nil || done || !more {
 			return err
 		}
@@ -346,7 +352,7 @@ func (s *state) handleResultResponse(ctx context.Context, sb *bufio.Reader, bw *
 // handleOneResultSet processes a single response whose first packet is first{Seq,Payload}. It
 // returns more=true when SERVER_MORE_RESULTS_EXISTS was set on the terminator, and done=true when
 // the response was a non-result-set reply (OK/ERR) or it fell back to raw forwarding.
-func (s *state) handleOneResultSet(ctx context.Context, sb *bufio.Reader, bw *bufio.Writer, masker mask.Masker, seq byte, payload []byte) (more bool, done bool, err error) {
+func (s *state) handleOneResultSet(ctx context.Context, sb *bufio.Reader, bw *bufio.Writer, masker mask.Masker, recorder wire.Recorder, seq byte, payload []byte) (more bool, done bool, err error) {
 	// Non-result-set response (OK/ERR/LOCAL INFILE): forward and we're done.
 	if len(payload) == 0 || payload[0] == pktOK || payload[0] == pktERR || payload[0] == pktLocalInfile {
 		return false, true, writePacket(bw, seq, payload)
@@ -405,8 +411,13 @@ func (s *state) handleOneResultSet(ctx context.Context, sb *bufio.Reader, bw *bu
 			more = resultStatus(rpayload, s.deprecateEOF())&statusMoreResults != 0
 			return more, false, writePacket(bw, rseq, rpayload)
 		}
-		if newPayload, ok := maskTextRow(ctx, rpayload, cols, masker); ok && len(newPayload) < maxPacket {
+		newPayload, values, ok, err := maskTextRow(ctx, rpayload, cols, masker)
+		if err != nil {
+			return false, false, err
+		}
+		if ok && len(newPayload) < maxPacket {
 			rpayload = newPayload
+			recorder.RecordOutput(renderTextRow(cols, values))
 		}
 		if err := writePacket(bw, rseq, rpayload); err != nil {
 			return false, false, err
@@ -564,9 +575,13 @@ func resultStatus(p []byte, deprecateEOF bool) uint16 {
 	return 0
 }
 
-// maskTextRow decodes a text-protocol row, masks each field, and re-encodes it. Returns ok=false to
-// signal the caller to forward the original packet unchanged.
-func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker mask.Masker) ([]byte, bool) {
+// maskTextRow decodes a text-protocol row, masks each field, and re-encodes it. ok=false signals
+// the caller to forward the original packet unchanged (protocol-parse drift, safe by construction).
+// err is non-nil only when the masker itself failed (e.g. mask.ErrMaskerUnavailable in strict mode)
+// — the caller must abort rather than forward that row. Also returns the masked field values
+// (already decoded here) so the caller can render a replay-transcript line without re-parsing the
+// re-encoded packet.
+func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker mask.Masker) ([]byte, [][]byte, bool, error) {
 	vals := make([][]byte, 0, len(cols))
 	off := 0
 	for off < len(payload) {
@@ -577,11 +592,11 @@ func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker
 		}
 		l, n, ok := readLenEncInt(payload, off)
 		if !ok {
-			return nil, false
+			return nil, nil, false, nil
 		}
 		off += n
 		if off+int(l) > len(payload) {
-			return nil, false
+			return nil, nil, false, nil
 		}
 		v := make([]byte, l)
 		copy(v, payload[off:off+int(l)])
@@ -598,8 +613,11 @@ func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker
 		}
 	}
 	masked, err := masker.MaskRow(ctx, mc, vals)
-	if err != nil || len(masked) != len(vals) {
-		return nil, false
+	if err != nil {
+		return nil, nil, false, err
+	}
+	if len(masked) != len(vals) {
+		return nil, nil, false, nil
 	}
 
 	out := make([]byte, 0, len(payload))
@@ -611,5 +629,34 @@ func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker
 		out = appendLenEncInt(out, uint64(len(v)))
 		out = append(out, v...)
 	}
-	return out, true
+	return out, masked, true, nil
+}
+
+// renderTextRow formats an already-masked row as "col1=val1, col2=val2, ..." for the replay
+// transcript — a best-effort human-readable line, not a re-encoding of the wire format.
+func renderTextRow(cols []mask.Column, values [][]byte) string {
+	if len(values) == 0 {
+		return ""
+	}
+	var b strings.Builder
+	for i, v := range values {
+		if i > 0 {
+			b.WriteString(", ")
+		}
+		name := ""
+		if i < len(cols) {
+			name = cols[i].Name
+		}
+		if name == "" {
+			name = fmt.Sprintf("col%d", i)
+		}
+		b.WriteString(name)
+		b.WriteByte('=')
+		if v == nil {
+			b.WriteString("NULL")
+		} else {
+			b.Write(v)
+		}
+	}
+	return b.String()
 }

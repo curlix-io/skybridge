@@ -24,6 +24,7 @@ import (
 	"net"
 
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/wire"
 )
 
 const (
@@ -43,13 +44,18 @@ func New() *Engine { return &Engine{} }
 func (*Engine) Name() string { return "mongodb" }
 
 // Proxy implements wire.Engine.
-func (*Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker) error {
+func (*Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder wire.Recorder) error {
 	if masker == nil {
 		masker = mask.Noop{}
 	}
+	if recorder == nil {
+		recorder = wire.NoopRecorder{}
+	}
 	errc := make(chan error, 2)
-	go func() { _, e := io.Copy(upstream, client); errc <- e }() // requests verbatim
-	go func() { errc <- maskServer(ctx, bufio.NewReaderSize(upstream, 1<<16), client, masker) }()
+	// requests verbatim, teeing raw bytes into the recorder for replay (opaque/best-effort — not
+	// decoded from the OP_MSG framing here).
+	go func() { _, e := io.Copy(upstream, io.TeeReader(client, wire.RecorderInputWriter(recorder))); errc <- e }()
+	go func() { errc <- maskServer(ctx, bufio.NewReaderSize(upstream, 1<<16), client, masker, recorder) }()
 	err := <-errc
 	_ = client.Close()
 	_ = upstream.Close()
@@ -60,14 +66,18 @@ func (*Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask
 	return err
 }
 
-func maskServer(ctx context.Context, r *bufio.Reader, w io.Writer, masker mask.Masker) error {
-	bm := &bsonMasker{ctx: ctx, masker: masker}
+func maskServer(ctx context.Context, r *bufio.Reader, w io.Writer, masker mask.Masker, recorder wire.Recorder) error {
+	bm := &bsonMasker{ctx: ctx, masker: masker, recorder: recorder}
 	for {
 		msg, err := readMessage(r)
 		if err != nil {
 			return err
 		}
-		if _, err := w.Write(transformMessage(bm, msg)); err != nil {
+		out, err := transformMessage(bm, msg)
+		if err != nil {
+			return err
+		}
+		if _, err := w.Write(out); err != nil {
 			return err
 		}
 	}
@@ -91,21 +101,22 @@ func readMessage(r *bufio.Reader) ([]byte, error) {
 	return msg, nil
 }
 
-// transformMessage masks an OP_MSG reply. On any non-OP_MSG opcode or parse problem it returns the
-// original bytes unchanged.
-func transformMessage(bm *bsonMasker, msg []byte) []byte {
+// transformMessage masks an OP_MSG reply. On any non-OP_MSG opcode or benign parse problem it
+// returns the original bytes unchanged. A masker failure (mask.ErrMaskerUnavailable in strict
+// mode) is returned as an error instead, so the caller aborts rather than forwarding raw content.
+func transformMessage(bm *bsonMasker, msg []byte) ([]byte, error) {
 	if len(msg) < headerLen+4 {
-		return msg
+		return msg, nil
 	}
 	if int(binary.LittleEndian.Uint32(msg[12:16])) != opMsg {
-		return msg
+		return msg, nil
 	}
 	flags := binary.LittleEndian.Uint32(msg[16:20])
 
 	end := len(msg)
 	if flags&flagChecksumPresent != 0 {
 		if end-4 < 20 {
-			return msg
+			return msg, nil
 		}
 		end -= 4 // strip trailing CRC32C; we will clear the flag below
 	}
@@ -117,16 +128,19 @@ func transformMessage(bm *bsonMasker, msg []byte) []byte {
 		switch msg[off] {
 		case 0: // body document
 			if off+1+4 > end {
-				return msg
+				return msg, nil
 			}
 			dl := int(binary.LittleEndian.Uint32(msg[off+1 : off+5]))
 			if dl < 5 || off+1+dl > end {
-				return msg
+				return msg, nil
 			}
 			doc := msg[off+1 : off+1+dl]
 			nd, err := bm.body(doc)
 			if err != nil {
-				return msg
+				if errors.Is(err, mask.ErrMaskerUnavailable) {
+					return nil, err
+				}
+				return msg, nil
 			}
 			if !bytesEqual(nd, doc) {
 				changed = true
@@ -136,16 +150,19 @@ func transformMessage(bm *bsonMasker, msg []byte) []byte {
 			off += 1 + dl
 		case 1: // document sequence
 			if off+1+4 > end {
-				return msg
+				return msg, nil
 			}
 			ss := int(binary.LittleEndian.Uint32(msg[off+1 : off+5]))
 			if ss < 4 || off+1+ss > end {
-				return msg
+				return msg, nil
 			}
 			sec := msg[off+1 : off+1+ss]
 			ns, ch, err := bm.sequence(sec)
 			if err != nil {
-				return msg
+				if errors.Is(err, mask.ErrMaskerUnavailable) {
+					return nil, err
+				}
+				return msg, nil
 			}
 			if ch {
 				changed = true
@@ -154,12 +171,12 @@ func transformMessage(bm *bsonMasker, msg []byte) []byte {
 			sections = append(sections, ns...)
 			off += 1 + ss
 		default:
-			return msg
+			return msg, nil
 		}
 	}
 
 	if !changed {
-		return msg
+		return msg, nil
 	}
 
 	out := make([]byte, 0, headerLen+4+len(sections))
@@ -169,7 +186,7 @@ func transformMessage(bm *bsonMasker, msg []byte) []byte {
 	out = append(out, fb[:]...)
 	out = append(out, sections...)
 	binary.LittleEndian.PutUint32(out[0:4], uint32(len(out)))
-	return out
+	return out, nil
 }
 
 // sequence masks every document in an OP_MSG document-sequence section. sec is [int32 size][cstring

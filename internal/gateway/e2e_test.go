@@ -27,7 +27,7 @@ type upperEngine struct{}
 
 func (upperEngine) Name() string { return "upper" }
 
-func (upperEngine) Proxy(_ context.Context, client, upstream net.Conn, _ mask.Masker) error {
+func (upperEngine) Proxy(_ context.Context, client, upstream net.Conn, _ mask.Masker, _ wire.Recorder) error {
 	errc := make(chan error, 2)
 	go func() { _, e := io.Copy(upstream, client); errc <- e }()
 	go func() {
@@ -160,6 +160,10 @@ func (s *recordingStore) SessionEnded(_ context.Context, id string, res gateway.
 	s.endedID = id
 	s.ended = res
 	s.done = true
+	return nil
+}
+
+func (s *recordingStore) SessionTranscript(_ context.Context, _ string, _ gateway.TranscriptChunks) error {
 	return nil
 }
 

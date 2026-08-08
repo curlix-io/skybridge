@@ -5,10 +5,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"strings"
 	"testing"
 
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/wire"
 )
 
 // rowDescription builds a 'T' message payload for the given text-format column names.
@@ -77,7 +79,7 @@ func TestMaskDataRowRedactsNamedColumn(t *testing.T) {
 	payload := dataRowPayload([]byte("7"), []byte("a@b.com"))
 	masker := columnMasker{redact: map[string]bool{"email": true}}
 
-	out, err := maskDataRow(context.Background(), payload, cols, masker)
+	out, _, err := maskDataRow(context.Background(), payload, cols, masker)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -108,7 +110,7 @@ func TestMaskDataRowRedactsNamedColumn(t *testing.T) {
 func TestMaskDataRowPreservesNull(t *testing.T) {
 	cols := parseRowDescription(rowDescriptionPayload("id", "email"))
 	payload := dataRowPayload([]byte("7"), nil)
-	out, err := maskDataRow(context.Background(), payload, cols, mask.Noop{})
+	out, _, err := maskDataRow(context.Background(), payload, cols, mask.Noop{})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -137,7 +139,7 @@ func TestPipeBackendMasksStream(t *testing.T) {
 
 	client := new(bytes.Buffer)
 	masker := columnMasker{redact: map[string]bool{"email": true}}
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, masker)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, masker, wire.NoopRecorder{})
 	if err == nil || err.Error() != "EOF" {
 		t.Fatalf("expected EOF at stream end, got %v", err)
 	}
@@ -167,6 +169,36 @@ func TestPipeBackendMasksStream(t *testing.T) {
 	}
 	if last != 'Z' {
 		t.Fatalf("stream should end with ReadyForQuery, last=%c", last)
+	}
+}
+
+// errMasker always fails, simulating a masking-service outage under strict mode.
+type errMasker struct{}
+
+func (errMasker) MaskRow(context.Context, []mask.Column, [][]byte) ([][]byte, error) {
+	return nil, mask.ErrMaskerUnavailable
+}
+
+func TestPipeBackendAbortsOnMaskerFailure(t *testing.T) {
+	server := new(bytes.Buffer)
+	writeRaw := func(typ byte, payload []byte) {
+		var hdr [5]byte
+		hdr[0] = typ
+		binary.BigEndian.PutUint32(hdr[1:5], uint32(len(payload)+4))
+		server.Write(hdr[:])
+		server.Write(payload)
+	}
+	writeRaw('T', rowDescriptionPayload("id", "email"))
+	writeRaw('D', dataRowPayload([]byte("1"), []byte("alice@x.com")))
+	writeRaw('Z', []byte{'I'})
+
+	client := new(bytes.Buffer)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, errMasker{}, wire.NoopRecorder{})
+	if !errors.Is(err, mask.ErrMaskerUnavailable) {
+		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
+	}
+	if bytes.Contains(client.Bytes(), []byte("alice@x.com")) {
+		t.Fatal("unmasked email must never reach the client when the masker fails in strict mode")
 	}
 }
 

@@ -172,7 +172,7 @@ func TestProxyInjectOverClientTLS(t *testing.T) {
 	proxyErr := make(chan error, 1)
 	go func() {
 		proxyErr <- engine.ProxyInject(context.Background(), agentClient, agentUpstream,
-			columnMasker{redact: map[string]bool{"email": true}}, resolve)
+			columnMasker{redact: map[string]bool{"email": true}}, resolve, wire.NoopRecorder{})
 	}()
 
 	upErr := make(chan error, 1)

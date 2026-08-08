@@ -33,7 +33,7 @@ func (o Options) withDefaults() Options {
 
 // Result is the tabular execute payload shared by Studio dispatch and db_query_* tools.
 type Result struct {
-	Status  string           `json:"status"`
+	Status  string         `json:"status"`
 	Results map[string]any   `json:"results,omitempty"`
 	Data    []map[string]any `json:"data,omitempty"`
 	Columns []string         `json:"columns,omitempty"`

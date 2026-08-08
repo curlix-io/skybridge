@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 )
@@ -20,8 +21,15 @@ type Remote struct {
 	anonymizeURL string
 	language     string
 	minLen       int
+	entities     []string
+	anonymizers  map[string]any
+	strict       bool
 	http         *http.Client
 }
+
+// ErrMaskerUnavailable is returned by MaskRow (strict mode only) when the remote analyze/anonymize
+// service could not be reached or returned an unusable response for a value that needed masking.
+var ErrMaskerUnavailable = errors.New("mask: remote masking service unavailable")
 
 // RemoteConfig configures the remote masking service client.
 type RemoteConfig struct {
@@ -29,8 +37,31 @@ type RemoteConfig struct {
 	AnonymizeURL string // e.g. http://127.0.0.1:3001/anonymize
 	Language     string // default "en"
 	MinLen       int    // skip values shorter than this (numbers/short codes); default 4
-	Timeout      time.Duration
+	// Entities restricts detection to these Presidio entity types. Nil/empty falls back to
+	// defaultEntities (regex/rule-based only) instead of Presidio's default of every registered
+	// recognizer — the NER-backed types (PERSON, LOCATION, ORGANIZATION, NRP) are expensive and
+	// prone to false positives on ordinary business data, so they require an explicit opt-in.
+	Entities []string
+	// Anonymizers is Presidio's /anonymize "anonymizers" object, keyed by entity type (or
+	// "DEFAULT"), letting each type get its own strategy (redact, partial mask, hash, ...). Nil
+	// falls back to a single DEFAULT replace-with-"[redacted]" rule.
+	Anonymizers map[string]any
+	// Strict, when true, makes MaskRow return ErrMaskerUnavailable instead of forwarding a value
+	// unmasked when analyze/anonymize cannot be completed (transport error, non-200, malformed
+	// response). Default (false) is best-effort: a masker outage never blocks the query.
+	Strict  bool
+	Timeout time.Duration
 }
+
+// defaultEntities are the regex/rule-based Presidio recognizers — a few ms of CPU each, no spaCy
+// model involved — used when RemoteConfig.Entities is not set. NER-backed types are opt-in only.
+var defaultEntities = []string{
+	"EMAIL_ADDRESS", "PHONE_NUMBER", "CREDIT_CARD", "US_SSN", "IP_ADDRESS", "IBAN_CODE", "CRYPTO",
+}
+
+// defaultAnonymizer replaces any detected span with a fixed placeholder, applied to every entity
+// type unless RemoteConfig.Anonymizers overrides it.
+var defaultAnonymizer = map[string]any{"DEFAULT": map[string]any{"type": "replace", "new_value": "[redacted]"}}
 
 // NewRemote builds a remote masker. If cfg.AnalyzeURL is empty the masker is a no-op.
 func NewRemote(cfg RemoteConfig) *Remote {
@@ -46,11 +77,22 @@ func NewRemote(cfg RemoteConfig) *Remote {
 	if to <= 0 {
 		to = 3 * time.Second
 	}
+	entities := cfg.Entities
+	if len(entities) == 0 {
+		entities = defaultEntities
+	}
+	anonymizers := cfg.Anonymizers
+	if len(anonymizers) == 0 {
+		anonymizers = defaultAnonymizer
+	}
 	return &Remote{
 		analyzeURL:   cfg.AnalyzeURL,
 		anonymizeURL: cfg.AnonymizeURL,
 		language:     lang,
 		minLen:       minLen,
+		entities:     entities,
+		anonymizers:  anonymizers,
+		strict:       cfg.Strict,
 		http:         &http.Client{Timeout: to},
 	}
 }
@@ -65,7 +107,10 @@ type detectedSpan struct {
 	Score      float64 `json:"score"`
 }
 
-// MaskRow implements Masker by anonymizing each eligible text value.
+// MaskRow implements Masker by anonymizing each eligible text value. In strict mode (r.strict) a
+// masker failure (transport error, non-200, malformed response) returns ErrMaskerUnavailable
+// instead of forwarding the value unmasked; a successful call that simply finds nothing to mask is
+// never an error, in either mode.
 func (r *Remote) MaskRow(ctx context.Context, cols []Column, row [][]byte) ([][]byte, error) {
 	if !r.Enabled() {
 		return row, nil
@@ -77,42 +122,52 @@ func (r *Remote) MaskRow(ctx context.Context, cols []Column, row [][]byte) ([][]
 		if len(row[i]) < r.minLen {
 			continue
 		}
-		masked, ok := r.anonymize(ctx, string(row[i]))
-		if ok {
-			row[i] = []byte(masked)
+		masked, failed := r.anonymize(ctx, string(row[i]))
+		if failed {
+			if r.strict {
+				return row, ErrMaskerUnavailable
+			}
+			continue
 		}
+		row[i] = []byte(masked)
 	}
 	return row, nil
 }
 
-// anonymize runs analyze -> anonymize for one value. Returns (text, true) on success; on any error
-// it returns ("", false) so the caller keeps the original value (best-effort masking).
+// anonymize runs analyze -> anonymize for one value. Returns the anonymized text (or the original
+// text if nothing was detected) and failed=true only when the remote calls themselves could not be
+// completed — never for a clean "no PII found" result.
 func (r *Remote) anonymize(ctx context.Context, text string) (string, bool) {
-	results, ok := r.analyze(ctx, text)
-	if !ok || len(results) == 0 {
-		return "", false
+	results, failed := r.analyze(ctx, text)
+	if failed {
+		return text, true
+	}
+	if len(results) == 0 {
+		return text, false
 	}
 	body := map[string]any{
 		"text":             text,
 		"analyzer_results": results,
-		"anonymizers":      map[string]any{"DEFAULT": map[string]any{"type": "replace", "new_value": "[redacted]"}},
+		"anonymizers":      r.anonymizers,
 	}
 	var out struct {
 		Text string `json:"text"`
 	}
 	if !r.postJSON(ctx, r.anonymizeURL, body, &out) {
-		return "", false
+		return text, true
 	}
-	return out.Text, true
+	return out.Text, false
 }
 
+// analyze returns the detected spans and failed=true only on a transport/decode/non-200 error —
+// an empty result slice with failed=false means the call succeeded and found nothing.
 func (r *Remote) analyze(ctx context.Context, text string) ([]detectedSpan, bool) {
-	body := map[string]any{"text": text, "language": r.language}
+	body := map[string]any{"text": text, "language": r.language, "entities": r.entities}
 	var out []detectedSpan
 	if !r.postJSON(ctx, r.analyzeURL, body, &out) {
-		return nil, false
+		return nil, true
 	}
-	return out, true
+	return out, false
 }
 
 func (r *Remote) postJSON(ctx context.Context, url string, body any, out any) bool {

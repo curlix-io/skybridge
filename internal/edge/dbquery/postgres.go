@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"strings"
 
-	"github.com/curlix-io/skybridge/internal/mask"
 	_ "github.com/jackc/pgx/v5/stdlib"
+	"github.com/curlix-io/skybridge/internal/mask"
 )
 
 func executePostgres(ctx context.Context, target Target, database, q string, opts Options, masker mask.Masker) (map[string]any, error) {

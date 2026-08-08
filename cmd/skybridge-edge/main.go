@@ -13,6 +13,7 @@ import (
 	"github.com/curlix-io/skybridge/internal/edge/awsexec"
 	"github.com/curlix-io/skybridge/internal/edge/dbexec"
 	"github.com/curlix-io/skybridge/internal/edge/dbquery"
+	"github.com/curlix-io/skybridge/internal/edge/k8sexec"
 	"github.com/curlix-io/skybridge/internal/edge/studiotransport"
 	"github.com/curlix-io/skybridge/internal/edge/transport"
 )
@@ -96,6 +97,17 @@ func main() {
 		FallbackPassword: cfg.StudioDBPassword,
 		Masker:           masker,
 	})
+	// Kubernetes access is opt-in: only registered when a kubeconfig/context is configured
+	// (external-connector mode — see docs/design/kubernetes-access-broker.md §8.2. In-cluster
+	// deployment with a bound ServiceAccount needs no kubeconfig and can enable this the same way
+	// once that story is scoped).
+	if cfg.K8sKubeconfig != "" || cfg.K8sContext != "" {
+		k8sexec.Register(reg, k8sexec.Options{
+			Kubeconfig: cfg.K8sKubeconfig,
+			Context:    cfg.K8sContext,
+			KubectlBin: cfg.K8sBinary,
+		})
+	}
 
 	client := transport.New(transport.Config{
 		Target:            cfg.GatewayAddr,
