@@ -25,6 +25,9 @@ type Options struct {
 	Masker           mask.Masker
 	MaxRows          int
 	QueryTimeout     time.Duration
+	// OrgID scopes path-/table-aware masking labels (see dbquery.Options.OrgID). Empty disables
+	// that scoping without otherwise affecting masking.
+	OrgID string
 }
 
 // Executor runs one-shot DB statements for POST /studio/exec (Design B).
@@ -86,6 +89,7 @@ func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (
 		MaxRows:          maxRows,
 		Timeout:          e.opts.QueryTimeout,
 		EnforceReadOnly:  readOnly,
+		OrgID:            e.opts.OrgID,
 	})
 	if err != nil {
 		return edge.ErrorResult(toolName(dbType), err.Error()), nil

@@ -68,6 +68,9 @@ type Engine struct {
 	// verify-*); when false (prefer) the engine falls back to a plaintext upstream.
 	upstreamTLS      *tls.Config
 	upstreamRequired bool
+	// orgID scopes mask.Column.ObjectID for path-/table-aware masking labels (see
+	// internal/pathlabel). Empty disables that scoping without otherwise affecting masking.
+	orgID string
 }
 
 // New returns a MySQL engine (plaintext upstream).
@@ -86,12 +89,23 @@ func (e *Engine) WithUpstreamTLS(cfg *tls.Config, required bool) *Engine {
 	return &c
 }
 
+// WithOrgID returns a copy of the engine that scopes mask.Column.ObjectID to orgID for path-/
+// table-aware masking labels (see internal/pathlabel). Call with "" to leave scoping disabled.
+func (e *Engine) WithOrgID(orgID string) *Engine {
+	c := *e
+	c.orgID = orgID
+	return &c
+}
+
 // Name implements wire.Engine.
 func (*Engine) Name() string { return "mysql" }
 
 type state struct {
 	caps    uint32 // client-chosen capability flags (immutable after handshake)
 	queries chan struct{}
+	// orgID scopes mask.Column.ObjectID for path-/table-aware masking labels; copied from the
+	// owning Engine at Proxy start (see Engine.orgID / WithOrgID). Empty disables that scoping.
+	orgID string
 	// offset is the wire sequence-id shift applied while the agent has inserted an extra packet into
 	// the connection phase (upstream TLS): client→server packets get +offset, server→client packets
 	// get −offset. It starts at 1 in that case and drops to 0 once auth completes (after which each
@@ -100,6 +114,17 @@ type state struct {
 }
 
 func (s *state) deprecateEOF() bool { return s.caps&capClientDeprecateEOF != 0 }
+
+// objectID builds the tenant-scoped identifier mask.Column.ObjectID carries for a result column,
+// e.g. "org1:mysql:shop:orders". Returns "" when orgID or orgTable is unknown (a computed/derived
+// column with no backing table has no org_table in its column-definition packet), which a
+// path-aware Masker treats as "no label available" and falls back to bare-key matching.
+func (s *state) objectID(schema, orgTable string) string {
+	if s.orgID == "" || orgTable == "" {
+		return ""
+	}
+	return s.orgID + ":mysql:" + schema + ":" + orgTable
+}
 
 // Proxy implements wire.Engine.
 func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker) error {
@@ -144,7 +169,7 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 		return err
 	}
 
-	s := &state{caps: caps, queries: make(chan struct{}, 64)}
+	s := &state{caps: caps, queries: make(chan struct{}, 64), orgID: e.orgID}
 	s.offset.Store(offset)
 	errc := make(chan error, 2)
 	go func() { errc <- s.clientToServer(cb, upstream) }()
@@ -372,7 +397,8 @@ func (s *state) handleOneResultSet(ctx context.Context, sb *bufio.Reader, bw *bu
 			}
 			return false, true, forwardRest(sb, bw)
 		}
-		cols = append(cols, mask.Column{Name: columnName(cpayload), Text: true})
+		name, schema, orgTable := columnIdentity(cpayload)
+		cols = append(cols, mask.Column{Name: name, Path: name, ObjectID: s.objectID(schema, orgTable), Text: true})
 		if err := writePacket(bw, cseq, cpayload); err != nil {
 			return false, false, err
 		}
@@ -507,14 +533,43 @@ func lenEncStrSpan(p []byte, off int) (int, bool) {
 
 // columnName extracts the column name (5th lenenc string) from a PROTOCOL_41 column-definition packet.
 func columnName(p []byte) string {
+	name, _, _ := columnIdentity(p)
+	return name
+}
+
+// columnIdentity extracts the column name, schema, and org_table (the real, unaliased table name —
+// distinct from the possibly-aliased "table" field) from a PROTOCOL_41 column-definition packet.
+// Field order: catalog(0), schema(1), table(2, aliased), org_table(3, real name), name(4, aliased),
+// org_name(5, real column name), ... Returns empty strings on any parse failure.
+func columnIdentity(p []byte) (name, schema, orgTable string) {
 	off := 0
+	spans := make([]int, 0, 4)
 	for i := 0; i < 4; i++ { // catalog, schema, table, org_table
+		start := off
 		span, ok := lenEncStrSpan(p, off)
 		if !ok {
-			return ""
+			return "", "", ""
 		}
+		spans = append(spans, start)
 		off += span
 	}
+	schema = lenEncStr(p, spans[1])
+	orgTable = lenEncStr(p, spans[3])
+
+	l, n, ok := readLenEncInt(p, off)
+	if !ok {
+		return "", "", ""
+	}
+	off += n
+	if off+int(l) > len(p) {
+		return "", "", ""
+	}
+	name = string(p[off : off+int(l)])
+	return name, schema, orgTable
+}
+
+// lenEncStr decodes the lenenc string starting at off, returning "" on any parse failure.
+func lenEncStr(p []byte, off int) string {
 	l, n, ok := readLenEncInt(p, off)
 	if !ok {
 		return ""

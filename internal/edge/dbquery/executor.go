@@ -19,6 +19,20 @@ type Options struct {
 	MaxRows          int
 	Timeout          time.Duration
 	EnforceReadOnly  bool
+	// OrgID scopes the mask.Column.ObjectID built for each query (see objectID), so a path-scoped
+	// label store never leaks labels across tenants (pathlabel design doc §3.2.1). Empty disables
+	// path-scoped/table-scoped masking for the query (mask.Column.ObjectID is left empty, which
+	// PathOverlay treats as "no label available" and falls back to bare-key matching).
+	OrgID string
+}
+
+// objectID builds the opaque, tenant-scoped identifier mask.Column.ObjectID carries for a query
+// against one table/collection, e.g. "org1:postgres:orders". Returns "" when OrgID is unset.
+func objectID(orgID, dbType, database, tableOrCollection string) string {
+	if orgID == "" {
+		return ""
+	}
+	return orgID + ":" + normalizeDBType(dbType) + ":" + database + ":" + tableOrCollection
 }
 
 func (o Options) withDefaults() Options {

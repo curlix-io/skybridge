@@ -323,6 +323,7 @@ func (c *Client) executeLocally(ctx context.Context, req *studiov1.ExecuteReques
 		ApplyPII:         req.GetApplyPiiRedaction(),
 		MaxRows:          1000,
 		EnforceReadOnly:  true,
+		OrgID:            c.cfg.TenantID,
 	})
 }
 

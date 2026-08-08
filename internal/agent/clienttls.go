@@ -83,8 +83,11 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 
 // engineFactory returns an engine selector that builds the Postgres and MySQL engines with client-TLS
 // termination when clientTLS is non-nil (needed for credential injection, where the client sends a
-// session token). Mongo does not yet terminate client TLS.
-func engineFactory(clientTLS *tls.Config) func(string) (wire.Engine, error) {
+// session token). Mongo does not yet terminate client TLS. orgID scopes mask.Column.ObjectID for
+// path-/table-aware masking labels (see internal/pathlabel); MySQL's column-definition packets carry
+// the real table name so it's wired there today — Postgres/Mongo don't have that identity available
+// on the wire yet (see internal/wire/postgres, internal/wire/mongo package docs) and pass "".
+func engineFactory(clientTLS *tls.Config, orgID string) func(string) (wire.Engine, error) {
 	return func(dbType string) (wire.Engine, error) {
 		switch dbType {
 		case "postgres", "postgresql":
@@ -94,9 +97,9 @@ func engineFactory(clientTLS *tls.Config) func(string) (wire.Engine, error) {
 			return postgres.New(), nil
 		case "mysql":
 			if clientTLS != nil {
-				return mysql.NewWithClientTLS(clientTLS), nil
+				return mysql.NewWithClientTLS(clientTLS).WithOrgID(orgID), nil
 			}
-			return mysql.New(), nil
+			return mysql.New().WithOrgID(orgID), nil
 		case "mongodb", "mongo":
 			return mongo.New(), nil
 		default:

@@ -95,6 +95,7 @@ func main() {
 		FallbackUser:     cfg.StudioDBUser,
 		FallbackPassword: cfg.StudioDBPassword,
 		Masker:           masker,
+		OrgID:            cfg.TenantID,
 	})
 
 	client := transport.New(transport.Config{
