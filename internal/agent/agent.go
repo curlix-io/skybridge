@@ -72,7 +72,7 @@ func proxyConn(ctx context.Context, engine wire.Engine, client, upstream net.Con
 // EngineFor selects a wire engine by database type (no client-TLS termination). The agent uses the
 // TLS-aware engineFactory at runtime; this stays for callers/tests that want the plaintext default.
 func EngineFor(dbType string) (wire.Engine, error) {
-	return engineFactory(nil)(dbType)
+	return engineFactory(nil, "")(dbType)
 }
 
 // BuildMasker assembles the masking chain (remote masker + your column overlay) from config.
@@ -85,6 +85,14 @@ func BuildMasker(cfg config.Agent) mask.Masker {
 // source can hot-swap its rules. The overlay layer is included when a static overlay is configured
 // OR a dynamic source URL is set (so later refreshes take effect even if the seed is empty); the
 // handle is nil when no overlay layer is active.
+//
+// mask.NewPathOverlay (internal/mask/pathoverlay.go) is not wired into this chain yet: it needs a
+// populated label.Store to be anything but a permanent miss, and nothing today populates a shared
+// Store for the agent process (dbquery's one-shot exec path resolves table/collection identity
+// per-query independently — see internal/edge/dbquery/mask.go — but that's a separate call path,
+// not this chain). Wire it in here once a real backing store (e.g. control-plane-fetched, mirroring
+// startOverlaySync's pattern) exists; an always-empty MemStore would just be dead weight that also
+// breaks the "nothing configured -> mask.Noop" contract callers rely on.
 func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay) {
 	var maskers []mask.Masker
 	remote := mask.NewRemote(mask.RemoteConfig{
@@ -151,14 +159,14 @@ func MaskingMode(cfg config.Agent) string {
 		mode = "remote"
 	}
 	if len(cfg.PIIOverlay) > 0 || cfg.PIIOverlayURL != "" {
-		label := "overlay"
+		overlayLabel := "overlay"
 		if cfg.PIIOverlayURL != "" {
-			label = "overlay(dynamic)"
+			overlayLabel = "overlay(dynamic)"
 		}
 		if mode != "" {
-			mode += "+" + label
+			mode += "+" + overlayLabel
 		} else {
-			mode = label
+			mode = overlayLabel
 		}
 	}
 	if mode == "" {
@@ -182,7 +190,7 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 	if err != nil {
 		return err
 	}
-	engine, err := engineFactory(clientTLS)(cfg.DBType)
+	engine, err := engineFactory(clientTLS, cfg.OrgID)(cfg.DBType)
 	if err != nil {
 		return err
 	}
@@ -318,7 +326,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 		if err != nil {
 			return err
 		}
-		deps.Engine = engineFactory(clientTLS)
+		deps.Engine = engineFactory(clientTLS, cfg.OrgID)
 		if clientTLS != nil {
 			logger.Printf("skybridge-agent[tunnel]: client TLS termination ENABLED for Postgres targets.")
 		}

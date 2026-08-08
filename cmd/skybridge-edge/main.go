@@ -96,6 +96,7 @@ func main() {
 		FallbackUser:     cfg.StudioDBUser,
 		FallbackPassword: cfg.StudioDBPassword,
 		Masker:           masker,
+		OrgID:            cfg.TenantID,
 	})
 	// Kubernetes access is opt-in: only registered when a kubeconfig/context is configured
 	// (external-connector mode — see docs/design/kubernetes-access-broker.md §8.2. In-cluster

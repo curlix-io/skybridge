@@ -10,7 +10,8 @@ drivers), and **masks PII at the source** — so raw rows never leave your netwo
 - One edge binary (`skybridge-edge`) also dials home for **live read-only AWS reads**, so everything
   that must run inside your network is a single install.
 
-**Jump to:** [How it works](#how-it-works) · [Quick start](#quick-start) · [Configure](#configure) ·
+**Jump to:** [How it works](#how-it-works) · [Quick start](#quick-start) ·
+[How masking works](#how-masking-works) · [Configure](#configure) ·
 [The `skybridge-edge` binary](#the-skybridge-edge-binary) ·
 [Deploying on AWS](#deploying-on-aws-cloudformation) · [Layout](#layout)
 
@@ -84,6 +85,86 @@ detection. Set `SKYBRIDGE_MASK_ANALYZE_URL`/`SKYBRIDGE_MASK_ANONYMIZE_URL` to em
 content masking (governed passthrough), or point them at a different `analyze`/`anonymize` service.
 Running with plain `go run` (no compose) has no mask URLs by default — set them explicitly to reach
 a Presidio instance you run yourself.
+
+## How masking works
+
+Every result row/document passes through a **chain of maskers**, each implementing the same
+interface (`mask.Masker.MaskRow`, in `internal/mask/mask.go`). A miss at any layer is not fatal —
+the value falls through to the next layer, and an unmasked value is *never* corrupted, only ever
+left as-is. The chain runs in this order:
+
+```mermaid
+flowchart TD
+    row["Result row / document<br/>(from Postgres, MySQL, or Mongo)"]
+
+    row --> remote
+
+    subgraph remote["1. Remote — content-shape detection (Presidio-compatible)"]
+        direction TB
+        r1["POST /analyze<br/>(text, language) → detected PII spans"]
+        r2["POST /anonymize<br/>(text, spans) → redacted text"]
+        r1 --> r2
+    end
+
+    remote --> overlay
+
+    subgraph overlay["2. Overlay — flat column-name map"]
+        direction TB
+        o1["column name (case-insensitive) → replacement token<br/>e.g. email → [redacted]"]
+    end
+
+    overlay --> out["Masked row/document<br/>→ forwarded to the client"]
+```
+
+**Layer 1 — `Remote` (content-shape detection, structured *and* unstructured alike).** This is the
+only layer that inspects the *value itself* rather than the field's name/path, which is what makes
+it work uniformly on structured columns (a `VARCHAR` that happens to contain an email) and on
+unstructured/free-text fields (a notes blob, a JSON string column) alike — it has no notion of
+schema, only "is this string PII-shaped." It's a thin HTTP client for any service that implements
+[Presidio](https://github.com/data-privacy-stack/presidio)'s two-call shape:
+
+1. `POST {analyzeURL}` with `{text, language}` → a list of detected entity spans (`entity_type`,
+   `start`, `end`, `score`).
+2. `POST {anonymizeURL}` with `{text, analyzer_results, anonymizers}` → the redacted text (this repo
+   always requests the `replace` anonymizer with `new_value: "[redacted]"`).
+
+Configured via `SKYBRIDGE_MASK_ANALYZE_URL` / `SKYBRIDGE_MASK_ANONYMIZE_URL` (both required
+together — see [Configure](#configure)); values shorter than `MinLen` (default 4 bytes) skip the
+call entirely, since numbers/short codes are rarely worth a round trip. Best-effort throughout: a
+transport error, non-200, or zero detected spans all fall through with the value untouched — see
+`internal/mask/remote.go`.
+
+**Layer 2 — `Overlay` (flat column-name map).** A case-insensitive `column name → replacement
+token` map (`SKYBRIDGE_PII_OVERLAY`, or fetched dynamically from the control plane via
+`SKYBRIDGE_PII_OVERLAY_URL` — see
+[Dynamic PII overlay](#dynamic-pii-overlay-from-administration--pii)). No path awareness: `total`
+under `order` and `total` under `user` share one rule.
+
+### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`) — groundwork, not yet in the live chain
+
+`internal/pathlabel` (vendored from `github.com/curlix-io/pathlabel`) and `mask.PathOverlay`
+(`internal/mask/pathoverlay.go`) exist in this repo but are **not yet wired into the two layers
+above** — `buildMaskerWithOverlay` in `internal/agent/agent.go` doesn't include a `PathOverlay` in
+its chain, since doing so needs a real, populated `label.Store` to be anything but a permanent miss
+(an empty store is dead weight, and it would also break the "nothing configured → transparent
+passthrough" guarantee other code relies on).
+
+What *is* live today: `mask.Column` carries `ObjectID`/`Path` fields, and `internal/edge/dbquery`'s
+one-shot exec path (`internal/edge/dbquery/mask.go`) populates them for every query — it resolves
+per-query table/collection identity (`"{org}:{driver}:{database}:{table}"`) and walks Mongo
+documents *nested* rather than flattened first (`internal/pathlabel/docpath`), so a `profile.contact.email`
+leaf is addressable independently of a top-level `email` column. The MySQL wire-proxy engine also
+parses real per-column table identity off the wire (schema + `org_table` from the column-definition
+packet). This is groundwork for a future `PathOverlay` layer that can distinguish `order.total` from
+`user.total` — something a bare key-name rule can never express — but until a backing store exists,
+`Column.ObjectID`/`Path` are populated and otherwise unused by the two layers above.
+
+**Structured vs. unstructured, in one sentence:** layer 1 (`Remote`) is what actually gives you
+unstructured-text coverage (it doesn't care what the field is called or where it sits in a
+document); layer 2 (`Overlay`) is a structured-schema shortcut — a cheap, exact-match lookup by
+column name — that skips the network round trip for fields a human has already labelled. Both
+layers run on **every** row/document by default; there's no separate "structured mode" vs.
+"unstructured mode" to configure.
 
 ## Configure
 
@@ -235,7 +316,9 @@ cmd/skybridge-agent     egress agent: listener OR tunnel mode
 cmd/skybridge-gateway   relay gateway: agent endpoint + client listeners
 cmd/skybridge-edge      unified edge: call-home transport + AWS reads + optional wire proxy
 internal/wire           wire engines: postgres, mysql, mongo
-internal/mask           masking pipeline: remote masker + column overlay
+internal/mask           masking pipeline: remote (Presidio) masker + path overlay + column overlay
+internal/pathlabel      vendored from github.com/curlix-io/pathlabel: docpath (nested-document
+                         path walking) + label (path-scoped Store/Label types)
 internal/tunnel         egress multiplexed transport
 internal/gateway        agent registry + relay + optional session recording
 internal/edge           edge tool dispatch: envelope, read-only AWS policy, executor

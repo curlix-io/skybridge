@@ -81,6 +81,29 @@ func TestColumnName(t *testing.T) {
 	}
 }
 
+func TestColumnIdentity(t *testing.T) {
+	name, schema, orgTable := columnIdentity(colDef("email"))
+	if name != "email" || schema != "test" || orgTable != "t" {
+		t.Fatalf("columnIdentity = (%q,%q,%q) want (email,test,t)", name, schema, orgTable)
+	}
+}
+
+func TestState_ObjectID(t *testing.T) {
+	s := &state{orgID: "org1"}
+	if got := s.objectID("test", "t"); got != "org1:mysql:test:t" {
+		t.Fatalf("objectID = %q", got)
+	}
+	if got := s.objectID("test", "t"); got == "" {
+		t.Fatal("expected non-empty ObjectID when orgID and orgTable are set")
+	}
+	if (&state{}).objectID("test", "t") != "" {
+		t.Fatal("expected empty ObjectID when orgID is unset")
+	}
+	if s.objectID("test", "") != "" {
+		t.Fatal("expected empty ObjectID when orgTable is unset (e.g. a derived/computed column)")
+	}
+}
+
 func TestMaskTextRow(t *testing.T) {
 	cols := []mask.Column{{Name: "id", Text: true}, {Name: "email", Text: true}}
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})

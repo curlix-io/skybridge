@@ -139,7 +139,7 @@ func executeMongo(ctx context.Context, target Target, database, stmt string, opt
 		if err := cursor.Decode(&doc); err != nil {
 			return nil, err
 		}
-		docs = append(docs, flattenBSON(doc))
+		docs = append(docs, normalizeBSONDoc(doc))
 		if len(docs) >= limit {
 			break
 		}
@@ -147,9 +147,13 @@ func executeMongo(ctx context.Context, target Target, database, stmt string, opt
 	if err := cursor.Err(); err != nil {
 		return nil, err
 	}
-	masked, err := maskDocuments(ctx, masker, docs)
+	objID := objectID(opts.OrgID, "mongo", dbName, parsed.collection)
+	masked, err := maskDocuments(ctx, masker, objID, docs)
 	if err != nil {
 		return nil, err
+	}
+	for i, doc := range masked {
+		masked[i] = flattenBSON(doc)
 	}
 	return map[string]any{
 		"status": "success",
@@ -157,6 +161,46 @@ func executeMongo(ctx context.Context, target Target, database, stmt string, opt
 			"data": masked,
 		},
 	}, nil
+}
+
+// normalizeBSONDoc converts the driver's decoded types (bson.M/primitive.M, bson.A/primitive.A —
+// named types over map[string]any/[]any) into plain map[string]any/[]any recursively, so
+// docpath.Walk's type switch (which matches only the plain, unnamed types) sees every nested level.
+// String/number/bool/nil leaves pass through unchanged; anything else (e.g. primitive.ObjectID,
+// primitive.DateTime) is left as-is since docpath.Walk only visits string leaves anyway.
+func normalizeBSONDoc(doc map[string]any) map[string]any {
+	return normalizeBSONValue(doc).(map[string]any)
+}
+
+func normalizeBSONValue(v any) any {
+	switch x := v.(type) {
+	case bson.M:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			out[k] = normalizeBSONValue(vv)
+		}
+		return out
+	case map[string]any:
+		out := make(map[string]any, len(x))
+		for k, vv := range x {
+			out[k] = normalizeBSONValue(vv)
+		}
+		return out
+	case bson.A:
+		out := make([]any, len(x))
+		for i, vv := range x {
+			out[i] = normalizeBSONValue(vv)
+		}
+		return out
+	case []any:
+		out := make([]any, len(x))
+		for i, vv := range x {
+			out[i] = normalizeBSONValue(vv)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 func flattenBSON(doc map[string]any) map[string]any {
@@ -173,10 +217,10 @@ func stringifyBSON(v any) any {
 		return nil
 	case string, bool, float64, int32, int64, json.Number:
 		return x
-	case bson.M:
+	case bson.M, map[string]any:
 		b, _ := bson.MarshalExtJSON(x, false, false)
 		return string(b)
-	case bson.A:
+	case bson.A, []any:
 		b, _ := bson.MarshalExtJSON(x, false, false)
 		return string(b)
 	default:

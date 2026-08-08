@@ -61,7 +61,8 @@ func executeMySQL(ctx context.Context, target Target, database, q string, opts O
 		return nil, err
 	}
 	data = capRows(data, opts.MaxRows)
-	masked, err := maskRows(ctx, masker, cols, data)
+	objID := objectID(opts.OrgID, "mysql", dbName, dbName)
+	masked, err := maskRows(ctx, masker, objID, cols, data)
 	if err != nil {
 		return nil, err
 	}
