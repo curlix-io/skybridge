@@ -33,7 +33,7 @@ func TestHTTPCredentialResolverExchange(t *testing.T) {
 			return
 		}
 		_ = json.NewEncoder(w).Encode(exchangeResponse{
-			Username: "curlix_s_abc",
+			Username: "skybridge_s_abc",
 			Password: "mint3d",
 			Database: body.RequestedDatabase,
 		})
@@ -53,7 +53,7 @@ func TestHTTPCredentialResolverExchange(t *testing.T) {
 	if err != nil {
 		t.Fatalf("exchange: %v", err)
 	}
-	if cred.Username != "curlix_s_abc" || cred.Password != "mint3d" || cred.Database != "appdb" {
+	if cred.Username != "skybridge_s_abc" || cred.Password != "mint3d" || cred.Database != "appdb" {
 		t.Fatalf("unexpected credential: %+v", cred)
 	}
 }

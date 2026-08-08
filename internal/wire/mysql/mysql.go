@@ -62,7 +62,7 @@ const (
 // Engine is the MySQL wire-proxy engine.
 type Engine struct {
 	// clientTLS, when non-nil, lets the engine terminate the native client's TLS in the credential-
-	// injection path (ProxyInject) — the client presents a curlix session token instead of a DB
+	// injection path (ProxyInject) — the client presents an opaque session token instead of a DB
 	// password, so the link must be encrypted. nil = no client-TLS termination.
 	clientTLS *tls.Config
 	// upstreamTLS, when non-nil, makes the engine negotiate TLS to the upstream database during the

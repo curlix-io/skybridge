@@ -1,7 +1,7 @@
 // Package edge is the customer-side execution surface of the unified Skybridge edge binary. It
-// receives single read-only tool calls dispatched from the SaaS control plane and runs them locally,
-// so customer data (live AWS reads) is gathered inside the customer network and only results travel
-// back. It is the Go counterpart of the Python connector's local tool execution path.
+// receives single read-only tool calls dispatched from a control plane and runs them locally, so
+// customer data (live AWS reads) is gathered inside the customer network and only results travel
+// back.
 package edge
 
 import (
@@ -9,12 +9,12 @@ import (
 	"strings"
 )
 
-// Tool-call envelope. The SaaS side encodes a single tool call into the run "goal" string with a
-// namespaced sentinel; the edge recognizes it and runs just that one tool (no LLM loop). This MUST
-// stay byte-compatible with the control plane's tool-call envelope encoder/decoder — both ends agree
-// on this exact shape.
+// Tool-call envelope. The control-plane side encodes a single tool call into the run "goal" string
+// with a namespaced sentinel; the edge recognizes it and runs just that one tool (no LLM loop). This
+// MUST stay byte-compatible with the control plane's tool-call envelope encoder/decoder — both ends
+// agree on this exact shape.
 const (
-	envelopeKey     = "__curlix_mcp_tool__"
+	envelopeKey     = "__skybridge_mcp_tool__"
 	envelopeVersion = 1
 )
 

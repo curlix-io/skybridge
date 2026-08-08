@@ -15,7 +15,7 @@ import (
 // plane remains the single writer of the shared session store. Pure net/http so the module stays
 // offline-buildable. The base path is configurable so the gateway is not tied to any one backend.
 //
-// Contract (basePath defaults to /api/v1/data-studio/studio/native-sessions):
+// Contract (basePath defaults to DefaultSessionPath, /api/v1/sessions):
 //
 //	POST {baseURL}{basePath}
 //	     body  SessionRecord (json) -> 201 {"id": "<session id>"}
@@ -31,7 +31,7 @@ type HTTPStore struct {
 }
 
 // DefaultSessionPath is used when NewHTTPStore is given an empty basePath.
-const DefaultSessionPath = "/api/v1/data-studio/studio/native-sessions"
+const DefaultSessionPath = "/api/v1/sessions"
 
 // NewHTTPStore builds a reporter. baseURL is the control-plane origin; basePath is the session
 // lifecycle route (empty uses DefaultSessionPath).

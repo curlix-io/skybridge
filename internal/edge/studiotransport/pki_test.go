@@ -1,3 +1,5 @@
+//go:build querystudio
+
 package studiotransport
 
 import (
@@ -25,7 +27,7 @@ func TestGenerateKeyAndCSRCarriesSpiffeSAN(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(csr.URIs) != 1 || csr.URIs[0].String() != "spiffe://curlix.studio-agent/tenant/org-1/agent/agent-a" {
+	if len(csr.URIs) != 1 || csr.URIs[0].String() != "spiffe://skybridge.studio-agent/tenant/org-1/agent/agent-a" {
 		t.Fatalf("unexpected CSR URIs: %v", csr.URIs)
 	}
 	if csr.Subject.CommonName != "agent-a" {

@@ -19,6 +19,10 @@ const (
 	overlayMinPoll      = 15 * time.Second
 )
 
+// DefaultOrgHeader is the request header carrying the agent's organization id when fetching the
+// dynamic PII overlay, used unless SKYBRIDGE_PII_OVERLAY_ORG_HEADER overrides it.
+const DefaultOrgHeader = "X-Organization-Id"
+
 // overlayResponse is the control-plane projection of the org PII schema. It mirrors the FastAPI
 // SkybridgePiiOverlayOut model (GET /api/v1/data-studio/studio/native-access/pii-overlay).
 type overlayResponse struct {
@@ -30,18 +34,24 @@ type overlayResponse struct {
 
 // overlaySource fetches the projected column->token overlay from the control plane.
 type overlaySource struct {
-	url    string
-	token  string
-	orgID  string
-	client *http.Client
+	url       string
+	token     string
+	orgID     string
+	orgHeader string
+	client    *http.Client
 }
 
 func newOverlaySource(cfg config.Agent) *overlaySource {
+	orgHeader := strings.TrimSpace(cfg.PIIOverlayOrgHeader)
+	if orgHeader == "" {
+		orgHeader = DefaultOrgHeader
+	}
 	return &overlaySource{
-		url:    strings.TrimSpace(cfg.PIIOverlayURL),
-		token:  strings.TrimSpace(cfg.PIIOverlayToken),
-		orgID:  strings.TrimSpace(cfg.OrgID),
-		client: &http.Client{Timeout: overlayFetchTimeout},
+		url:       strings.TrimSpace(cfg.PIIOverlayURL),
+		token:     strings.TrimSpace(cfg.PIIOverlayToken),
+		orgID:     strings.TrimSpace(cfg.OrgID),
+		orgHeader: orgHeader,
+		client:    &http.Client{Timeout: overlayFetchTimeout},
 	}
 }
 
@@ -56,7 +66,7 @@ func (s *overlaySource) fetch(ctx context.Context) (map[string]string, error) {
 		req.Header.Set("Authorization", "Bearer "+s.token)
 	}
 	if s.orgID != "" {
-		req.Header.Set("X-Curlix-Organization-Id", s.orgID)
+		req.Header.Set(s.orgHeader, s.orgID)
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {

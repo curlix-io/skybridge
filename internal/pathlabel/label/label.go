@@ -1,8 +1,7 @@
 // Package label defines the shape of a path-scoped label and a storage-agnostic
-// Store interface (see github.com/curlix-io/pathlabel design doc §3.2). Vendored
-// from github.com/curlix-io/pathlabel for use by internal/mask's path-scoped
-// overlay. Ships only an in-memory reference Store (MemStore); a durable
-// backing store is the consumer's responsibility.
+// Store interface, for use by internal/mask's path-scoped overlay. Ships only an
+// in-memory reference Store (MemStore); a durable backing store is the consumer's
+// responsibility.
 package label
 
 import (
@@ -20,13 +19,13 @@ const (
 	// admin/review surface. They land with full authority immediately.
 	SourceManual Source = "manual"
 	// SourceProposed labels are detector-suggested and unconfirmed — inert
-	// until a steward promotes them to SourceManual (§3.2, §4).
+	// until a steward promotes them to SourceManual.
 	SourceProposed Source = "proposed"
 	// SourcePlatform labels are a curated default shipped by the consuming
 	// application itself, carrying the same authority as SourceManual.
 	SourcePlatform Source = "platform"
 	// SourceDismissed marks a proposal a steward has explicitly rejected
-	// (§4.1(2)) — retained as a negative record so the same proposal isn't
+	// — retained as a negative record so the same proposal isn't
 	// resurfaced verbatim on the next scan.
 	SourceDismissed Source = "dismissed"
 )
@@ -35,7 +34,7 @@ const (
 type MatchMode string
 
 const (
-	// MatchPath is an exact resolved-path match (§3.1) — the default and
+	// MatchPath is an exact resolved-path match — the default and
 	// recommended mode for new labels.
 	MatchPath MatchMode = "path"
 	// MatchKeyAnyDepth matches by bare key name at any depth, independent of
@@ -49,8 +48,8 @@ const (
 type Label struct {
 	// ObjectID is an opaque identifier for the collection/table this label
 	// applies to. It MUST already encode tenant scoping if a Store instance
-	// is shared across tenants — pathlabel does not add or enforce a tenant
-	// dimension of its own (§3.2.1).
+	// is shared across tenants — this package does not add or enforce a tenant
+	// dimension of its own.
 	ObjectID string
 	// FieldPath is the resolved path this label applies to, e.g.
 	// "profile.contact.email", or a bare key name under MatchKeyAnyDepth.
@@ -69,7 +68,7 @@ type Label struct {
 	// SampleCount is how many observed documents support this label.
 	SampleCount int
 	// LastObservedAt is bumped by the proposal engine whenever a document
-	// containing FieldPath is walked (§4.1(1)) — distinct from UpdatedAt,
+	// containing FieldPath is walked — distinct from UpdatedAt,
 	// which tracks label edits, not data observation. Zero value means
 	// never observed by a scan (e.g. a purely manual label).
 	LastObservedAt time.Time
@@ -83,7 +82,7 @@ func (l Label) key() labelKey {
 
 // labelKey is (ObjectID, FieldPath) only, not MatchMode — a given path
 // string denotes one label regardless of mode; MatchMode records how that
-// label's FieldPath should be interpreted by a caller (§3.2), it doesn't
+// label's FieldPath should be interpreted by a caller, it doesn't
 // create a second, independent slot for the same path.
 type labelKey struct {
 	ObjectID  string
@@ -98,16 +97,16 @@ type labelKey struct {
 type Store interface {
 	// Lookup returns the label stored under the exact (objectID, fieldPath)
 	// key, if one exists — a Label's own MatchMode field records how it was
-	// intended to be matched (§3.2), but Lookup itself does no mode-specific
-	// interpretation. A caller implementing §3.3's ordered fallback (path
-	// match, then bare-key match, then a value-shape safety net) issues one
+	// intended to be matched, but Lookup itself does no mode-specific
+	// interpretation. A caller implementing an ordered fallback (path match,
+	// then bare-key match, then a value-shape safety net) issues one
 	// Lookup call per mode it wants to try, varying fieldPath accordingly:
 	// first the leaf's full resolved path, then (on a miss) its bare key.
 	Lookup(ctx context.Context, objectID, fieldPath string) (Label, bool, error)
 	// Put upserts l. For l.Source == SourceProposed, Put MUST merge with any
 	// existing proposed row at the same key rather than overwrite it:
 	// SampleCount accumulates, Confidence takes the higher of the two,
-	// LastObservedAt/UpdatedAt take the later timestamp (§4.1(3)). For any
+	// LastObservedAt/UpdatedAt take the later timestamp. For any
 	// other Source, Put is last-write-wins, since those represent an
 	// explicit human/curated decision, not an accumulating signal.
 	Put(ctx context.Context, l Label) error
@@ -116,7 +115,7 @@ type Store interface {
 }
 
 // MemStore is an in-memory, non-durable reference Store implementation
-// intended for tests and small/standalone use, per §3.2. It is safe for
+// intended for tests and small/standalone use. It is safe for
 // concurrent use.
 type MemStore struct {
 	mu     sync.RWMutex

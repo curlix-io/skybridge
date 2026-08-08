@@ -20,7 +20,7 @@ func TestOverlaySourceFetchParses(t *testing.T) {
 		if got := r.Header.Get("Authorization"); got != "Bearer tok-1" {
 			t.Errorf("missing/!bearer auth header: %q", got)
 		}
-		if got := r.Header.Get("X-Curlix-Organization-Id"); got != "org-9" {
+		if got := r.Header.Get(DefaultOrgHeader); got != "org-9" {
 			t.Errorf("missing org header: %q", got)
 		}
 		_ = json.NewEncoder(w).Encode(overlayResponse{
@@ -38,6 +38,24 @@ func TestOverlaySourceFetchParses(t *testing.T) {
 	}
 	if rules["email"] != "[email]" || rules["ssn"] != "[ssn]" {
 		t.Fatalf("unexpected rules: %v", rules)
+	}
+}
+
+func TestOverlaySourceFetchUsesCustomOrgHeader(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("X-Tenant-Id"); got != "org-9" {
+			t.Errorf("missing custom org header: %q", got)
+		}
+		if got := r.Header.Get(DefaultOrgHeader); got != "" {
+			t.Errorf("expected default header unset when overridden, got %q", got)
+		}
+		_ = json.NewEncoder(w).Encode(overlayResponse{Columns: map[string]string{}})
+	}))
+	defer srv.Close()
+
+	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL, OrgID: "org-9", PIIOverlayOrgHeader: "X-Tenant-Id"})
+	if _, err := src.fetch(context.Background()); err != nil {
+		t.Fatal(err)
 	}
 }
 

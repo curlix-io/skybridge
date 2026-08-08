@@ -217,7 +217,7 @@ func TestReadStartupParamsAndClientPassword(t *testing.T) {
 		srv := bufio.NewReader(server)
 		typ, payload, _ := readBackendMessage(srv)
 		if typ == msgAuthentication && binary.BigEndian.Uint32(payload[0:4]) == authCleartextPassword {
-			_ = writePasswordMessage(server, "curlix-session-token-xyz")
+			_ = writePasswordMessage(server, "skybridge-session-token-xyz")
 		}
 		// Expect AuthenticationOk after upstream success.
 		_, _, _ = readBackendMessage(srv)
@@ -235,7 +235,7 @@ func TestReadStartupParamsAndClientPassword(t *testing.T) {
 	if err != nil {
 		t.Fatalf("requestClientPassword: %v", err)
 	}
-	if token != "curlix-session-token-xyz" {
+	if token != "skybridge-session-token-xyz" {
 		t.Fatalf("token = %q", token)
 	}
 	if err := sendClientAuthOK(client); err != nil {

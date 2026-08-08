@@ -1,5 +1,3 @@
-# CI for the standalone Skybridge module. Paths assume this directory is the repository root
-# (i.e. after extraction). In the monorepo, run `make vet test race` from skybridge/ instead.
 name: ci
 
 on:
@@ -36,3 +34,25 @@ jobs:
 
       - name: test (race + coverage)
         run: go test -race -coverprofile=coverage.txt ./...
+
+  # internal/edge/{dbexec,dbquery,studiotransport} are excluded from the default build (see the
+  # `querystudio` build tag, Makefile) — they'd be silently unbuilt/unvetted/untested by the job
+  # above once tagged out, so this leg exercises them explicitly.
+  build-test-querystudio:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.26"
+          check-latest: true
+
+      - name: vet (querystudio)
+        run: go vet -tags querystudio ./...
+
+      - name: build (querystudio)
+        run: make edge-querystudio
+
+      - name: test (querystudio, race + coverage)
+        run: go test -race -tags querystudio -coverprofile=coverage-querystudio.txt ./...

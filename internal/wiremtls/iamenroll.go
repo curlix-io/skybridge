@@ -12,9 +12,9 @@ import (
 // IamEnrollConfig configures the AWS-IAM-authenticated enroll-token bootstrap: the agent presigns
 // its own sts:GetCallerIdentity call (using whatever ambient credentials it has — an ECS task
 // role, in production) and the control plane replays it to STS to authenticate the caller, no
-// human-minted token needed. See backend/src/curlix/edge_agents/iam_auth.py.
+// human-minted token needed.
 type IamEnrollConfig struct {
-	BaseURL  string // control-plane origin, e.g. https://api.curlix.io
+	BaseURL  string // control-plane origin, e.g. https://api.example.com
 	Path     string // defaults to DefaultIamEnrollTokenPath
 	TenantID string
 	AgentID  string

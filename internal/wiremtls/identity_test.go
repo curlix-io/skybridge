@@ -22,9 +22,9 @@ func TestParseSpiffeIDRejectsWrongShape(t *testing.T) {
 	cases := []string{
 		"",
 		"not-a-uri",
-		"spiffe://curlix.connector/tenant/org-1/connector/c1", // different fleet's shape
-		"spiffe://curlix.wire-agent/tenant//agent/a1",         // empty tenant
-		"spiffe://curlix.wire-agent/tenant/org-1/agent/",      // empty agent
+		"spiffe://skybridge.connector/tenant/org-1/connector/c1", // different fleet's shape
+		"spiffe://skybridge.wire-agent/tenant//agent/a1",         // empty tenant
+		"spiffe://skybridge.wire-agent/tenant/org-1/agent/",      // empty agent
 	}
 	for _, c := range cases {
 		if _, _, ok := ParseSpiffeID(c); ok {

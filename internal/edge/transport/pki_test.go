@@ -63,7 +63,7 @@ func (ca *testCA) sign(t *testing.T, csrPEM []byte, tenant, connector string, no
 	if err := csr.CheckSignature(); err != nil {
 		t.Fatalf("csr signature invalid: %v", err)
 	}
-	uri, _ := url.Parse(spiffeID("curlix.connector", tenant, connector)) // gateway's own trust domain
+	uri, _ := url.Parse(spiffeID("skybridge.connector", tenant, connector)) // gateway's own trust domain
 	tmpl := &x509.Certificate{
 		SerialNumber: big.NewInt(2),
 		Subject:      pkix.Name{CommonName: connector},

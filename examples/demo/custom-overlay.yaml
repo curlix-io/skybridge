@@ -1,0 +1,8 @@
+# A user-authored SKYBRIDGE_PII_OVERLAY_FILE for the redaction demo — extends
+# examples/pii-overlay.yaml with an extra "name" rule, to show overlay content is fully
+# user-supplied: point SKYBRIDGE_PII_OVERLAY_FILE at any file you author, no code changes needed.
+email: "[redacted]"
+ssn: "[redacted]"
+phone: "[redacted]"
+credit_card: "[redacted]"
+name: "[redacted]"

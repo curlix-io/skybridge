@@ -11,10 +11,7 @@ import (
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/edge"
 	"github.com/curlix-io/skybridge/internal/edge/awsexec"
-	"github.com/curlix-io/skybridge/internal/edge/dbexec"
-	"github.com/curlix-io/skybridge/internal/edge/dbquery"
 	"github.com/curlix-io/skybridge/internal/edge/k8sexec"
-	"github.com/curlix-io/skybridge/internal/edge/studiotransport"
 	"github.com/curlix-io/skybridge/internal/edge/transport"
 )
 
@@ -25,7 +22,6 @@ func main() {
 	defer stop()
 	logger := log.Default()
 	masker := agent.BuildMasker(cfg.WireProxy)
-	execTargets := dbquery.MergeWireTargets(dbquery.ParseTargets(cfg.StudioTargetsJSON), cfg.WireProxy.Targets)
 
 	if cfg.WireProxyEnabled() {
 		wp := cfg.WireProxy
@@ -43,38 +39,8 @@ func main() {
 		}()
 	}
 
-	if cfg.StudioEnabled() {
-		studioCfg := studiotransport.Config{
-			Target:            cfg.StudioGateway,
-			TenantID:          cfg.TenantID,
-			AgentID:           cfg.StudioAgentID,
-			Token:             cfg.Token,
-			Insecure:          cfg.Insecure,
-			Reconnect:         true,
-			MaxSessions:       cfg.StudioMaxSessions,
-			Targets:           studiotransport.ParseTargets(cfg.StudioTargetsJSON),
-			DBUser:            cfg.StudioDBUser,
-			DBPassword:        cfg.StudioDBPassword,
-			Masker:            masker,
-			CABundlePEM:       cfg.CABundle,
-			TLSDir:            cfg.StudioTLSDir,
-			IdentitySecretARN: cfg.StudioIdentitySecretARN,
-			EnrollTarget:      cfg.StudioEnrollGateway,
-			EnrollToken:       cfg.StudioEnrollmentToken,
-			TrustDomain:       cfg.StudioTrustDomain,
-		}
-		if studioCfg.TLSDir == "" {
-			studioCfg.TLSDir = cfg.TLSDir
-		}
-		if studioCfg.EnrollToken == "" {
-			studioCfg.EnrollToken = cfg.EnrollToken
-		}
-		go func() {
-			if err := studiotransport.New(studioCfg, logger).Run(ctx); err != nil && ctx.Err() == nil {
-				logger.Printf("skybridge-edge: studio gateway ended: %v", err)
-			}
-		}()
-	}
+	reg := edge.NewRegistry()
+	registerQueryStudioExtras(ctx, cfg, reg, masker, logger)
 
 	if cfg.GatewayAddr == "" {
 		if cfg.WireProxyEnabled() || cfg.StudioEnabled() {
@@ -84,19 +50,11 @@ func main() {
 		logger.Fatal("set SKYBRIDGE_EDGE_GATEWAY (or SKYBRIDGE_GATEWAY) to the Connector Gateway address")
 	}
 
-	reg := edge.NewRegistry()
 	awsexec.Register(reg, awsexec.Options{
 		Region:        cfg.AWSRegion,
 		AssumeRoleARN: cfg.AWSAssumeRoleARN,
 		ExternalID:    cfg.AWSExternalID,
 		AWSBinary:     cfg.AWSBinary,
-	})
-	dbexec.Register(reg, dbexec.Options{
-		Targets:          execTargets,
-		FallbackUser:     cfg.StudioDBUser,
-		FallbackPassword: cfg.StudioDBPassword,
-		Masker:           masker,
-		OrgID:            cfg.TenantID,
 	})
 	// Kubernetes access is opt-in: only registered when a kubeconfig/context is configured
 	// (external-connector mode — see docs/design/kubernetes-access-broker.md §8.2. In-cluster

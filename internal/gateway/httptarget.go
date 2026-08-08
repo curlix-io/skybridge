@@ -34,7 +34,7 @@ func (NoopTargetResolver) Resolve(context.Context, string, string) (tunnel.Targe
 }
 
 // DefaultWireTargetPath is used when NewHTTPTargetResolver is given an empty basePath.
-const DefaultWireTargetPath = "/api/v1/data-studio/studio/native-access/wire-targets"
+const DefaultWireTargetPath = "/api/v1/wire-targets"
 
 // HTTPTargetResolver calls the control plane wire-targets route to resolve one target, per
 // connection (no local cache).
