@@ -403,8 +403,11 @@ func (s *state) handleOneResultSet(ctx context.Context, sb *bufio.Reader, bw *bu
 			}
 			return false, true, forwardRest(sb, bw)
 		}
-		name, schema, orgTable := columnIdentity(cpayload)
-		cols = append(cols, mask.Column{Name: name, Path: name, ObjectID: s.objectID(schema, orgTable), Text: true})
+		name, schema, orgTable, freeText := columnIdentity(cpayload)
+		cols = append(
+			cols,
+			mask.Column{Name: name, Path: name, ObjectID: s.objectID(schema, orgTable), Text: true, FreeText: freeText},
+		)
 		if err := writePacket(bw, cseq, cpayload); err != nil {
 			return false, false, err
 		}
@@ -544,22 +547,51 @@ func lenEncStrSpan(p []byte, off int) (int, bool) {
 
 // columnName extracts the column name (5th lenenc string) from a PROTOCOL_41 column-definition packet.
 func columnName(p []byte) string {
-	name, _, _ := columnIdentity(p)
+	name, _, _, _ := columnIdentity(p)
 	return name
 }
 
-// columnIdentity extracts the column name, schema, and org_table (the real, unaliased table name —
-// distinct from the possibly-aliased "table" field) from a PROTOCOL_41 column-definition packet.
-// Field order: catalog(0), schema(1), table(2, aliased), org_table(3, real name), name(4, aliased),
-// org_name(5, real column name), ... Returns empty strings on any parse failure.
-func columnIdentity(p []byte) (name, schema, orgTable string) {
+// nonFreeTextColumnTypes are MySQL COLUMN_DEFINITION41 wire "type" byte values (see
+// https://dev.mysql.com/doc/dev/mysql-server/latest/page_protocol_basic_dt_integers.html /
+// MYSQL_TYPE_* in mysql_com.h) whose text-format wire representation is a fixed, driver-decoded
+// format — never free-form prose a PII detector should scan. Same rationale and consequence as
+// nonFreeTextTypeOIDs in the Postgres engine: a detector confidently misclassifying an ordinary
+// DATETIME/DECIMAL value as PII and redacting it produces a value the client's type decoder can no
+// longer parse, corrupting the response rather than just over-redacting free text.
+var nonFreeTextColumnTypes = map[byte]bool{
+	0x01: true, // TINY
+	0x02: true, // SHORT
+	0x03: true, // LONG
+	0x04: true, // FLOAT
+	0x05: true, // DOUBLE
+	0x07: true, // TIMESTAMP
+	0x08: true, // LONGLONG
+	0x09: true, // INT24
+	0x0a: true, // DATE
+	0x0b: true, // TIME
+	0x0c: true, // DATETIME
+	0x0d: true, // YEAR
+	0x10: true, // BIT
+	0xf6: true, // NEWDECIMAL
+}
+
+// columnIdentity extracts the column name, schema, org_table (the real, unaliased table name —
+// distinct from the possibly-aliased "table" field), and free-text eligibility from a
+// PROTOCOL_41 column-definition packet. Field order: catalog(0), schema(1), table(2, aliased),
+// org_table(3, real name), name(4, aliased), org_name(5, real column name), then a fixed-size tail
+// (length_of_fixed_fields lenenc, charset(2), column_length(4), type(1), flags(2), decimals(1),
+// filler(2)) that carries the column's true wire type. Returns freeText=true (fail toward
+// scanning) when the type byte can't be located, matching the pre-existing behavior for columns
+// this parser can't fully decode.
+func columnIdentity(p []byte) (name, schema, orgTable string, freeText bool) {
+	freeText = true
 	off := 0
 	spans := make([]int, 0, 4)
 	for i := 0; i < 4; i++ { // catalog, schema, table, org_table
 		start := off
 		span, ok := lenEncStrSpan(p, off)
 		if !ok {
-			return "", "", ""
+			return "", "", "", freeText
 		}
 		spans = append(spans, start)
 		off += span
@@ -569,14 +601,33 @@ func columnIdentity(p []byte) (name, schema, orgTable string) {
 
 	l, n, ok := readLenEncInt(p, off)
 	if !ok {
-		return "", "", ""
+		return "", "", "", freeText
 	}
 	off += n
 	if off+int(l) > len(p) {
-		return "", "", ""
+		return "", "", "", freeText
 	}
 	name = string(p[off : off+int(l)])
-	return name, schema, orgTable
+	off += int(l)
+
+	// org_name (6th lenenc string) — skip, not needed here.
+	orgNameSpan, ok := lenEncStrSpan(p, off)
+	if !ok {
+		return name, schema, orgTable, freeText
+	}
+	off += orgNameSpan
+
+	// length_of_fixed_fields (lenenc, always 0x0c per protocol) then charset(2) column_length(4).
+	_, n, ok = readLenEncInt(p, off)
+	if !ok {
+		return name, schema, orgTable, freeText
+	}
+	off += n + 2 + 4
+	if off >= len(p) {
+		return name, schema, orgTable, freeText
+	}
+	freeText = !nonFreeTextColumnTypes[p[off]]
+	return name, schema, orgTable, freeText
 }
 
 // lenEncStr decodes the lenenc string starting at off, returning "" on any parse failure.
@@ -664,7 +715,7 @@ func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker
 		if i < len(cols) {
 			mc[i] = cols[i]
 		} else {
-			mc[i] = mask.Column{Text: true}
+			mc[i] = mask.Column{Text: true, FreeText: true}
 		}
 	}
 	masked, err := masker.MaskRow(ctx, mc, vals)

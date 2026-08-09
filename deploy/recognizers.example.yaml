@@ -1,0 +1,15 @@
+# Example custom Presidio recognizers, in Presidio's own recognizer_registry.recognizers shape
+# (https://microsoft.github.io/presidio/analyzer/adding_recognizers/#recognizerregistry). Copy this
+# file, edit the patterns/entities for your org, and point SKYBRIDGE_MASK_RECOGNIZERS_FILE at it —
+# no Presidio image rebuild required. Entries are sent verbatim as /analyze's "ad_hoc_recognizers".
+recognizers:
+  - name: AcmeAccountNumberRecognizer
+    supported_language: en
+    supported_entity: ACME_ACCOUNT_NUMBER
+    patterns:
+      - name: acme_account_number
+        regex: "ACME-\\d{9}"
+        score: 0.8
+    context:
+      - account
+      - acme
