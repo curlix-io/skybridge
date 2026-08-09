@@ -61,7 +61,7 @@ func dataRowPayload(vals ...[]byte) []byte {
 }
 
 func TestParseRowDescription(t *testing.T) {
-	cols := parseRowDescription(rowDescriptionPayload("id", "email", "name"))
+	cols := parseRowDescription(context.Background(), rowDescriptionPayload("id", "email", "name"), nil)
 	if len(cols) != 3 {
 		t.Fatalf("want 3 cols, got %d", len(cols))
 	}
@@ -82,7 +82,7 @@ func TestParseRowDescription(t *testing.T) {
 func TestParseRowDescriptionExcludesTypedColumnsFromFreeText(t *testing.T) {
 	names := []string{"id", "created_at", "note", "amount", "is_active"}
 	oids := []uint32{23, 1184, 25, 1700, 16} // int4, timestamptz, text, numeric, bool
-	cols := parseRowDescription(rowDescriptionPayloadTyped(names, oids))
+	cols := parseRowDescription(context.Background(), rowDescriptionPayloadTyped(names, oids), nil)
 	if len(cols) != 5 {
 		t.Fatalf("want 5 cols, got %d", len(cols))
 	}
@@ -110,7 +110,7 @@ func TestParseRowDescriptionExcludesTypedColumnsFromFreeText(t *testing.T) {
 func TestParseRowDescriptionExcludesCatalogNameType(t *testing.T) {
 	names := []string{"relname", "nspname"}
 	oids := []uint32{19, 19} // Postgres "name" type
-	cols := parseRowDescription(rowDescriptionPayloadTyped(names, oids))
+	cols := parseRowDescription(context.Background(), rowDescriptionPayloadTyped(names, oids), nil)
 	for _, c := range cols {
 		if c.FreeText {
 			t.Errorf("col %q (Postgres name type): FreeText=true, want false", c.Name)
@@ -124,7 +124,7 @@ func TestParseRowDescriptionExcludesCatalogNameType(t *testing.T) {
 func TestMaskDataRowNeverRedactsTypedTimestampColumn(t *testing.T) {
 	names := []string{"created_at", "note"}
 	oids := []uint32{1184, 25} // timestamptz, text
-	cols := parseRowDescription(rowDescriptionPayloadTyped(names, oids))
+	cols := parseRowDescription(context.Background(), rowDescriptionPayloadTyped(names, oids), nil)
 
 	dateTimeLikeValue := []byte("2024-07-05 00:13:50.654762+00:00")
 	payload := dataRowPayload(dateTimeLikeValue, []byte("2024-07-05 is my note"))
@@ -177,7 +177,7 @@ func (c columnMasker) MaskRow(_ context.Context, cols []mask.Column, row [][]byt
 }
 
 func TestMaskDataRowRedactsNamedColumn(t *testing.T) {
-	cols := parseRowDescription(rowDescriptionPayload("id", "email"))
+	cols := parseRowDescription(context.Background(), rowDescriptionPayload("id", "email"), nil)
 	payload := dataRowPayload([]byte("7"), []byte("a@b.com"))
 	masker := columnMasker{redact: map[string]bool{"email": true}}
 
@@ -210,7 +210,7 @@ func TestMaskDataRowRedactsNamedColumn(t *testing.T) {
 }
 
 func TestMaskDataRowPreservesNull(t *testing.T) {
-	cols := parseRowDescription(rowDescriptionPayload("id", "email"))
+	cols := parseRowDescription(context.Background(), rowDescriptionPayload("id", "email"), nil)
 	payload := dataRowPayload([]byte("7"), nil)
 	out, _, err := maskDataRow(context.Background(), payload, cols, mask.Noop{})
 	if err != nil {
@@ -241,7 +241,7 @@ func TestPipeBackendMasksStream(t *testing.T) {
 
 	client := new(bytes.Buffer)
 	masker := columnMasker{redact: map[string]bool{"email": true}}
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, masker, wire.NoopRecorder{})
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, masker, wire.NoopRecorder{}, nil)
 	if err == nil || err.Error() != "EOF" {
 		t.Fatalf("expected EOF at stream end, got %v", err)
 	}
@@ -295,7 +295,7 @@ func TestPipeBackendAbortsOnMaskerFailure(t *testing.T) {
 	writeRaw('Z', []byte{'I'})
 
 	client := new(bytes.Buffer)
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, errMasker{}, wire.NoopRecorder{})
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, errMasker{}, wire.NoopRecorder{}, nil)
 	if !errors.Is(err, mask.ErrMaskerUnavailable) {
 		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
 	}

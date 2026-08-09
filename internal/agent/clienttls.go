@@ -84,26 +84,68 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 // engineFactory returns an engine selector that builds the Postgres and MySQL engines with client-TLS
 // termination when clientTLS is non-nil (needed for credential injection, where the client sends a
 // session token). Mongo does not yet terminate client TLS. orgID scopes mask.Column.ObjectID for
-// path-/table-aware masking labels (see internal/pathlabel); MySQL's column-definition packets carry
-// the real table name so it's wired there today — Postgres/Mongo don't have that identity available
-// on the wire yet (see internal/wire/postgres, internal/wire/mongo package docs) and pass "".
-func engineFactory(clientTLS *tls.Config, orgID string) func(string) (wire.Engine, error) {
+// path-/table-aware masking labels (see internal/pathlabel); MySQL resolves it from its
+// column-definition packets and Mongo resolves it by correlating each find/aggregate/getMore
+// request's collection with its reply (see internal/wire/mongo package doc). Postgres resolves it
+// too, but only when pgCatalog is non-nil (SKYBRIDGE_POSTGRES_CATALOG_DSN configured — see
+// buildPostgresCatalogResolver and REDACTION.md's "Postgres table-identity resolution" design
+// notes); pgCatalog is shared across every Postgres connection this agent serves so its per-database
+// OID cache persists for the agent's lifetime, not just one session.
+func engineFactory(clientTLS *tls.Config, orgID string, pgCatalog *postgres.CatalogResolver) func(string) (wire.Engine, error) {
 	return func(dbType string) (wire.Engine, error) {
 		switch dbType {
 		case "postgres", "postgresql":
+			var e *postgres.Engine
 			if clientTLS != nil {
-				return postgres.NewWithClientTLS(clientTLS), nil
+				e = postgres.NewWithClientTLS(clientTLS)
+			} else {
+				e = postgres.New()
 			}
-			return postgres.New(), nil
+			if pgCatalog != nil {
+				e = e.WithOrgID(orgID).WithCatalogResolver(pgCatalog)
+			}
+			return e, nil
 		case "mysql":
 			if clientTLS != nil {
 				return mysql.NewWithClientTLS(clientTLS).WithOrgID(orgID), nil
 			}
 			return mysql.New().WithOrgID(orgID), nil
 		case "mongodb", "mongo":
-			return mongo.New(), nil
+			return mongo.New().WithOrgID(orgID), nil
 		default:
 			return nil, fmt.Errorf("unsupported db type %q (want postgres|mysql|mongodb)", dbType)
 		}
 	}
+}
+
+// buildPostgresCatalogResolver returns a shared CatalogResolver when cfg.PostgresCatalogDSN is set,
+// or nil otherwise (leaving Postgres's ObjectID unresolved, the safe no-op this package has always
+// had). A malformed DSN is a startup-time configuration error, not a best-effort fallback — unlike
+// the lookups it enables, which degrade silently per-call (see CatalogResolver.Resolve).
+func buildPostgresCatalogResolver(cfg config.Agent) (*postgres.CatalogResolver, error) {
+	if cfg.PostgresCatalogDSN == "" {
+		return nil, nil
+	}
+	cred, err := postgres.ParseCatalogDSN(cfg.PostgresCatalogDSN)
+	if err != nil {
+		return nil, fmt.Errorf("SKYBRIDGE_POSTGRES_CATALOG_DSN: %w", err)
+	}
+	return postgres.NewCatalogResolver(cred), nil
+}
+
+// logPostgresCatalogMode notes when Postgres table-identity resolution (PathOverlay support for
+// the Postgres wire proxy) is active, mirroring logClientTLSMode/logCredentialMode/
+// logUpstreamTLSMode's pattern of surfacing an optional feature's on/off state at startup.
+func logPostgresCatalogMode(cfg config.Agent, pgCatalog *postgres.CatalogResolver, logger *log.Logger) {
+	if logger == nil {
+		logger = log.Default()
+	}
+	if pgCatalog == nil {
+		return
+	}
+	note := ""
+	if cfg.PathLabelURL == "" {
+		note = " (SKYBRIDGE_PATH_LABEL_URL is not set, so PathOverlay itself is not yet in the masking chain — this only prepares identity resolution for when it is)"
+	}
+	logger.Printf("skybridge-agent: Postgres table-identity resolution ENABLED (SKYBRIDGE_POSTGRES_CATALOG_DSN)%s.", note)
 }

@@ -102,6 +102,18 @@ type Agent struct {
 	PathLabelToken       string // bearer token (defaults to SKYBRIDGE_TOKEN)
 	PathLabelPollSeconds int    // confirmed-label pull interval in seconds (floored at remotestore.minPollSeconds)
 	PathLabelPushSeconds int    // proposed-label push interval in seconds (floored at remotestore.minPushSeconds)
+
+	// Postgres table-identity resolution for PathOverlay (see REDACTION.md's "Postgres table-identity
+	// resolution" design notes). RowDescription only carries a numeric tableOID, never a name, so
+	// resolving it to a schema/table requires a pg_class/pg_namespace lookup the agent runs itself —
+	// on a *separate* connection it opens and owns, never the client's own session (which would
+	// corrupt that session's transaction/cursor state). PostgresCatalogDSN is a standard libpq
+	// connection string/URL for a dedicated, read-only credential used only for that lookup — distinct
+	// from the client's own login (which may be a per-session credential-injection secret, or simply a
+	// credential this feature shouldn't need to depend on the client presenting). Empty disables this
+	// resolution entirely: PathOverlay then behaves exactly as it does today for Postgres (empty
+	// ObjectID, safe no-op, falls through to layer 3).
+	PostgresCatalogDSN string // SKYBRIDGE_POSTGRES_CATALOG_DSN
 	// PIIOverlay is the column->token overlay you define (off by default): from SKYBRIDGE_PII_OVERLAY
 	// (inline JSON) or SKYBRIDGE_PII_OVERLAY_FILE (a path to a YAML or JSON file — easier to author,
 	// diff, and commit than one-line JSON in an env var). The file takes priority when both are set;
@@ -252,6 +264,7 @@ func LoadAgent() Agent {
 		PathLabelToken:       env("SKYBRIDGE_PATH_LABEL_TOKEN", env("SKYBRIDGE_TOKEN", "")),
 		PathLabelPollSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_POLL_SECONDS", ""), 60),
 		PathLabelPushSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_PUSH_SECONDS", ""), 15),
+		PostgresCatalogDSN:   env("SKYBRIDGE_POSTGRES_CATALOG_DSN", ""),
 
 		InjectCredentials:       truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
 		CredentialExchangeURL:   env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),

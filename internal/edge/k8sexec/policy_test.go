@@ -34,27 +34,25 @@ func TestValidateKubectlCommandBlocksInteractive(t *testing.T) {
 	}
 }
 
-func TestValidateKubectlCommandBlocksClusterWideDelete(t *testing.T) {
+func TestValidateKubectlCommandBlocksMutatingVerbs(t *testing.T) {
 	for _, cmd := range []string{
 		"kubectl delete ns default",
 		"kubectl delete namespace default",
 		"kubectl delete all --all",
 		"kubectl delete crd foo.example.com",
 		"kubectl delete nodes node-1",
+		"kubectl delete pod my-pod -n default",
+		"kubectl apply -f manifest.yaml",
+		"kubectl patch deployment api -p '{}'",
+		"kubectl create configmap foo",
+		"kubectl scale deployment/api --replicas=0",
+		"kubectl label pod my-pod foo=bar",
+		"kubectl cordon node-1",
+		"kubectl drain node-1",
 	} {
 		if allowed, _, _ := ValidateKubectlCommand(cmd); allowed {
 			t.Errorf("expected %q to be blocked", cmd)
 		}
-	}
-}
-
-func TestValidateKubectlCommandAllowsScopedDelete(t *testing.T) {
-	allowed, reason, parsed := ValidateKubectlCommand("kubectl delete pod my-pod -n default")
-	if !allowed {
-		t.Fatalf("expected scoped pod delete to be allowed, got reason=%q", reason)
-	}
-	if parsed.ReadOnly {
-		t.Error("delete should not be classified read-only")
 	}
 }
 

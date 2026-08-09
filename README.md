@@ -12,8 +12,24 @@ drivers), and **masks PII at the source** — so raw rows never leave your netwo
 
 **Jump to:** [How it works](#how-it-works) · [Quick start](#quick-start) ·
 [How masking works](#how-masking-works) · [Configure](#configure) ·
+[Performance and tuning](#performance-and-tuning) ·
 [The `skybridge-edge` binary](#the-skybridge-edge-binary) · [Layout](#layout) ·
+[Database support](#database-support-at-a-glance) ·
 [REDACTION.md](./REDACTION.md) (deep dive, with a live demo GIF)
+
+### Database support at a glance
+
+| Database  | Wire protocol     | Transparent wire proxy (`internal/wire`) | One-shot exec (`dbquery`/`dbexec`, `querystudio` tag) |
+|-----------|-------------------|:-----------------------------------------:|:-------------------------------------------------------:|
+| Postgres  | native TCP        | ✅ | ✅ |
+| MySQL     | native TCP        | ✅ | ✅ |
+| MongoDB   | native TCP (BSON) | ✅ | ✅ |
+| Snowflake | HTTPS/REST        | ❌ — no wire protocol to proxy | ✅ (querystudio only) |
+
+Postgres/MySQL/Mongo get a full native-client wire proxy: point `psql`/`mysql`/`mongosh` (or an app
+driver) straight at the agent and it masks rows in flight. Snowflake speaks HTTPS/REST, not a native
+TCP protocol, so there's no handshake to transparently proxy — it's supported only via the optional
+`querystudio` build tag's one-shot query-exec path, sharing the same masking pipeline.
 
 ## How it works
 
@@ -159,24 +175,30 @@ token` map (`SKYBRIDGE_PII_OVERLAY`, or fetched dynamically from the control pla
 [Dynamic PII overlay](#dynamic-pii-overlay-fetched-from-your-control-plane)). No path awareness: `total`
 under `order` and `total` under `user` share one rule.
 
-### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`) — groundwork, not yet in the live chain
+### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`)
 
-`internal/pathlabel` and `mask.PathOverlay`
-(`internal/mask/pathoverlay.go`) exist in this repo but are **not yet wired into the two layers
-above** — `buildMaskerWithOverlay` in `internal/agent/agent.go` doesn't include a `PathOverlay` in
-its chain, since doing so needs a real, populated `label.Store` to be anything but a permanent miss
-(an empty store is dead weight, and it would also break the "nothing configured → transparent
-passthrough" guarantee other code relies on).
+`mask.PathOverlay` (`internal/mask/pathoverlay.go`) is wired into the live chain in
+`buildMaskerWithOverlay` (`internal/agent/agent.go`) whenever `SKYBRIDGE_PATH_LABEL_URL` is set,
+backed by `internal/pathlabel/remotestore.Store` — a control-plane-fetched `label.Store` (pull
+confirmed labels, push detector-proposed ones), not the in-memory reference implementation. It
+looks up a label keyed on `(ObjectID, FieldPath)` — something a bare column-name rule can never
+express, e.g. distinguishing `order.total` from `user.total`.
 
-What *is* live today: `mask.Column` carries `ObjectID`/`Path` fields, and `internal/edge/dbquery`'s
-one-shot exec path (`internal/edge/dbquery/mask.go`) populates them for every query — it resolves
-per-query table/collection identity (`"{org}:{driver}:{database}:{table}"`) and walks Mongo
-documents *nested* rather than flattened first (`internal/pathlabel/docpath`), so a `profile.contact.email`
-leaf is addressable independently of a top-level `email` column. The MySQL wire-proxy engine also
-parses real per-column table identity off the wire (schema + `org_table` from the column-definition
-packet). This is groundwork for a future `PathOverlay` layer that can distinguish `order.total` from
-`user.total` — something a bare key-name rule can never express — but until a backing store exists,
-`Column.ObjectID`/`Path` are populated and otherwise unused by the two layers above.
+Its effectiveness depends on the wire engine resolving real per-row table/collection identity:
+`internal/edge/dbquery`'s one-shot exec path (`internal/edge/dbquery/mask.go`) resolves it for
+every query regardless of database — `"{org}:{driver}:{database}:{table}"`, with Mongo documents
+walked *nested* rather than flattened first (`internal/pathlabel/docpath`), so a
+`profile.contact.email` leaf is addressable independently of a top-level `email` column. All three
+wire-proxy engines resolve it too: MySQL parses real per-column table identity off the wire (schema
++ `org_table` from the column-definition packet); Mongo (`internal/wire/mongo`) correlates each
+`find`/`aggregate`/`getMore` request's collection with its reply via the wire protocol's
+`requestID`/`responseTo` fields, including nested document paths; and Postgres
+(`internal/wire/postgres`) — which only has a numeric table OID on the wire, never a name — resolves
+it via a dedicated `pg_class`/`pg_namespace` lookup connection the agent opens for itself, configured
+with `SKYBRIDGE_POSTGRES_CATALOG_DSN` (see [Postgres table-identity resolution](./REDACTION.md#postgres-table-identity-resolution)
+for why this one needs its own credential rather than reusing the client's). Unconfigured, Postgres
+connections pass an empty `ObjectID`, which `PathOverlay` treats as "no label available" and falls
+through safely, same as if it weren't configured at all.
 
 **Structured vs. unstructured, in one sentence:** layer 1 (`Remote`) is what actually gives you
 unstructured-text coverage (it doesn't care what the field is called or where it sits in a
@@ -216,8 +238,9 @@ payload: '{"name":"Jane Doe","contact":"[redacted]"}'
 ```
 
 **A nested Mongo/BSON document (path-scoped labels — lets `order.total` and `user.total` carry
-independent rules despite sharing a field name; see `PathOverlay` above, currently wired into the
-`dbquery` one-shot exec path, not yet the live Postgres/Mongo wire-proxy):**
+independent rules despite sharing a field name; see `PathOverlay` above — live for the `dbquery`
+one-shot exec path and all three wire proxies today, Postgres's requiring
+`SKYBRIDGE_POSTGRES_CATALOG_DSN`):**
 
 ```
 { "profile": { "email": "jane@doe.com", "name": "Jane" }, "order": { "total": 42 } }
@@ -257,6 +280,7 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_UPSTREAM_TLS` | `disable` | agent→database TLS (Postgres / MySQL / Mongo): `disable` \| `prefer` \| `require` \| `verify-ca` \| `verify-full` |
 | `SKYBRIDGE_UPSTREAM_TLS_CA_FILE` / `_PEM` | system roots | trust roots used by `verify-ca` / `verify-full` (e.g. the RDS CA bundle) |
 | `SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME` | dial host | override the verified hostname / SNI sent to the upstream |
+| `SKYBRIDGE_POSTGRES_CATALOG_DSN` | — | dedicated, read-only Postgres credential (`postgres://user:pass@host:port`) the agent uses on a separate connection it owns for `pg_class`/`pg_namespace` lookups, resolving `PathOverlay`'s table identity for Postgres wire-proxy connections (see [Path-scoped labels](./REDACTION.md#path-scoped-labels-mask-pathoverlay)); unset leaves Postgres's `ObjectID` unresolved, same as before this existed |
 
 Switch databases by changing `SKYBRIDGE_DB_TYPE`; everything else is identical.
 
@@ -374,6 +398,57 @@ failed fetch leaves the last-known (or static `SKYBRIDGE_PII_OVERLAY`) rules int
 `SKYBRIDGE_PII_OVERLAY_ORG_HEADER` if you need a header name other than the default
 `X-Organization-Id`.
 
+## Performance and tuning
+
+### Benchmarks
+
+The masking chain (`internal/mask`) is the only per-row work the agent does beyond copying bytes —
+wire parsing itself is a single pass over the protocol frame. `internal/mask/bench_test.go` benchmarks
+the local, no-network masking layers in isolation (the `Remote`/Presidio layer is excluded — it's an
+HTTP round trip, dominated by network latency, not CPU). Reproduce with:
+
+```sh
+go test ./internal/mask/... -run NONE -bench . -benchtime 2s
+```
+
+Measured on an Apple M3 (`GOMAXPROCS=8`), one 5-column row (2 free-text, 2 typed, 1 id) per op:
+
+| Benchmark | ns/op | allocs/op | What it measures |
+|---|---:|---:|---|
+| `Overlay_MaskRow` | ~67 | 2 | Static column→token overlay (`SKYBRIDGE_PII_OVERLAY`), one matching column |
+| `PathOverlay_MaskRow_Hit` | ~140 | 2 | Path-scoped label lookup (`SKYBRIDGE_PATH_LABEL_URL`), label present |
+| `PathOverlay_MaskRow_Miss` | ~35 | 1 | Path-scoped lookup, no label — falls through to the next layer |
+| `Chain_OverlayOnly` | ~69 | 2 | Default OSS deployment shape: overlay only, no remote masker configured |
+| `Chain_PathOverlayAndOverlay` | ~182 | 3 | PathOverlay + Overlay layered, one hit each |
+
+These are microbenchmarks of the masking layers alone, not end-to-end query latency — real
+per-query latency is dominated by the upstream database round trip and, if configured, the
+`Remote`/Presidio HTTP call (typically single-digit milliseconds, network-dependent). The takeaway:
+local masking overhead per row is sub-microsecond and not the bottleneck in any realistic deployment;
+size the remote masker (Presidio) and the database itself for throughput, not this layer.
+
+### Tuning environment variables
+
+All of the following are optional; every one has a working default. See
+`internal/config/config.go` for the authoritative list (this repo's docstrings are the source of
+truth — the table below is a summary, not a replacement).
+
+| Variable | Default | Effect |
+|---|---|---|
+| `SKYBRIDGE_MASK_MODE` | `best-effort` | `strict` aborts the row/connection on a masker failure instead of forwarding it unmasked — trades availability for a stronger no-unmasked-leak guarantee. |
+| `SKYBRIDGE_MASK_ENTITIES` | unset (low-cost regex set) | Restricting `/analyze` to specific entity types avoids Presidio's full NER pass (spaCy inference) on every value; only add `PERSON`/`LOCATION`/`ORGANIZATION`/`NRP` if you need them — they're the expensive, false-positive-prone tiers. |
+| `SKYBRIDGE_PII_OVERLAY_POLL_SECONDS` | `60` | How often the dynamic column overlay re-fetches from your control plane. Lower = fresher rules, more request volume against that endpoint. |
+| `SKYBRIDGE_PII_RECOGNIZERS_POLL_SECONDS` | `60` | Same trade-off for the dynamic custom-recognizers source (`SKYBRIDGE_PII_RECOGNIZERS_URL`). |
+| `SKYBRIDGE_PATH_LABEL_POLL_SECONDS` | `60` (floored) | How often confirmed path-scoped labels are pulled (`internal/pathlabel/remotestore`). |
+| `SKYBRIDGE_PATH_LABEL_PUSH_SECONDS` | `15` (floored) | How often detector-proposed labels are pushed upstream. More frequent pushes surface new proposals faster at the cost of more outbound requests. |
+| `SKYBRIDGE_MASKING_METRICS_PUSH_SECONDS` | `60` (floored) | Push interval for masking-outcome metrics (counts only, never values). Purely observability — has no effect on masking behavior or query latency. |
+| `SKYBRIDGE_SESSION_REPLAY_MAX_BYTES` | `5 MiB` | Caps the in-memory transcript buffer per session when `SKYBRIDGE_SESSION_REPLAY_ENABLED=true`. Lower this on memory-constrained deployments with many concurrent sessions. |
+| `SKYBRIDGE_STUDIO_MAX_SESSIONS` | `8` | (`querystudio` tag) Caps concurrent Query Studio dispatch sessions on one edge process. |
+| `SKYBRIDGE_GW_CLIENT_CONN_PER_MIN` / `SKYBRIDGE_GW_ORG_CONN_PER_MIN` | unset (no limit) | Gateway-side per-client / per-org connection-rate ceilings — the main throughput/abuse knobs on `skybridge-gateway` in tunnel mode. |
+
+Everything else in `internal/config/config.go` (TLS, credential exchange, enrollment) is
+correctness/security configuration, not a performance knob.
+
 ## Layout
 
 ```
@@ -392,6 +467,9 @@ internal/certstore      persists issued mTLS identity (local disk, optionally mi
 internal/genpb          generated gRPC stubs (run `make gen` to refresh)
 internal/config         SKYBRIDGE_* environment config
 ```
+
+See [Database support at a glance](#database-support-at-a-glance) above for which databases get a
+wire engine (`internal/wire`) vs. exec-only support (`dbquery`/`dbexec`, `querystudio` tag).
 
 ### The `skybridge-edge` binary
 

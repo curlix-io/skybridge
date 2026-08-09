@@ -1,10 +1,16 @@
 // Package mongo implements the MongoDB wire protocol (OP_MSG / BSON) as a masking proxy.
 //
-// Shape (mirrors the postgres/mysql engines): client->server requests are forwarded verbatim;
-// server->client OP_MSG replies are parsed and the string field values inside query result batches
-// (cursor.firstBatch / cursor.nextBatch, and OP_MSG document-sequence sections) are run through the
-// masker before the message is re-framed. BSON has no column metadata, so masking relies on the
-// remote (content) masker plus the field-name overlay.
+// Shape (mirrors the postgres/mysql engines): client->server requests are always forwarded
+// byte-identical (never mutated), but are also read-only parsed to learn the target
+// database/collection of each command (find/aggregate/getMore/...), keyed by the message's
+// requestID; server->client OP_MSG replies are parsed and the string field values inside query
+// result batches (cursor.firstBatch / cursor.nextBatch, and OP_MSG document-sequence sections) are
+// run through the masker before the message is re-framed, using the matching request's
+// database/collection (correlated via the reply's responseTo header field) to set
+// mask.Column.ObjectID/Path for the path-scoped masking layer. A request that fails to parse (or
+// whose reply never arrives) simply yields an empty ObjectID for that response, same as if
+// identity resolution weren't attempted at all — every masking layer already treats that as "no
+// label available," not as an error.
 //
 // Safe by construction: only OP_MSG result batches are descended into. Handshake/auth/protocol
 // fields are never touched, and any parse error falls back to forwarding the original bytes. When a
@@ -22,6 +28,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"sync"
 
 	"github.com/curlix-io/skybridge/internal/mask"
 	"github.com/curlix-io/skybridge/internal/wire"
@@ -35,27 +42,42 @@ const (
 )
 
 // Engine is the MongoDB wire-proxy engine.
-type Engine struct{}
+type Engine struct {
+	// orgID scopes mask.Column.ObjectID for path-/table-aware masking labels (see
+	// internal/pathlabel). Empty disables that scoping without otherwise affecting masking.
+	orgID string
+}
 
 // New returns a MongoDB engine.
 func New() *Engine { return &Engine{} }
+
+// WithOrgID returns a copy of the engine that scopes mask.Column.ObjectID to orgID for path-/
+// table-aware masking labels (see internal/pathlabel). Call with "" to leave scoping disabled.
+func (e *Engine) WithOrgID(orgID string) *Engine {
+	c := *e
+	c.orgID = orgID
+	return &c
+}
 
 // Name implements wire.Engine.
 func (*Engine) Name() string { return "mongodb" }
 
 // Proxy implements wire.Engine.
-func (*Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder wire.Recorder) error {
+func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder wire.Recorder) error {
 	if masker == nil {
 		masker = mask.Noop{}
 	}
 	if recorder == nil {
 		recorder = wire.NoopRecorder{}
 	}
+	tracker := newRequestTracker()
 	errc := make(chan error, 2)
-	// requests verbatim, teeing raw bytes into the recorder for replay (opaque/best-effort — not
-	// decoded from the OP_MSG framing here).
-	go func() { _, e := io.Copy(upstream, io.TeeReader(client, wire.RecorderInputWriter(recorder))); errc <- e }()
-	go func() { errc <- maskServer(ctx, bufio.NewReaderSize(upstream, 1<<16), client, masker, recorder) }()
+	go func() {
+		errc <- proxyClientRequests(bufio.NewReaderSize(client, 1<<16), upstream, recorder, tracker)
+	}()
+	go func() {
+		errc <- maskServer(ctx, bufio.NewReaderSize(upstream, 1<<16), client, masker, recorder, tracker, e.orgID)
+	}()
 	err := <-errc
 	_ = client.Close()
 	_ = upstream.Close()
@@ -66,8 +88,26 @@ func (*Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask
 	return err
 }
 
-func maskServer(ctx context.Context, r *bufio.Reader, w io.Writer, masker mask.Masker, recorder wire.Recorder) error {
-	bm := &bsonMasker{ctx: ctx, masker: masker, recorder: recorder}
+// proxyClientRequests forwards client->server messages byte-identical to upstream, while also
+// read-only parsing each one (best-effort) to learn its target database/collection for tracker —
+// a parse failure never affects forwarding, only leaves that request's eventual reply with no
+// resolved identity.
+func proxyClientRequests(r *bufio.Reader, w io.Writer, recorder wire.Recorder, tracker *requestTracker) error {
+	for {
+		msg, err := readMessage(r)
+		if err != nil {
+			return err
+		}
+		recorder.RecordInput(msg)
+		tracker.observe(msg)
+		if _, err := w.Write(msg); err != nil {
+			return err
+		}
+	}
+}
+
+func maskServer(ctx context.Context, r *bufio.Reader, w io.Writer, masker mask.Masker, recorder wire.Recorder, tracker *requestTracker, orgID string) error {
+	bm := &bsonMasker{ctx: ctx, masker: masker, recorder: recorder, tracker: tracker, orgID: orgID}
 	for {
 		msg, err := readMessage(r)
 		if err != nil {
@@ -81,6 +121,72 @@ func maskServer(ctx context.Context, r *bufio.Reader, w io.Writer, masker mask.M
 			return err
 		}
 	}
+}
+
+// maxTrackedRequests bounds requestTracker's in-memory map so a client that issues requests faster
+// than it reads replies (or disconnects mid-cursor) cannot grow it without limit (CLAUDE.md's
+// no-unbounded-growth rule, mirrored from remotestore's maxPendingLabels).
+const maxTrackedRequests = 4096
+
+// requestTracker correlates a request's database/collection (learned by parsing the client's
+// find/aggregate/getMore command as it passes through, read-only) with its eventual reply, via the
+// wire protocol's requestID/responseTo header fields. Safe for concurrent use: observe runs on the
+// client->server goroutine, resolve on the server->client goroutine.
+type requestTracker struct {
+	mu      sync.Mutex
+	pending map[int32]collectionInfo
+}
+
+type collectionInfo struct {
+	db         string
+	collection string
+}
+
+func newRequestTracker() *requestTracker {
+	return &requestTracker{pending: make(map[int32]collectionInfo)}
+}
+
+// observe best-effort parses a client->server message and records its target database/collection,
+// keyed by requestID, for later resolution by resolve. Any parse failure (or a command this engine
+// doesn't track, e.g. "hello"/"ismaster") is silently skipped — the eventual reply simply resolves
+// to no ObjectID, exactly as if identity tracking weren't attempted at all.
+func (t *requestTracker) observe(msg []byte) {
+	if len(msg) < headerLen {
+		return
+	}
+	if int32(binary.LittleEndian.Uint32(msg[12:16])) != opMsg {
+		return
+	}
+	requestID := int32(binary.LittleEndian.Uint32(msg[4:8]))
+	info, ok := parseCommandInfo(msg)
+	if !ok {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if _, exists := t.pending[requestID]; !exists && len(t.pending) >= maxTrackedRequests {
+		// Map iteration order is randomized in Go, so this evicts an arbitrary entry rather than
+		// the oldest — acceptable here since this is purely a size cap against a pathological
+		// client, not an LRU cache whose eviction policy affects correctness.
+		for k := range t.pending {
+			delete(t.pending, k)
+			break
+		}
+	}
+	t.pending[requestID] = info
+}
+
+// resolve looks up and consumes the tracked database/collection for responseTo (the requestID of
+// the request this reply answers). Consumed on read so a connection issuing many requests without
+// tracked replies (e.g. writes) doesn't leak entries.
+func (t *requestTracker) resolve(responseTo int32) (collectionInfo, bool) {
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	info, ok := t.pending[responseTo]
+	if ok {
+		delete(t.pending, responseTo)
+	}
+	return info, ok
 }
 
 // readMessage reads one complete wire message (header + body) framed by its leading int32 length.
@@ -111,6 +217,8 @@ func transformMessage(bm *bsonMasker, msg []byte) ([]byte, error) {
 	if int(binary.LittleEndian.Uint32(msg[12:16])) != opMsg {
 		return msg, nil
 	}
+	responseTo := int32(binary.LittleEndian.Uint32(msg[8:12]))
+	bm.resolveObjectID(responseTo)
 	flags := binary.LittleEndian.Uint32(msg[16:20])
 
 	end := len(msg)
@@ -215,7 +323,7 @@ func (m *bsonMasker) sequence(sec []byte) ([]byte, bool, error) {
 			return nil, false, errBadBSON
 		}
 		doc := rest[off : off+dl]
-		nd, err := m.result(doc)
+		nd, err := m.result(doc, "")
 		if err != nil {
 			return nil, false, err
 		}
