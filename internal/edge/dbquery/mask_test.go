@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/curlix-io/skybridge/internal/mask"
 )
@@ -24,7 +25,7 @@ func (m *pathSpyMasker) MaskRow(_ context.Context, cols []mask.Column, row [][]b
 func TestMaskRows_PopulatesObjectIDAndPath(t *testing.T) {
 	spy := &pathSpyMasker{}
 	rows := []map[string]any{{"id": "1", "email": "a@b.com"}}
-	_, err := maskRows(context.Background(), spy, "org1:postgres:app:app", []string{"id", "email"}, rows)
+	_, err := maskRows(context.Background(), spy, nil, nil, "org1:postgres:app:app", []string{"id", "email"}, rows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -41,6 +42,43 @@ func TestMaskRows_PopulatesObjectIDAndPath(t *testing.T) {
 	}
 }
 
+// TestMaskRows_TypedColumnsExcludedFromFreeText is the regression test for the dbquery/exec path
+// (executePostgres/executeMySQL/executeMongo/executeSnowflake all funnel through maskRows) of the
+// same class of bug fixed in the wire-proxy engines: a free-text PII detector confidently
+// misclassifying an ordinary timestamp/number/bool value as PII and redacting it silently corrupts
+// the value (no client type-decoder here to visibly crash, unlike the wire proxies — see
+// isFreeTextValue's doc comment).
+func TestMaskRows_TypedColumnsExcludedFromFreeText(t *testing.T) {
+	spy := &pathSpyMasker{}
+	rows := []map[string]any{{
+		"id":         42,
+		"created_at": time.Date(2024, 7, 5, 0, 13, 50, 0, time.UTC),
+		"amount":     19.99,
+		"is_active":  true,
+		"note":       "2024-07-05 looks like a date but is free text",
+	}}
+	cols := []string{"id", "created_at", "amount", "is_active", "note"}
+	_, err := maskRows(context.Background(), spy, nil, nil, "org1:postgres:app:app", cols, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := map[string]bool{
+		"id":         false,
+		"created_at": false,
+		"amount":     false,
+		"is_active":  false,
+		"note":       true,
+	}
+	if len(spy.seen) != len(cols) {
+		t.Fatalf("expected %d columns seen, got %d", len(cols), len(spy.seen))
+	}
+	for _, c := range spy.seen {
+		if c.FreeText != want[c.Name] {
+			t.Errorf("col %q: FreeText=%v, want %v", c.Name, c.FreeText, want[c.Name])
+		}
+	}
+}
+
 func TestMaskDocuments_ResolvesNestedPaths(t *testing.T) {
 	spy := &pathSpyMasker{}
 	docs := []map[string]any{
@@ -49,7 +87,7 @@ func TestMaskDocuments_ResolvesNestedPaths(t *testing.T) {
 			"user":  map[string]any{"total": "5"},
 		},
 	}
-	_, err := maskDocuments(context.Background(), spy, "org1:mongo:app:orders", docs)
+	_, err := maskDocuments(context.Background(), spy, nil, nil, "org1:mongo:app:orders", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -70,7 +108,7 @@ func TestMaskDocuments_RedactsByPath(t *testing.T) {
 		{"profile": map[string]any{"email": "jane@example.com", "name": "Jane"}},
 	}
 	stub := &redactPathMasker{redactPath: "profile.email"}
-	out, err := maskDocuments(context.Background(), stub, "org1:mongo:app:users", docs)
+	out, err := maskDocuments(context.Background(), stub, nil, nil, "org1:mongo:app:users", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +141,7 @@ func (m *redactPathMasker) MaskRow(_ context.Context, cols []mask.Column, row []
 
 func TestMaskDocuments_NilMaskerIsNoop(t *testing.T) {
 	docs := []map[string]any{{"email": "a@b.com"}}
-	out, err := maskDocuments(context.Background(), nil, "org1:mongo:app:users", docs)
+	out, err := maskDocuments(context.Background(), nil, nil, nil, "org1:mongo:app:users", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -142,7 +180,7 @@ func (errMasker) MaskRow(context.Context, []mask.Column, [][]byte) ([][]byte, er
 
 func TestMaskRowsNilMaskerPassesThrough(t *testing.T) {
 	rows := []map[string]any{{"name": "alice"}}
-	out, err := maskRows(context.Background(), nil, "", []string{"name"}, rows)
+	out, err := maskRows(context.Background(), nil, nil, nil, "", []string{"name"}, rows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -153,7 +191,7 @@ func TestMaskRowsNilMaskerPassesThrough(t *testing.T) {
 
 func TestMaskRowsAppliesMasker(t *testing.T) {
 	rows := []map[string]any{{"name": "alice", "age": nil}}
-	out, err := maskRows(context.Background(), upperMasker{}, "", []string{"name", "age"}, rows)
+	out, err := maskRows(context.Background(), upperMasker{}, nil, nil, "", []string{"name", "age"}, rows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -167,7 +205,7 @@ func TestMaskRowsAppliesMasker(t *testing.T) {
 
 func TestMaskRowsPropagatesMaskerError(t *testing.T) {
 	rows := []map[string]any{{"name": "alice"}}
-	_, err := maskRows(context.Background(), errMasker{}, "", []string{"name"}, rows)
+	_, err := maskRows(context.Background(), errMasker{}, nil, nil, "", []string{"name"}, rows)
 	if err == nil {
 		t.Fatal("expected masker error to propagate")
 	}
@@ -175,7 +213,7 @@ func TestMaskRowsPropagatesMaskerError(t *testing.T) {
 
 func TestMaskDocumentsNilMaskerPassesThrough(t *testing.T) {
 	docs := []map[string]any{{"email": "a@b.com"}}
-	out, err := maskDocuments(context.Background(), nil, "", docs)
+	out, err := maskDocuments(context.Background(), nil, nil, nil, "", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -186,7 +224,7 @@ func TestMaskDocumentsNilMaskerPassesThrough(t *testing.T) {
 
 func TestMaskDocumentsAppliesMaskerWithStableColumnOrder(t *testing.T) {
 	docs := []map[string]any{{"b": "second", "a": "first", "c": nil}}
-	out, err := maskDocuments(context.Background(), upperMasker{}, "", docs)
+	out, err := maskDocuments(context.Background(), upperMasker{}, nil, nil, "", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -200,7 +238,7 @@ func TestMaskDocumentsAppliesMaskerWithStableColumnOrder(t *testing.T) {
 
 func TestMaskDocumentsPropagatesMaskerError(t *testing.T) {
 	docs := []map[string]any{{"a": "1"}}
-	_, err := maskDocuments(context.Background(), errMasker{}, "", docs)
+	_, err := maskDocuments(context.Background(), errMasker{}, nil, nil, "", docs)
 	if err == nil {
 		t.Fatal("expected masker error to propagate")
 	}

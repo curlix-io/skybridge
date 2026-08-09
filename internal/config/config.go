@@ -70,6 +70,38 @@ type Agent struct {
 	// unmasked content reach the client — hoop.dev's DLP_MODE=strict. A detection MISS (the masker
 	// ran fine and found nothing) is not a failure in either mode; only masker errors are affected.
 	MaskMode string
+	// MaskAdHocRecognizers is Presidio's /analyze "ad_hoc_recognizers" array verbatim (see
+	// mask.RemoteConfig.AdHocRecognizers), resolved from either SKYBRIDGE_MASK_RECOGNIZERS_YAML or
+	// SKYBRIDGE_MASK_RECOGNIZERS_FILE via LoadRecognizers (internal/config/recognizers.go). Nil
+	// disables custom recognizers (Presidio's built-in set only).
+	MaskAdHocRecognizers []any
+	// ConnectionRole tags this agent's masking-outcome metrics and connection-scoped recognizer
+	// lookups (SKYBRIDGE_CONNECTION_ROLE, e.g. "primary", "readonly-replica") — combined with DBType
+	// into metrics.ConnectionKey. Empty is a valid role (matches an org-wide/unscoped rule set).
+	ConnectionRole string
+
+	// Masking-outcome metrics (Data Classification dashboard). Off by default — MaskingMetricsURL
+	// empty disables the recorder entirely (mask/metrics.Recorder.Enabled() reports false, every
+	// Record* call is a no-op).
+	MaskingMetricsURL         string // SKYBRIDGE_MASKING_METRICS_URL (POST endpoint)
+	MaskingMetricsToken       string // SKYBRIDGE_MASKING_METRICS_TOKEN (defaults to SKYBRIDGE_TOKEN)
+	MaskingMetricsPushSeconds int    // SKYBRIDGE_MASKING_METRICS_PUSH_SECONDS (0 -> metrics.minPushSeconds floor)
+
+	// Dynamic custom-recognizers source (optional, control-plane "api_push" delivery mode). When
+	// PIIRecognizersURL is set the agent fetches its org+driver+connection_role recognizer set at
+	// startup and re-fetches on an interval, hot-swapping mask.Remote's ad-hoc recognizers. Falls
+	// back to the static MaskAdHocRecognizers (SSM/file) when unset or on a failed fetch.
+	PIIRecognizersURL         string // GET endpoint, e.g. https://app/api/v1/data-studio/studio/native-access/pii-recognizers
+	PIIRecognizersToken       string // bearer token (defaults to SKYBRIDGE_TOKEN)
+	PIIRecognizersPollSeconds int    // refresh interval in seconds (0 -> default; <0 -> fetch once)
+
+	// Path-scoped PII label store (internal/pathlabel/remotestore), backing mask.PathOverlay. Unset
+	// (PathLabelURL empty) leaves PathOverlay out of the masking chain entirely (see
+	// buildMaskerWithOverlay's doc comment) — the "nothing configured -> mask.Noop" contract.
+	PathLabelURL         string // pull/push base URL for confirmed + proposed labels
+	PathLabelToken       string // bearer token (defaults to SKYBRIDGE_TOKEN)
+	PathLabelPollSeconds int    // confirmed-label pull interval in seconds (floored at remotestore.minPollSeconds)
+	PathLabelPushSeconds int    // proposed-label push interval in seconds (floored at remotestore.minPushSeconds)
 	// PIIOverlay is the column->token overlay you define (off by default): from SKYBRIDGE_PII_OVERLAY
 	// (inline JSON) or SKYBRIDGE_PII_OVERLAY_FILE (a path to a YAML or JSON file — easier to author,
 	// diff, and commit than one-line JSON in an env var). The file takes priority when both are set;
@@ -206,6 +238,20 @@ func LoadAgent() Agent {
 		PIIOverlayToken:       env("SKYBRIDGE_PII_OVERLAY_TOKEN", env("SKYBRIDGE_TOKEN", "")),
 		PIIOverlayPollSeconds: atoiDefault(env("SKYBRIDGE_PII_OVERLAY_POLL_SECONDS", ""), 60),
 		PIIOverlayOrgHeader:   env("SKYBRIDGE_PII_OVERLAY_ORG_HEADER", ""),
+		ConnectionRole:        env("SKYBRIDGE_CONNECTION_ROLE", ""),
+
+		MaskingMetricsURL:         env("SKYBRIDGE_MASKING_METRICS_URL", ""),
+		MaskingMetricsToken:       env("SKYBRIDGE_MASKING_METRICS_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		MaskingMetricsPushSeconds: atoiDefault(env("SKYBRIDGE_MASKING_METRICS_PUSH_SECONDS", ""), 60),
+
+		PIIRecognizersURL:         env("SKYBRIDGE_PII_RECOGNIZERS_URL", ""),
+		PIIRecognizersToken:       env("SKYBRIDGE_PII_RECOGNIZERS_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		PIIRecognizersPollSeconds: atoiDefault(env("SKYBRIDGE_PII_RECOGNIZERS_POLL_SECONDS", ""), 60),
+
+		PathLabelURL:         env("SKYBRIDGE_PATH_LABEL_URL", ""),
+		PathLabelToken:       env("SKYBRIDGE_PATH_LABEL_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		PathLabelPollSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_POLL_SECONDS", ""), 60),
+		PathLabelPushSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_PUSH_SECONDS", ""), 15),
 
 		InjectCredentials:       truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
 		CredentialExchangeURL:   env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),
@@ -237,6 +283,14 @@ func LoadAgent() Agent {
 
 		SessionReplayEnabled:  truthy(env("SKYBRIDGE_SESSION_REPLAY_ENABLED", "")),
 		SessionReplayMaxBytes: atoiDefault(env("SKYBRIDGE_SESSION_REPLAY_MAX_BYTES", ""), 5<<20),
+	}
+	if recognizers, err := LoadRecognizers(
+		env("SKYBRIDGE_MASK_RECOGNIZERS_YAML", ""),
+		env("SKYBRIDGE_MASK_RECOGNIZERS_FILE", ""),
+	); err != nil {
+		log.Printf("skybridge: SKYBRIDGE_MASK_RECOGNIZERS_YAML/_FILE: %v (custom recognizers disabled)", err)
+	} else {
+		a.MaskAdHocRecognizers = recognizers
 	}
 	return a
 }

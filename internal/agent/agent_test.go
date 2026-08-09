@@ -103,7 +103,7 @@ func TestBuildMaskerNoopWhenNothingConfigured(t *testing.T) {
 }
 
 func TestBuildMaskerWithOverlayReturnsHandleWhenOverlayConfigured(t *testing.T) {
-	m, overlay := buildMaskerWithOverlay(config.Agent{PIIOverlay: map[string]string{"email": "[EMAIL]"}})
+	m, overlay, _, _, _ := buildMaskerWithOverlay(config.Agent{PIIOverlay: map[string]string{"email": "[EMAIL]"}})
 	if overlay == nil {
 		t.Fatal("expected a non-nil overlay handle")
 	}
@@ -113,7 +113,7 @@ func TestBuildMaskerWithOverlayReturnsHandleWhenOverlayConfigured(t *testing.T) 
 }
 
 func TestBuildMaskerWithOverlayNilHandleWhenNoOverlay(t *testing.T) {
-	_, overlay := buildMaskerWithOverlay(config.Agent{MaskAnalyzeURL: "http://a", MaskAnonymizeURL: "http://b"})
+	_, overlay, _, _, _ := buildMaskerWithOverlay(config.Agent{MaskAnalyzeURL: "http://a", MaskAnonymizeURL: "http://b"})
 	if overlay != nil {
 		t.Fatal("expected a nil overlay handle when no overlay is configured")
 	}

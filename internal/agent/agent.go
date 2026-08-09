@@ -18,8 +18,12 @@ import (
 	"net"
 	"time"
 
+	"strings"
+
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/mask/metrics"
+	"github.com/curlix-io/skybridge/internal/pathlabel/remotestore"
 	"github.com/curlix-io/skybridge/internal/tunnel"
 	"github.com/curlix-io/skybridge/internal/wire"
 	"github.com/curlix-io/skybridge/internal/wiremtls"
@@ -75,33 +79,70 @@ func EngineFor(dbType string) (wire.Engine, error) {
 	return engineFactory(nil, "")(dbType)
 }
 
-// BuildMasker assembles the masking chain (remote masker + your column overlay) from config.
+// BuildMasker assembles the masking chain (remote masker + your column overlay) from config. It
+// does not start the dynamic overlay/path-label sync loops (no ctx/logger available here) — use
+// BuildMaskerWithPathLabelSync when you have a lifecycle context to run those against.
 func BuildMasker(cfg config.Agent) mask.Masker {
-	m, _ := buildMaskerWithOverlay(cfg)
+	m, _, _, _, _ := buildMaskerWithOverlay(cfg)
 	return m
 }
 
-// buildMaskerWithOverlay assembles the masking chain and returns the overlay handle so a dynamic
-// source can hot-swap its rules. The overlay layer is included when a static overlay is configured
-// OR a dynamic source URL is set (so later refreshes take effect even if the seed is empty); the
-// handle is nil when no overlay layer is active.
+// BuildMaskerWithPathLabelSync assembles the masking chain and starts its dynamic sources (the
+// flat column overlay poller and, when cfg.PathLabelURL is set, the pathlabel remotestore's
+// pull/push loops) against ctx. Use this instead of BuildMasker wherever a lifecycle ctx is
+// available — currently RunListener/RunTunnel (below) and cmd/skybridge-edge/main.go's shared
+// studio/dbexec masker, since dbquery's detector hook (internal/edge/dbquery/mask.go) needs the
+// store's push loop actually running for its Put calls to ever reach the control plane.
 //
-// mask.NewPathOverlay (internal/mask/pathoverlay.go) is not wired into this chain yet: it needs a
-// populated label.Store to be anything but a permanent miss, and nothing today populates a shared
-// Store for the agent process (dbquery's one-shot exec path resolves table/collection identity
-// per-query independently — see internal/edge/dbquery/mask.go — but that's a separate call path,
-// not this chain). Wire it in here once a real backing store (e.g. control-plane-fetched, mirroring
-// startOverlaySync's pattern) exists; an always-empty MemStore would just be dead weight that also
-// breaks the "nothing configured -> mask.Noop" contract callers rely on.
-func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay) {
+// The returned detector/store are for wiring dbquery.Options.Detector/ProposeStore (the "propose"
+// half of the pathlabel workflow) at the same call sites that already receive masker — they ride
+// on the same Remote analyze call and the same synced Store, rather than a second detection pass.
+// Either return value is nil when its respective prerequisite isn't configured (no
+// MaskAnalyzeURL/MaskAnonymizeURL, or no PathLabelURL).
+func BuildMaskerWithPathLabelSync(ctx context.Context, cfg config.Agent, logger *log.Logger) (masker mask.Masker, detector *mask.Remote, store *remotestore.Store) {
+	m, overlay, remote, st, metricsRecorder := buildMaskerWithOverlay(cfg)
+	startOverlaySync(ctx, cfg, overlay, logger)
+	startRecognizersSync(ctx, cfg, remote, logger)
+	if st != nil {
+		st.Start(ctx)
+	}
+	if metricsRecorder != nil {
+		metricsRecorder.Start(ctx)
+	}
+	if remote == nil || !remote.Enabled() {
+		return m, nil, st
+	}
+	return m, remote, st
+}
+
+// buildMaskerWithOverlay assembles the masking chain and returns the overlay/path-label-store
+// handles so a caller can hot-swap/sync them against a lifecycle context (see
+// BuildMaskerWithPathLabelSync). The overlay layer is included when a static overlay is configured
+// OR a dynamic source URL is set (so later refreshes take effect even if the seed is empty); the
+// handle is nil when no overlay layer is active. The path-label store is non-nil only when
+// cfg.PathLabelURL is set — otherwise PathOverlay is wired with a nil Store, which is a permanent
+// no-op per its own doc comment, preserving the "nothing configured -> mask.Noop" contract callers
+// rely on.
+func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask.Remote, *remotestore.Store, *metrics.Recorder) {
+	metricsRecorder := metrics.New(metrics.Config{
+		URL:          cfg.MaskingMetricsURL,
+		Token:        cfg.MaskingMetricsToken,
+		OrgID:        cfg.OrgID,
+		PushInterval: time.Duration(cfg.MaskingMetricsPushSeconds) * time.Second,
+	}, nil)
+	connectionKey := metrics.ConnectionKey(cfg.DBType, cfg.ConnectionRole)
+
 	var maskers []mask.Masker
 	remote := mask.NewRemote(mask.RemoteConfig{
-		AnalyzeURL:   cfg.MaskAnalyzeURL,
-		AnonymizeURL: cfg.MaskAnonymizeURL,
-		Language:     cfg.MaskLanguage,
-		Entities:     cfg.MaskEntities,
-		Anonymizers:  cfg.MaskAnonymizers,
-		Strict:       cfg.MaskStrict(),
+		AnalyzeURL:       cfg.MaskAnalyzeURL,
+		AnonymizeURL:     cfg.MaskAnonymizeURL,
+		Language:         cfg.MaskLanguage,
+		Entities:         cfg.MaskEntities,
+		Anonymizers:      cfg.MaskAnonymizers,
+		AdHocRecognizers: cfg.MaskAdHocRecognizers,
+		Strict:           cfg.MaskStrict(),
+		Metrics:          metricsRecorder,
+		ConnectionKey:    connectionKey,
 	})
 	if remote.Enabled() {
 		maskers = append(maskers, remote)
@@ -111,10 +152,19 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay) {
 		overlay = mask.NewOverlay(cfg.PIIOverlay)
 		maskers = append(maskers, overlay)
 	}
-	if len(maskers) == 0 {
-		return mask.Noop{}, nil
+	var store *remotestore.Store
+	if strings.TrimSpace(cfg.PathLabelURL) != "" {
+		store = remotestore.New(cfg, nil)
+		// Ordered remote (Presidio) -> PathOverlay -> static Overlay: confirmed path-scoped labels
+		// take priority over the flat column overlay, which remains a backstop for paths with no
+		// label yet. Only added when a store is actually configured, so an unconfigured deployment
+		// still gets mask.Noop{} below rather than a permanently-missing PathOverlay in the chain.
+		maskers = append(maskers, mask.NewPathOverlayWithMetrics(store, metricsRecorder, connectionKey))
 	}
-	return mask.NewChain(maskers...), overlay
+	if len(maskers) == 0 {
+		return mask.Noop{}, nil, remote, nil, metricsRecorder
+	}
+	return mask.NewChain(maskers...), overlay, remote, store, metricsRecorder
 }
 
 // logMaskingGuardrails emits startup warnings when the configured masking posture is weaker than an
@@ -194,8 +244,15 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 	if err != nil {
 		return err
 	}
-	masker, overlay := buildMaskerWithOverlay(cfg)
+	masker, overlay, remote, pathLabelStore, metricsRecorder := buildMaskerWithOverlay(cfg)
 	startOverlaySync(ctx, cfg, overlay, logger)
+	startRecognizersSync(ctx, cfg, remote, logger)
+	if pathLabelStore != nil {
+		pathLabelStore.Start(ctx)
+	}
+	if metricsRecorder != nil {
+		metricsRecorder.Start(ctx)
+	}
 	logMaskingGuardrails(cfg, logger)
 	resolver := NewHTTPCredentialResolver(cfg)
 	upTLS, err := buildUpstreamTLSPolicy(cfg)
@@ -315,9 +372,16 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 	// Build the masker here (rather than letting withDefaults do it) so we can capture the overlay
 	// handle and keep it refreshed from the control plane. Respect a test-injected masker.
 	if deps.Masker == nil {
-		masker, overlay := buildMaskerWithOverlay(cfg)
+		masker, overlay, remote, pathLabelStore, metricsRecorder := buildMaskerWithOverlay(cfg)
 		deps.Masker = masker
 		startOverlaySync(ctx, cfg, overlay, logger)
+		startRecognizersSync(ctx, cfg, remote, logger)
+		if pathLabelStore != nil {
+			pathLabelStore.Start(ctx)
+		}
+		if metricsRecorder != nil {
+			metricsRecorder.Start(ctx)
+		}
 		logMaskingGuardrails(cfg, logger)
 	}
 	// Build the engine factory with client-TLS termination (Postgres) unless a test injected one.

@@ -68,7 +68,7 @@ func executePostgres(ctx context.Context, target Target, database, q string, opt
 	}
 	data = capRows(data, opts.MaxRows)
 	objID := objectID(opts.OrgID, "postgres", dbName, dbName)
-	masked, err := maskRows(ctx, masker, objID, cols, data)
+	masked, err := maskRows(ctx, masker, opts.Detector, opts.ProposeStore, objID, cols, data)
 	if err != nil {
 		return nil, err
 	}

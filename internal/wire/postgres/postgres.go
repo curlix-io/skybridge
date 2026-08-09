@@ -277,7 +277,44 @@ func writeMessage(w io.Writer, typ byte, payload []byte) error {
 	return err
 }
 
-// parseRowDescription extracts column names and text/binary format from a 'T' message payload.
+// nonFreeTextTypeOIDs are well-known Postgres built-in type OIDs (see pg_type.dat / the "OID"
+// column of https://www.postgresql.org/docs/current/datatype-oid.html) whose text-format wire
+// representation is a fixed, driver-decoded format — never free-form prose a PII detector should
+// scan. A free-text PII detector (Presidio DATE_TIME et al.) confidently misclassifying an ordinary
+// timestamp/numeric/uuid value and redacting it produces a value the client's type decoder can no
+// longer parse (e.g. psycopg2 raising "unable to parse date"), corrupting the response rather than
+// just over-redacting — this is a protocol-correctness bug, not a masking-precision tradeoff, so
+// these types are excluded from scanning unconditionally rather than via a configurable allowlist.
+// 19 (name) is Postgres's internal catalog-identifier type: pg_class.relname, pg_namespace.nspname,
+// pg_proc.proname, etc. — table/column/function/role names. The Studio schema explorer queries
+// these system catalogs over this same masked connection to list tables/columns/functions; a table
+// name is structural metadata, never user data, and must never be run through a free-text PII
+// detector (a real false positive hit this: "access_request_rules" scored as an NRP/nationality-
+// religious-political entity and got redacted to "[redacted]" in the explorer sidebar — corrupting
+// schema browsing itself, not protecting anything).
+var nonFreeTextTypeOIDs = map[uint32]bool{
+	16:   true, // bool
+	19:   true, // name
+	20:   true, // int8
+	21:   true, // int2
+	23:   true, // int4
+	26:   true, // oid
+	114:  true, // json
+	700:  true, // float4
+	701:  true, // float8
+	1082: true, // date
+	1083: true, // time
+	1114: true, // timestamp
+	1184: true, // timestamptz
+	1186: true, // interval
+	1266: true, // timetz
+	1700: true, // numeric
+	2950: true, // uuid
+	3802: true, // jsonb
+}
+
+// parseRowDescription extracts column names, text/binary format, and free-text eligibility from a
+// 'T' message payload.
 func parseRowDescription(p []byte) []mask.Column {
 	if len(p) < 2 {
 		return nil
@@ -296,9 +333,14 @@ func parseRowDescription(p []byte) []mask.Column {
 		if off+18 > len(p) {
 			break
 		}
+		typeOID := binary.BigEndian.Uint32(p[off+6 : off+10])
 		formatCode := binary.BigEndian.Uint16(p[off+16 : off+18])
 		off += 18
-		cols = append(cols, mask.Column{Name: name, Text: formatCode == 0})
+		cols = append(cols, mask.Column{
+			Name:     name,
+			Text:     formatCode == 0,
+			FreeText: !nonFreeTextTypeOIDs[typeOID],
+		})
 	}
 	return cols
 }
@@ -337,7 +379,7 @@ func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.
 		if i < len(cols) {
 			mc[i] = cols[i]
 		} else {
-			mc[i] = mask.Column{Text: true} // unknown column on protocol drift: treat as text
+			mc[i] = mask.Column{Text: true, FreeText: true} // unknown column on protocol drift: treat as text
 		}
 	}
 	masked, err := masker.MaskRow(ctx, mc, row)
