@@ -7,8 +7,10 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 Skybridge is a Go data plane for **governed native database access**. An egress-only agent sits in
 front of a database, speaks the native wire protocols (Postgres, MySQL, MongoDB), and masks PII in
 result rows before they leave the network. `skybridge-edge` is the broader "single install" binary:
-it also dials home to a Connector Gateway for read-only AWS/k8s tool dispatch, and can co-host the
-wire proxy in the same process.
+it also dials home to a Connector Gateway for AWS/k8s tool dispatch — AWS CLI calls are restricted to
+a read-only allowlist, kubectl calls are policy-gated (interactive verbs and cluster-wide deletes
+blocked, scoped mutations like `apply`/`patch`/a single-resource `delete` allowed) — and can co-host
+the wire proxy in the same process.
 
 Skybridge is a standalone Go module, independently open-sourced by Curlix, with no required
 dependency on any specific control plane or SaaS backend — clone it, `go build`, and run it against
@@ -85,9 +87,10 @@ the network.
   which relays already-masked bytes over the tunnel (`internal/tunnel` — a length-prefixed framed
   transport documented in `CONTRACT.md`).
 - **Edge** — `skybridge-edge` dials out to a Connector Gateway (and optionally, with the
-  `querystudio` build tag, a Query Studio gateway) and executes dispatched read-only tool calls
-  locally (AWS reads, k8s reads); it can also co-host the wire proxy in the same process. This is
-  the single binary most customers install.
+  `querystudio` build tag, a Query Studio gateway) and executes dispatched AWS/k8s tool calls
+  locally, gated by the policies in `internal/edge/policy.go` and `internal/edge/k8sexec/policy.go`
+  (see the Layout table below for exactly what each allows); it can also co-host the wire proxy in
+  the same process. This is the single binary most customers install.
 
 ### Layout
 
@@ -102,9 +105,12 @@ internal/pathlabel       docpath (nested-document path walking) + label (path-sc
 internal/pathlabel/remotestore  label.Store backed by the control plane's pii-path-labels pull/push API
 internal/tunnel          egress multiplexed transport (agent <-> gateway)
 internal/gateway         agent registry + relay + optional control-plane session recording
-internal/edge            edge tool dispatch: envelope, read-only policy, executor
-internal/edge/awsexec    read-only AWS CLI / CloudWatch tool implementations
-internal/edge/k8sexec    read-only kubectl-style tool implementation + policy
+internal/edge            edge tool dispatch: envelope, policy, executor
+internal/edge/awsexec    read-only-allowlisted AWS CLI / CloudWatch tool implementations
+internal/edge/k8sexec    policy-gated kubectl tool implementation — blocks interactive verbs
+                         (exec/attach/cp/port-forward) and cluster-wide deletes; scoped mutations
+                         (apply/patch/single-resource delete) are allowed, same posture as the
+                         Curlix control plane's own kubectl policy this mirrors as defense-in-depth
 internal/edge/dbexec     [querystudio tag] db_query_{postgres,mysql,mongo,snowflake} one-shot exec tools
 internal/edge/dbquery    [querystudio tag] shared SQL/Mongo execute + PII masking for dbexec/studiotransport
 internal/edge/transport  egress-only gRPC call-home client to the Connector Gateway
@@ -139,10 +145,14 @@ unmasked value is never corrupted, only ever left as-is:
    (`internal/agent/agent.go`'s `buildMaskerWithOverlay` wires it against
    `internal/pathlabel/remotestore.Store`, which pulls confirmed labels and pushes detector-proposed
    ones over that URL) — an unconfigured deployment gets `mask.Noop{}` in that slot, never a
-   permanently-missing lookup. The MySQL wire engine and `dbquery`'s one-shot exec path resolve real
-   per-row table/path identity; the Postgres and Mongo wire-proxy engines don't yet resolve table
-   identity from the wire protocol, so those connections pass an empty `ObjectID` and skip straight
-   to layer 3.
+   permanently-missing lookup. All three wire engines and `dbquery`'s one-shot exec path resolve
+   real per-row table/path identity: MySQL from its column-definition packets, Mongo by correlating
+   each request's collection with its reply via the wire protocol's `requestID`/`responseTo` fields
+   (see `internal/wire/mongo` package doc), and Postgres via a dedicated `pg_class`/`pg_namespace`
+   lookup connection the agent owns (only a numeric table OID is on the wire, not a name) — but only
+   when `SKYBRIDGE_POSTGRES_CATALOG_DSN` is set (see REDACTION.md's "Postgres table-identity
+   resolution"); unconfigured, Postgres connections pass an empty `ObjectID` and skip straight to
+   layer 3, same as always.
 3. **`Overlay`** (`internal/mask/overlay.go`) — the original flat, case-insensitive `column name ->
    replacement token` map (`SKYBRIDGE_PII_OVERLAY`, static or fetched/hot-swapped from the control
    plane via `SKYBRIDGE_PII_OVERLAY_URL`). No path awareness; kept as the last, most conservative
@@ -193,9 +203,9 @@ no query rewriting) vs. one-shot exec-only support (behind the `querystudio` tag
 
 | Database  | Wire protocol      | `internal/wire` engine | `dbquery`/`dbexec` (querystudio) | Notes |
 |-----------|---------------------|:-----------------------:|:---------------------------------:|-------|
-| Postgres  | native TCP          | ✅ `internal/wire/postgres` | ✅ | Wire engine resolves table identity only via layer-3 fallback (see PathOverlay below); no `ObjectID` from the wire yet. |
-| MySQL     | native TCP          | ✅ `internal/wire/mysql`    | ✅ | Only wire engine that resolves real per-row table/path identity for `PathOverlay`. |
-| MongoDB   | native TCP (BSON)   | ✅ `internal/wire/mongo`    | ✅ | Same `ObjectID`-from-wire gap as Postgres. |
+| Postgres  | native TCP          | ✅ `internal/wire/postgres` | ✅ | Resolves real per-row table/path identity for `PathOverlay` via a dedicated `pg_class` lookup connection, when `SKYBRIDGE_POSTGRES_CATALOG_DSN` is set (falls back to layer-3-only otherwise — no name on the wire itself, only a numeric OID). |
+| MySQL     | native TCP          | ✅ `internal/wire/mysql`    | ✅ | Resolves real per-row table/path identity for `PathOverlay` from column-definition packets. |
+| MongoDB   | native TCP (BSON)   | ✅ `internal/wire/mongo`    | ✅ | Resolves real per-reply collection/path identity for `PathOverlay` by correlating each request with its reply. |
 | Snowflake | HTTPS/REST          | ❌ (no wire protocol to proxy) | ✅ (`querystudio` only) | `database/sql` + `gosnowflake`; one-shot exec is the whole integration, not a placeholder for a future wire engine. |
 
 Build/test with `make edge-querystudio` / `make test-querystudio` / `make vet-querystudio` (or

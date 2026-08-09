@@ -76,7 +76,7 @@ func TestGenerateSelfSignedCertProducesUsablePair(t *testing.T) {
 }
 
 func TestEngineFactoryPlaintext(t *testing.T) {
-	factory := engineFactory(nil, "")
+	factory := engineFactory(nil, "", nil)
 	cases := map[string]string{"postgres": "postgres", "postgresql": "postgres", "mysql": "mysql", "mongodb": "mongodb", "mongo": "mongodb"}
 	for in, wantName := range cases {
 		e, err := factory(in)
@@ -94,7 +94,7 @@ func TestEngineFactoryPlaintext(t *testing.T) {
 
 func TestEngineFactoryWithClientTLSForPostgresAndMySQL(t *testing.T) {
 	tlsCfg := agentTestTLSConfig(t)
-	factory := engineFactory(tlsCfg, "")
+	factory := engineFactory(tlsCfg, "", nil)
 	pg, err := factory("postgres")
 	if err != nil {
 		t.Fatal(err)

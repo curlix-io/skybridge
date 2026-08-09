@@ -58,12 +58,53 @@ func bdoc(elems ...[]byte) []byte {
 }
 
 func opMsgReply(body []byte) []byte {
+	return opMsgReplyTo(body, 0)
+}
+
+// opMsgReplyTo builds an OP_MSG reply whose header's responseTo field is responseTo.
+func opMsgReplyTo(body []byte, responseTo int32) []byte {
 	msg := make([]byte, 20)
+	binary.LittleEndian.PutUint32(msg[8:12], uint32(responseTo))
 	binary.LittleEndian.PutUint32(msg[12:16], opMsg)
 	msg = append(msg, 0) // section kind 0 (body)
 	msg = append(msg, body...)
 	binary.LittleEndian.PutUint32(msg[0:4], uint32(len(msg)))
 	return msg
+}
+
+// opMsgRequest builds an OP_MSG client request whose header's requestID field is requestID.
+func opMsgRequest(body []byte, requestID int32) []byte {
+	msg := make([]byte, 20)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(requestID))
+	binary.LittleEndian.PutUint32(msg[12:16], opMsg)
+	msg = append(msg, 0) // section kind 0 (body)
+	msg = append(msg, body...)
+	binary.LittleEndian.PutUint32(msg[0:4], uint32(len(msg)))
+	return msg
+}
+
+// findCommand builds a { find: collection, filter: {}, $db: db } command body.
+func findCommand(collection, db string) []byte {
+	return bdoc(estring("find", collection), enested(bsonDoc, "filter", bdoc()), estring("$db", db))
+}
+
+// getMoreCommand builds a { getMore: cursorID, collection: collection, $db: db } command body.
+func getMoreCommand(cursorID int64, collection, db string) []byte {
+	e := []byte{bsonInt64}
+	e = append(e, cstr("getMore")...)
+	b := make([]byte, 8)
+	binary.LittleEndian.PutUint64(b, uint64(cursorID))
+	e = append(e, b...)
+	return bdoc(e, estring("collection", collection), estring("$db", db))
+}
+
+// findReplyBody builds the body document a findReply wraps in an OP_MSG.
+func findReplyBody() []byte {
+	doc0 := bdoc(estring("email", "alice@example.com"), estring("name", "Alice"))
+	doc1 := bdoc(estring("email", "bob@example.com"))
+	batch := bdoc(enested(bsonDoc, "0", doc0), enested(bsonDoc, "1", doc1))
+	cursor := bdoc(enested(bsonArray, "firstBatch", batch), estring("ns", "test.users"))
+	return bdoc(enested(bsonDoc, "cursor", cursor), eint32("ok", 1))
 }
 
 // findReply builds a realistic find reply: { cursor: { firstBatch: [ {email,name}, {email} ],
@@ -166,7 +207,7 @@ func TestMaskServerAbortsOnMaskerFailure(t *testing.T) {
 	in := findReply()
 	var out bytes.Buffer
 	r := bufio.NewReader(bytes.NewReader(in))
-	err := maskServer(context.Background(), r, &out, errMasker{}, wire.NoopRecorder{})
+	err := maskServer(context.Background(), r, &out, errMasker{}, wire.NoopRecorder{}, newRequestTracker(), "")
 	if !errors.Is(err, mask.ErrMaskerUnavailable) {
 		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
 	}
@@ -180,13 +221,152 @@ func TestMaskServerEndToEnd(t *testing.T) {
 	var out bytes.Buffer
 	r := bufio.NewReader(bytes.NewReader(in))
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
-	_ = maskServer(context.Background(), r, &out, overlay, wire.NoopRecorder{})
+	_ = maskServer(context.Background(), r, &out, overlay, wire.NoopRecorder{}, newRequestTracker(), "")
 
 	if bytes.Contains(out.Bytes(), []byte("alice@example.com")) {
 		t.Fatal("email leaked through maskServer")
 	}
 	if !bytes.Contains(out.Bytes(), []byte("[redacted]")) {
 		t.Fatal("masking not applied")
+	}
+}
+
+// colCapturingMasker records the mask.Column slice it was called with (per invocation) and applies
+// no masking, so tests can assert on ObjectID/Path without depending on Overlay/PathOverlay.
+type colCapturingMasker struct {
+	calls [][]mask.Column
+}
+
+func (m *colCapturingMasker) MaskRow(_ context.Context, cols []mask.Column, row [][]byte) ([][]byte, error) {
+	m.calls = append(m.calls, append([]mask.Column(nil), cols...))
+	return row, nil
+}
+
+func TestParseCommandInfo_Find(t *testing.T) {
+	req := opMsgRequest(findCommand("orders", "shop"), 42)
+	info, ok := parseCommandInfo(req)
+	if !ok {
+		t.Fatal("expected parseCommandInfo to resolve a find command")
+	}
+	if info.collection != "orders" || info.db != "shop" {
+		t.Fatalf("got %+v", info)
+	}
+}
+
+func TestParseCommandInfo_GetMore(t *testing.T) {
+	req := opMsgRequest(getMoreCommand(123, "orders", "shop"), 43)
+	info, ok := parseCommandInfo(req)
+	if !ok {
+		t.Fatal("expected parseCommandInfo to resolve a getMore command")
+	}
+	if info.collection != "orders" || info.db != "shop" {
+		t.Fatalf("got %+v", info)
+	}
+}
+
+func TestParseCommandInfo_UnknownCommandUnresolved(t *testing.T) {
+	body := bdoc(eint32("hello", 1), estring("$db", "admin"))
+	req := opMsgRequest(body, 44)
+	if _, ok := parseCommandInfo(req); ok {
+		t.Fatal("expected an unrecognized command to be unresolved")
+	}
+}
+
+func TestParseCommandInfo_MalformedUnresolved(t *testing.T) {
+	if _, ok := parseCommandInfo([]byte{1, 2, 3}); ok {
+		t.Fatal("expected malformed input to be unresolved")
+	}
+}
+
+func TestRequestTracker_ObserveAndResolve(t *testing.T) {
+	tr := newRequestTracker()
+	tr.observe(opMsgRequest(findCommand("orders", "shop"), 7))
+	info, ok := tr.resolve(7)
+	if !ok || info.collection != "orders" || info.db != "shop" {
+		t.Fatalf("resolve(7) = %+v, %v", info, ok)
+	}
+	// resolve consumes the entry.
+	if _, ok := tr.resolve(7); ok {
+		t.Fatal("expected resolve to consume the tracked entry")
+	}
+}
+
+func TestRequestTracker_UnknownResponseToUnresolved(t *testing.T) {
+	tr := newRequestTracker()
+	if _, ok := tr.resolve(999); ok {
+		t.Fatal("expected an untracked responseTo to be unresolved")
+	}
+}
+
+func TestRequestTracker_BoundedSize(t *testing.T) {
+	tr := newRequestTracker()
+	for i := int32(0); i < maxTrackedRequests+10; i++ {
+		tr.observe(opMsgRequest(findCommand("orders", "shop"), i))
+	}
+	if len(tr.pending) > maxTrackedRequests {
+		t.Fatalf("tracker grew unbounded: %d entries", len(tr.pending))
+	}
+}
+
+func TestBSONMasker_ObjectIDResolvedFromTrackedRequest(t *testing.T) {
+	tr := newRequestTracker()
+	tr.observe(opMsgRequest(findCommand("orders", "shop"), 7))
+
+	cm := &colCapturingMasker{}
+	bm := &bsonMasker{ctx: context.Background(), masker: cm, tracker: tr, orgID: "org1"}
+	if _, err := transformMessage(bm, opMsgReplyTo(findReplyBody(), 7)); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(cm.calls) == 0 {
+		t.Fatal("expected masker to be invoked")
+	}
+	for _, cols := range cm.calls {
+		for _, c := range cols {
+			if c.ObjectID != "org1:mongo:shop:orders" {
+				t.Fatalf("got ObjectID %q, want org1:mongo:shop:orders", c.ObjectID)
+			}
+		}
+	}
+}
+
+func TestBSONMasker_ObjectIDEmptyWhenUnresolved(t *testing.T) {
+	cm := &colCapturingMasker{}
+	bm := &bsonMasker{ctx: context.Background(), masker: cm, tracker: newRequestTracker(), orgID: "org1"}
+	if _, err := transformMessage(bm, findReply()); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	for _, cols := range cm.calls {
+		for _, c := range cols {
+			if c.ObjectID != "" {
+				t.Fatalf("got ObjectID %q, want empty (no matching tracked request)", c.ObjectID)
+			}
+		}
+	}
+}
+
+func TestBSONMasker_NestedPathResolved(t *testing.T) {
+	nested := bdoc(estring("email", "jane@doe.com"))
+	doc0 := bdoc(enested(bsonDoc, "profile", nested))
+	batch := bdoc(enested(bsonDoc, "0", doc0))
+	cursor := bdoc(enested(bsonArray, "firstBatch", batch))
+	body := bdoc(enested(bsonDoc, "cursor", cursor))
+	reply := opMsgReply(body)
+
+	cm := &colCapturingMasker{}
+	bm := &bsonMasker{ctx: context.Background(), masker: cm}
+	if _, err := transformMessage(bm, reply); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	var gotPath string
+	for _, cols := range cm.calls {
+		for _, c := range cols {
+			if c.Name == "email" {
+				gotPath = c.Path
+			}
+		}
+	}
+	if gotPath != "profile.email" {
+		t.Fatalf("got Path %q, want profile.email", gotPath)
 	}
 }
 

@@ -43,6 +43,13 @@ type Engine struct {
 	// clientTLS, when non-nil, makes the proxy terminate client TLS (answer the SSLRequest with 'S'
 	// and complete the handshake) instead of declining it. nil = decline SSL ('N'), as before.
 	clientTLS *tls.Config
+	// orgID scopes mask.Column.ObjectID for path-/table-aware masking labels (see
+	// internal/pathlabel), mirroring mysql.Engine.orgID/WithOrgID. Empty disables that scoping
+	// without otherwise affecting masking.
+	orgID string
+	// catalog resolves tableOIDs to (schema, table) names via a dedicated agent-owned connection
+	// (see catalog.go) — nil leaves ObjectID unresolved exactly as before this feature existed.
+	catalog *CatalogResolver
 }
 
 // New returns a Postgres engine that declines client SSL (plaintext client link).
@@ -51,6 +58,23 @@ func New() *Engine { return &Engine{} }
 // NewWithClientTLS returns a Postgres engine that terminates client TLS using cfg, so the startup
 // handshake (and the injected-credential session token) is encrypted on the client link.
 func NewWithClientTLS(cfg *tls.Config) *Engine { return &Engine{clientTLS: cfg} }
+
+// WithOrgID returns a copy of the engine that scopes mask.Column.ObjectID to orgID for path-/
+// table-aware masking labels (see internal/pathlabel). Call with "" to leave scoping disabled.
+func (e *Engine) WithOrgID(orgID string) *Engine {
+	c := *e
+	c.orgID = orgID
+	return &c
+}
+
+// WithCatalogResolver returns a copy of the engine that resolves tableOID -> (schema, table)
+// identity via resolver for every RowDescription, enabling PathOverlay for this connection. nil
+// (the default) leaves ObjectID unresolved — the safe no-op this package has always had.
+func (e *Engine) WithCatalogResolver(resolver *CatalogResolver) *Engine {
+	c := *e
+	c.catalog = resolver
+	return &c
+}
 
 // Name implements wire.Engine.
 func (*Engine) Name() string { return "postgres" }
@@ -67,6 +91,13 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	if err != nil {
 		return err
 	}
+	// Read-only: peeks the database name out of the StartupMessage without consuming any bytes from
+	// cr, so the client->server verbatim-forwarding goroutine below still sees and relays every byte
+	// unchanged. Needed because pg_class/pg_namespace are scoped per-database, so the catalog
+	// resolver (when configured) must know which database this session is using. A peek failure
+	// (unparseable/oversized StartupMessage) just leaves database == "", which resolveObjectID below
+	// already treats as "no label available" — never an error.
+	database := peekStartupDatabase(cr)
 
 	errc := make(chan error, 2)
 	// client -> server: forward verbatim (the StartupMessage and everything after are buffered in
@@ -77,7 +108,7 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	}()
 	// server -> client: parse + mask DataRows.
 	go func() {
-		errc <- pipeBackend(ctx, upstream, client, masker, recorder)
+		errc <- pipeBackend(ctx, upstream, client, masker, recorder, e.objectIDFor(database))
 	}()
 
 	err = <-errc
@@ -88,6 +119,57 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 		return nil
 	}
 	return err
+}
+
+// objectIDFor returns a function that resolves mask.Column.ObjectID for a tableOID within
+// database, or nil when this engine has no orgID/catalog resolver configured — pipeBackend/
+// pipeBackendReader treat a nil resolver the same as an unresolved lookup (empty ObjectID).
+func (e *Engine) objectIDFor(database string) objectIDResolver {
+	if e.orgID == "" || e.catalog == nil || database == "" {
+		return nil
+	}
+	return func(ctx context.Context, tableOID uint32) string {
+		schema, table, ok := e.catalog.Resolve(ctx, database, tableOID)
+		if !ok {
+			return ""
+		}
+		return e.orgID + ":postgres:" + schema + ":" + table
+	}
+}
+
+// peekStartupDatabase best-effort extracts the "database" startup parameter from the StartupMessage
+// cr is positioned at, using Peek so no bytes are consumed (cr must still yield the identical bytes
+// to the verbatim client->server forwarding goroutine). Returns "" on any parse failure, a
+// CancelRequest/SSLRequest/GSSENCRequest (negotiateStartup already consumes those before returning
+// cr, so this only ever sees a real StartupMessage — but a wrong-version or oversized one still
+// falls through to "" rather than erroring), or when "database" is absent (libpq's own default:
+// the requested "user" value).
+func peekStartupDatabase(cr *bufio.Reader) string {
+	hdr, err := cr.Peek(8)
+	if err != nil {
+		return ""
+	}
+	length := binary.BigEndian.Uint32(hdr[0:4])
+	version := binary.BigEndian.Uint32(hdr[4:8])
+	if version != startupProtocolV3 || length < 8 || length > sniffStartupCap {
+		return ""
+	}
+	full, err := cr.Peek(int(length))
+	if err != nil {
+		return ""
+	}
+	body := full[8:]
+	parts := strings.Split(string(body), "\x00")
+	var user string
+	for i := 0; i+1 < len(parts); i += 2 {
+		switch parts[i] {
+		case "database":
+			return parts[i+1]
+		case "user":
+			user = parts[i+1]
+		}
+	}
+	return user
 }
 
 // ProxyInject implements wire.InjectingEngine: credential handoff (design phase 3). Rather than
@@ -134,6 +216,14 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 		return err
 	}
 
+	// The upstream credential's own Database (when set) is what the connection actually ends up
+	// using — see authenticateUpstream's db-selection precedence — so prefer that over the client's
+	// requested startup["database"] for catalog-lookup scoping.
+	database := cred.Database
+	if database == "" {
+		database = startup["database"]
+	}
+
 	errc := make(chan error, 2)
 	// client -> upstream: forward queries verbatim (startup + auth already consumed from cr).
 	go func() {
@@ -142,7 +232,7 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 	}()
 	// upstream -> client: parse + mask DataRows, reusing the reader that buffered the post-auth tail.
 	go func() {
-		errc <- pipeBackendReader(ctx, ur, client, masker, recorder)
+		errc <- pipeBackendReader(ctx, ur, client, masker, recorder, e.objectIDFor(database))
 	}()
 
 	err = <-errc
@@ -210,14 +300,19 @@ func negotiateStartup(client net.Conn, clientTLS *tls.Config) (net.Conn, *bufio.
 	}
 }
 
+// objectIDResolver resolves mask.Column.ObjectID for a RowDescription column's tableOID — see
+// Engine.objectIDFor. nil means "not configured," which parseRowDescription treats identically to
+// tableOID == 0 (no backing table): ObjectID stays "".
+type objectIDResolver func(ctx context.Context, tableOID uint32) string
+
 // pipeBackend reads typed backend messages from server, masks DataRows, and writes to client.
-func pipeBackend(ctx context.Context, server io.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder) error {
-	return pipeBackendReader(ctx, bufio.NewReaderSize(server, 1<<16), client, masker, recorder)
+func pipeBackend(ctx context.Context, server io.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder, resolveObjectID objectIDResolver) error {
+	return pipeBackendReader(ctx, bufio.NewReaderSize(server, 1<<16), client, masker, recorder, resolveObjectID)
 }
 
 // pipeBackendReader is pipeBackend over an already-buffered reader. The injection path uses it so
 // the post-auth bytes the auth handshake left buffered in br are not lost.
-func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder) error {
+func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder, resolveObjectID objectIDResolver) error {
 	bw := bufio.NewWriterSize(client, 1<<16)
 	var cols []mask.Column
 	header := make([]byte, 5)
@@ -239,7 +334,7 @@ func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, 
 
 		switch typ {
 		case 'T': // RowDescription
-			cols = parseRowDescription(payload)
+			cols = parseRowDescription(ctx, payload, resolveObjectID)
 		case 'D': // DataRow
 			masked, values, err := maskDataRow(ctx, payload, cols, masker)
 			if err != nil {
@@ -313,9 +408,11 @@ var nonFreeTextTypeOIDs = map[uint32]bool{
 	3802: true, // jsonb
 }
 
-// parseRowDescription extracts column names, text/binary format, and free-text eligibility from a
-// 'T' message payload.
-func parseRowDescription(p []byte) []mask.Column {
+// parseRowDescription extracts column names, text/binary format, free-text eligibility, and — when
+// resolveObjectID is non-nil — path-scoped-label identity (see Engine.objectIDFor) from a 'T'
+// message payload. tableOID == 0 (no backing table, e.g. a computed/derived column) always skips
+// resolution, the same way mysql's state.objectID treats an empty org_table.
+func parseRowDescription(ctx context.Context, p []byte, resolveObjectID objectIDResolver) []mask.Column {
 	if len(p) < 2 {
 		return nil
 	}
@@ -333,11 +430,18 @@ func parseRowDescription(p []byte) []mask.Column {
 		if off+18 > len(p) {
 			break
 		}
+		tableOID := binary.BigEndian.Uint32(p[off : off+4])
 		typeOID := binary.BigEndian.Uint32(p[off+6 : off+10])
 		formatCode := binary.BigEndian.Uint16(p[off+16 : off+18])
 		off += 18
+		var objID string
+		if resolveObjectID != nil && tableOID != 0 {
+			objID = resolveObjectID(ctx, tableOID)
+		}
 		cols = append(cols, mask.Column{
 			Name:     name,
+			Path:     name,
+			ObjectID: objID,
 			Text:     formatCode == 0,
 			FreeText: !nonFreeTextTypeOIDs[typeOID],
 		})

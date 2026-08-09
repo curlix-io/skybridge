@@ -47,9 +47,38 @@ func TestEnforceReadOnlyMongoBlocksWrites(t *testing.T) {
 		"db.users.drop()",
 		"db.users.createIndex({})",
 		"db.createCollection('x')",
+		`db.orders.aggregate([{"$merge":{"into":"target"}}])`,
+		`db.orders.aggregate([{"$out":"target"}])`,
 	} {
 		if err := enforceReadOnlyMongo(s); err == nil {
 			t.Errorf("expected %q to be blocked", s)
+		}
+	}
+}
+
+// TestEnforceReadOnlySQLBlocksCommentAndCTEBypass is a regression test: isWriteSQL used to check
+// only whether the trimmed statement started with a write keyword, so a leading comment or a
+// data-modifying CTE slipped through untouched.
+func TestEnforceReadOnlySQLBlocksCommentAndCTEBypass(t *testing.T) {
+	for _, q := range []string{
+		"-- x\nDELETE FROM users",
+		"/* x */ DELETE FROM users",
+		"WITH d AS (DELETE FROM users RETURNING id) SELECT * FROM d",
+		"WITH d AS (UPDATE users SET x=1 RETURNING id) SELECT * FROM d",
+	} {
+		if err := enforceReadOnlySQL(q); err == nil {
+			t.Errorf("expected %q to be blocked", q)
+		}
+	}
+}
+
+func TestEnforceReadOnlySQLAllowsLiteralsContainingKeywords(t *testing.T) {
+	for _, q := range []string{
+		"SELECT * FROM tickets WHERE note = 'please delete this ticket'",
+		"-- update the cache before reading\nSELECT 1",
+	} {
+		if err := enforceReadOnlySQL(q); err != nil {
+			t.Errorf("expected %q to be allowed, got %v", q, err)
 		}
 	}
 }

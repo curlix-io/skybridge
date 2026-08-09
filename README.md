@@ -175,24 +175,30 @@ token` map (`SKYBRIDGE_PII_OVERLAY`, or fetched dynamically from the control pla
 [Dynamic PII overlay](#dynamic-pii-overlay-fetched-from-your-control-plane)). No path awareness: `total`
 under `order` and `total` under `user` share one rule.
 
-### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`) — groundwork, not yet in the live chain
+### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`)
 
-`internal/pathlabel` and `mask.PathOverlay`
-(`internal/mask/pathoverlay.go`) exist in this repo but are **not yet wired into the two layers
-above** — `buildMaskerWithOverlay` in `internal/agent/agent.go` doesn't include a `PathOverlay` in
-its chain, since doing so needs a real, populated `label.Store` to be anything but a permanent miss
-(an empty store is dead weight, and it would also break the "nothing configured → transparent
-passthrough" guarantee other code relies on).
+`mask.PathOverlay` (`internal/mask/pathoverlay.go`) is wired into the live chain in
+`buildMaskerWithOverlay` (`internal/agent/agent.go`) whenever `SKYBRIDGE_PATH_LABEL_URL` is set,
+backed by `internal/pathlabel/remotestore.Store` — a control-plane-fetched `label.Store` (pull
+confirmed labels, push detector-proposed ones), not the in-memory reference implementation. It
+looks up a label keyed on `(ObjectID, FieldPath)` — something a bare column-name rule can never
+express, e.g. distinguishing `order.total` from `user.total`.
 
-What *is* live today: `mask.Column` carries `ObjectID`/`Path` fields, and `internal/edge/dbquery`'s
-one-shot exec path (`internal/edge/dbquery/mask.go`) populates them for every query — it resolves
-per-query table/collection identity (`"{org}:{driver}:{database}:{table}"`) and walks Mongo
-documents *nested* rather than flattened first (`internal/pathlabel/docpath`), so a `profile.contact.email`
-leaf is addressable independently of a top-level `email` column. The MySQL wire-proxy engine also
-parses real per-column table identity off the wire (schema + `org_table` from the column-definition
-packet). This is groundwork for a future `PathOverlay` layer that can distinguish `order.total` from
-`user.total` — something a bare key-name rule can never express — but until a backing store exists,
-`Column.ObjectID`/`Path` are populated and otherwise unused by the two layers above.
+Its effectiveness depends on the wire engine resolving real per-row table/collection identity:
+`internal/edge/dbquery`'s one-shot exec path (`internal/edge/dbquery/mask.go`) resolves it for
+every query regardless of database — `"{org}:{driver}:{database}:{table}"`, with Mongo documents
+walked *nested* rather than flattened first (`internal/pathlabel/docpath`), so a
+`profile.contact.email` leaf is addressable independently of a top-level `email` column. All three
+wire-proxy engines resolve it too: MySQL parses real per-column table identity off the wire (schema
++ `org_table` from the column-definition packet); Mongo (`internal/wire/mongo`) correlates each
+`find`/`aggregate`/`getMore` request's collection with its reply via the wire protocol's
+`requestID`/`responseTo` fields, including nested document paths; and Postgres
+(`internal/wire/postgres`) — which only has a numeric table OID on the wire, never a name — resolves
+it via a dedicated `pg_class`/`pg_namespace` lookup connection the agent opens for itself, configured
+with `SKYBRIDGE_POSTGRES_CATALOG_DSN` (see [Postgres table-identity resolution](./REDACTION.md#postgres-table-identity-resolution)
+for why this one needs its own credential rather than reusing the client's). Unconfigured, Postgres
+connections pass an empty `ObjectID`, which `PathOverlay` treats as "no label available" and falls
+through safely, same as if it weren't configured at all.
 
 **Structured vs. unstructured, in one sentence:** layer 1 (`Remote`) is what actually gives you
 unstructured-text coverage (it doesn't care what the field is called or where it sits in a
@@ -232,8 +238,9 @@ payload: '{"name":"Jane Doe","contact":"[redacted]"}'
 ```
 
 **A nested Mongo/BSON document (path-scoped labels — lets `order.total` and `user.total` carry
-independent rules despite sharing a field name; see `PathOverlay` above, currently wired into the
-`dbquery` one-shot exec path, not yet the live Postgres/Mongo wire-proxy):**
+independent rules despite sharing a field name; see `PathOverlay` above — live for the `dbquery`
+one-shot exec path and all three wire proxies today, Postgres's requiring
+`SKYBRIDGE_POSTGRES_CATALOG_DSN`):**
 
 ```
 { "profile": { "email": "jane@doe.com", "name": "Jane" }, "order": { "total": 42 } }
@@ -273,6 +280,7 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_UPSTREAM_TLS` | `disable` | agent→database TLS (Postgres / MySQL / Mongo): `disable` \| `prefer` \| `require` \| `verify-ca` \| `verify-full` |
 | `SKYBRIDGE_UPSTREAM_TLS_CA_FILE` / `_PEM` | system roots | trust roots used by `verify-ca` / `verify-full` (e.g. the RDS CA bundle) |
 | `SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME` | dial host | override the verified hostname / SNI sent to the upstream |
+| `SKYBRIDGE_POSTGRES_CATALOG_DSN` | — | dedicated, read-only Postgres credential (`postgres://user:pass@host:port`) the agent uses on a separate connection it owns for `pg_class`/`pg_namespace` lookups, resolving `PathOverlay`'s table identity for Postgres wire-proxy connections (see [Path-scoped labels](./REDACTION.md#path-scoped-labels-mask-pathoverlay)); unset leaves Postgres's `ObjectID` unresolved, same as before this existed |
 
 Switch databases by changing `SKYBRIDGE_DB_TYPE`; everything else is identical.
 

@@ -31,7 +31,8 @@ var valueFlags = map[string]bool{
 var readVerbPrefixes = []string{"describe", "list", "get", "lookup", "search", "batch-get", "head", "scan", "query"}
 
 var sensitiveOperations = map[string]bool{
-	"get-secret-value": true, "get-login-password": true, "get-authorization-token": true,
+	"get-secret-value": true, "batch-get-secret-value": true,
+	"get-login-password": true, "get-authorization-token": true,
 	"get-password-data": true, "get-session-token": true, "get-federation-token": true,
 }
 

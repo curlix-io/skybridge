@@ -76,7 +76,7 @@ func proxyConn(ctx context.Context, engine wire.Engine, client, upstream net.Con
 // EngineFor selects a wire engine by database type (no client-TLS termination). The agent uses the
 // TLS-aware engineFactory at runtime; this stays for callers/tests that want the plaintext default.
 func EngineFor(dbType string) (wire.Engine, error) {
-	return engineFactory(nil, "")(dbType)
+	return engineFactory(nil, "", nil)(dbType)
 }
 
 // BuildMasker assembles the masking chain (remote masker + your column overlay) from config. It
@@ -155,10 +155,11 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 	var store *remotestore.Store
 	if strings.TrimSpace(cfg.PathLabelURL) != "" {
 		store = remotestore.New(cfg, nil)
-		// Ordered remote (Presidio) -> PathOverlay -> static Overlay: confirmed path-scoped labels
-		// take priority over the flat column overlay, which remains a backstop for paths with no
-		// label yet. Only added when a store is actually configured, so an unconfigured deployment
-		// still gets mask.Noop{} below rather than a permanently-missing PathOverlay in the chain.
+		// Appended last, after remote (Presidio) and the static overlay: PathOverlay's own miss
+		// (no confirmed label for this path) always falls through to nothing further, so its
+		// position relative to the static overlay doesn't change either layer's outcome — it only
+		// matters that a store is actually configured before adding it, so an unconfigured
+		// deployment still gets mask.Noop{} below rather than a permanently-missing PathOverlay.
 		maskers = append(maskers, mask.NewPathOverlayWithMetrics(store, metricsRecorder, connectionKey))
 	}
 	if len(maskers) == 0 {
@@ -240,7 +241,11 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 	if err != nil {
 		return err
 	}
-	engine, err := engineFactory(clientTLS, cfg.OrgID)(cfg.DBType)
+	pgCatalog, err := buildPostgresCatalogResolver(cfg)
+	if err != nil {
+		return err
+	}
+	engine, err := engineFactory(clientTLS, cfg.OrgID, pgCatalog)(cfg.DBType)
 	if err != nil {
 		return err
 	}
@@ -265,6 +270,7 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 	logClientTLSMode(cfg, clientTLS, engine, logger)
 	logCredentialMode(cfg, engine, resolver, logger)
 	logUpstreamTLSMode(upTLS, []string{cfg.DBType}, logger)
+	logPostgresCatalogMode(cfg, pgCatalog, logger)
 
 	ln, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
@@ -390,10 +396,15 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 		if err != nil {
 			return err
 		}
-		deps.Engine = engineFactory(clientTLS, cfg.OrgID)
+		pgCatalog, err := buildPostgresCatalogResolver(cfg)
+		if err != nil {
+			return err
+		}
+		deps.Engine = engineFactory(clientTLS, cfg.OrgID, pgCatalog)
 		if clientTLS != nil {
 			logger.Printf("skybridge-agent[tunnel]: client TLS termination ENABLED for Postgres targets.")
 		}
+		logPostgresCatalogMode(cfg, pgCatalog, logger)
 	}
 	if deps.UpstreamTLS == nil {
 		upTLS, err := buildUpstreamTLSPolicy(cfg)

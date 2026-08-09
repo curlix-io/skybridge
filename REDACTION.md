@@ -149,9 +149,9 @@ below for how to change that.
 
 `internal/mask/pathoverlay.go`, backed by `internal/pathlabel/label` (a `Store` interface + an
 in-memory `MemStore` reference implementation) and `internal/pathlabel/docpath` (nested-document
-path walking). **Not yet wired into the live chain** — see
+path walking). Live in the agent's chain whenever `SKYBRIDGE_PATH_LABEL_URL` is set — see
 [Path-scoped labels](#path-scoped-labels-mask-pathoverlay) below for exactly what's live today vs.
-what's groundwork.
+what's still groundwork.
 
 The problem this layer solves: a flat `column name → token` map (layer 3) can't express that
 `order.total` and `user.total` — two columns/fields that happen to share a name — should carry
@@ -195,38 +195,93 @@ opt into.
 ## Path-scoped labels (`mask.PathOverlay`)
 
 This section exists because it's the part of the pipeline most likely to confuse someone reading
-the code: `internal/pathlabel` and `mask.PathOverlay` are fully implemented and tested, but
-**`buildMaskerWithOverlay` in `internal/agent/agent.go` does not include `PathOverlay` in the live
-wire-proxy chain.** Wiring it in needs a real, populated `label.Store` to be anything but a
-permanent miss — an always-empty `MemStore` would be dead weight, and worse, it would break the
-"nothing configured → transparent passthrough" guarantee other code relies on (an empty store isn't
-"no labels," it's indistinguishable from "labels not loaded yet," so treating it as authoritative
-would be a silent correctness regression waiting to happen).
+the code: `PathOverlay` is wired into the live chain in `buildMaskerWithOverlay`
+(`internal/agent/agent.go`) whenever `SKYBRIDGE_PATH_LABEL_URL` is set, backed by
+`internal/pathlabel/remotestore.Store` (a control-plane-fetched `label.Store`, not the in-memory
+`MemStore` reference implementation — see [Configuration](./README.md#configure) for
+`SKYBRIDGE_PATH_LABEL_URL`/`_TOKEN`/`_POLL_SECONDS`/`_PUSH_SECONDS`). What's still missing is real
+per-row table/collection identity for two of the three wire engines:
 
-**What *is* live today:** `mask.Column`'s `ObjectID`/`Path` fields are populated for every query
-that goes through `internal/edge/dbquery`'s one-shot exec path (`internal/edge/dbquery/mask.go`,
-part of the [`querystudio` build tag](./CLAUDE.md) — see `maskRows`/`maskDocuments`):
-
-- `maskRows` resolves per-query table identity as `"{org}:{driver}:{database}:{table}"` and sets
-  `Path == Name` for flat SQL rows.
-- `maskDocuments` walks Mongo documents **nested**, not flattened first (via `docpath.Walk`), so a
+- **MySQL** (`internal/wire/mysql`) resolves real per-column table identity straight off the wire
+  (schema + table name from the column-definition packet) as `"{org}:mysql:{schema}:{table}"` — so
+  `PathOverlay` is fully effective for MySQL wire-proxy connections today.
+- **Mongo** (`internal/wire/mongo`) resolves real per-reply collection identity by parsing each
+  client `find`/`aggregate`/`getMore`/... command (read-only; the bytes it forwards are never
+  mutated) to learn its target database/collection, then correlating that with the matching reply
+  via the wire protocol's `requestID`/`responseTo` header fields, as `"{org}:mongo:{db}:{collection}"`
+  — so `PathOverlay` is fully effective for Mongo wire-proxy connections today, including nested
+  document paths (`profile.email`, matching `internal/pathlabel/docpath`'s convention). A command
+  the engine doesn't recognize, or a reply whose request failed to parse, simply resolves to an
+  empty `ObjectID` for that response — never an error.
+- **Postgres** (`internal/wire/postgres`) resolves real per-row table identity too, but only when
+  `SKYBRIDGE_POSTGRES_CATALOG_DSN` is configured — see
+  [Postgres table-identity resolution](#postgres-table-identity-resolution) below for why this one
+  needs an extra credential the other two engines don't. Unconfigured, it passes an empty
+  `ObjectID` exactly as before this feature existed: `PathOverlay` treats that as "no label
+  available," never as a lookup key of its own, so it's a guaranteed, safe no-op falling straight
+  through to layer 3 (`Overlay`).
+- `internal/edge/dbquery`'s one-shot exec path (`internal/edge/dbquery/mask.go`, part of the
+  [`querystudio` build tag](./CLAUDE.md)) resolves `ObjectID`/`Path` for all four supported
+  databases regardless of wire-proxy support — `maskRows` resolves per-query table identity as
+  `"{org}:{driver}:{database}:{table}"` and sets `Path == Name` for flat SQL rows; `maskDocuments`
+  walks Mongo documents **nested**, not flattened first (via `docpath.Walk`), so a
   `profile.contact.email` leaf gets its own resolved path independent of any top-level `email`
   column — see the [nested BSON example](#redaction-in-action) below.
-- The MySQL wire-proxy engine additionally parses real per-column table identity straight off the
-  wire (schema + table name from the column-definition packet), ahead of the `querystudio`-gated
-  exec path — this is groundwork for the wire-proxy chain to eventually resolve identity too.
-- The Postgres and Mongo wire-proxy engines don't yet resolve table identity from the wire protocol
-  (Postgres only has a numeric table OID on the wire, not a name; Mongo's response path doesn't
-  currently correlate back to the request's collection) — those connections pass an empty
-  `ObjectID`, which a path-aware masker must treat as "no label available," not as a lookup key of
-  its own.
 
-So today, `ObjectID`/`Path` are populated and *available* on every `dbquery` call, but nothing in
-the live chain consumes them yet. Bringing `PathOverlay` online for the wire proxy is a two-part
-project: (1) resolve real table/collection identity from the Postgres and Mongo wire protocols the
-same way MySQL already does, and (2) stand up a real backing `Store` (e.g. control-plane-fetched,
-mirroring the existing `SKYBRIDGE_PII_OVERLAY_URL` hot-swap pattern) instead of the in-memory
-reference implementation.
+So `PathOverlay` is fully online for all three wire engines today — the masker-chain wiring, the
+control-plane-backed `Store`, and per-engine table/collection identity resolution are all live. The
+only piece that's opt-in (rather than automatic like MySQL/Mongo) is Postgres's, because unlike the
+other two it needs a dedicated credential — see below.
+
+### Postgres table-identity resolution
+
+Unlike MySQL (table name is a string in the column-definition packet) and Mongo (collection name is
+a string in the client's own command document), Postgres's `RowDescription` message gives each
+column only a numeric `(tableOID, attnum)` pair — never a name
+(`internal/wire/postgres/postgres.go`'s `parseRowDescription`). Resolving `tableOID -> schema.table`
+requires a catalog lookup (`SELECT relname, relnamespace::regnamespace::text FROM pg_class WHERE
+oid = ...`) that the proxy has no other way to obtain, since it never rewrites or injects anything
+into the client's own query stream.
+
+**Why this can't reuse the client's connection.** If the agent issued that lookup on the same
+backend connection it's proxying, it would insert an extra statement into whatever the client is
+mid-way through — corrupting portal/cursor sequencing and, if the client is inside `BEGIN`,
+potentially aborting the transaction on any error (Postgres aborts the whole transaction on any
+statement failure). So `internal/wire/postgres/catalog.go`'s `CatalogResolver` opens and owns a
+**second connection**, entirely separate from every client session, purely for these lookups.
+
+**How it works.** `CatalogResolver.Resolve(ctx, database, tableOID)` is called from
+`parseRowDescription` for every column whose `tableOID != 0` (0 means no backing table — a
+computed/derived column — and always skips resolution, the same way MySQL's `objectID` treats an
+empty `org_table`). One `catalogConn` is opened lazily per database name and kept for the process
+lifetime; each resolved `(schema, table)` is cached indefinitely per `(database, tableOID)`, since
+OIDs only change across a `DROP`/`CREATE`/`VACUUM FULL` cycle. The tableOID is a `uint32` parsed
+straight off the wire — never a client-supplied string — so it's inlined directly into simple-Query
+text with no injection surface, matching the precedent set by hoop.dev's own schema-introspection
+queries (also plain string-built SQL, relying on the same "these values aren't attacker-controlled"
+property rather than the extended/parameterized protocol). Any failure — dial, auth, query error,
+connection reset — makes `Resolve` return unresolved and drops the connection so the *next* lookup
+redials, rather than surfacing an error to the client's own session: a catalog outage degrades to
+this feature's pre-existing behavior (empty `ObjectID`, fallthrough to layer 3), never disrupts a
+live query.
+
+**Peeking the database name.** `pg_class`/`pg_namespace` are scoped per-database, so the resolver
+needs to know which database the client's session is using. `Engine.Proxy` learns this by
+`Peek`-ing (never consuming) the client's StartupMessage as it passes through — the same read-only
+trick `negotiateStartup` already uses for SSL negotiation bytes — so the verbatim client->server
+forwarding goroutine still relays every byte unchanged. `ProxyInject` already parses startup params
+for credential injection, so it reuses that instead of a second peek.
+
+**Credential.** The client's own login credential is deliberately not reused here — under
+`SKYBRIDGE_INJECT_CREDENTIALS=true` it's a per-session credential minted for that one client
+(`CONTRACT.md` §3), and even without injection, tying the catalog connection's lifetime to a client
+session that can end at any time is the wrong shape for a cache meant to persist across sessions.
+Following the precedent set by [hoop.dev](https://hoop.dev) — whose "connection" resource holds one
+shared, connection-level credential rather than each end-user's own login — `SKYBRIDGE_POSTGRES_CATALOG_DSN`
+configures a single dedicated, read-only credential (`postgres://user:pass@host:port`) independent
+of the client's session and of `SKYBRIDGE_DB_*`. It only ever needs `SELECT` on `pg_catalog`.
+Unset, this feature is off entirely — `internal/agent/clienttls.go`'s `buildPostgresCatalogResolver`
+returns `nil`, and `Engine.objectIDFor` short-circuits to an always-empty `ObjectID`.
 
 ## Redaction in action
 
@@ -260,8 +315,8 @@ payload: '{"name":"Jane Doe","contact":"[redacted]"}'
 ```
 
 **A nested Mongo/BSON document (path-scoped labels — lets `order.total` and `user.total` carry
-independent rules despite sharing a field name; live in the `dbquery` one-shot exec path today, not
-yet the wire proxy — see [Path-scoped labels](#path-scoped-labels-mask-pathoverlay) above):**
+independent rules despite sharing a field name; live in both the `dbquery` one-shot exec path and
+the Mongo wire proxy today — see [Path-scoped labels](#path-scoped-labels-mask-pathoverlay) above):**
 
 ```
 { "profile": { "email": "jane@doe.com", "name": "Jane" }, "order": { "total": 42 } }

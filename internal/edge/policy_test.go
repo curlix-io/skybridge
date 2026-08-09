@@ -34,6 +34,7 @@ func TestValidateReadOnlyAWSCommandRejects(t *testing.T) {
 		"aws s3 rm s3://bucket/key",
 		"aws s3 cp a b",
 		"aws secretsmanager get-secret-value --secret-id x",
+		"aws secretsmanager batch-get-secret-value --secret-id-list x",
 		"aws sts get-session-token",
 		"aws ssm get-parameter --with-decryption --name p",
 		"aws ec2 describe-instances --profile admin",

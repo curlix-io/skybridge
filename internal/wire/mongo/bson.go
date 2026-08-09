@@ -49,6 +49,135 @@ type bsonMasker struct {
 	ctx      context.Context
 	masker   mask.Masker
 	recorder wire.Recorder
+	// tracker resolves the current reply's requestID to a database/collection learned from the
+	// matching client request, for objectID below. nil (e.g. in unit tests exercising transformMessage
+	// directly) behaves as "always unresolved" — same as a client request that failed to parse.
+	tracker *requestTracker
+	// orgID scopes curObjectID's result the same way mysql's Engine.orgID does; empty disables
+	// path-scoped-label ObjectID resolution without otherwise affecting masking.
+	orgID string
+	// curObjectID is resolved once per reply message (see transformMessage, which calls
+	// resolveObjectID before descending into the body) so cursor/batch/result, deep in the
+	// recursion, can read the shared value without threading it through every call or re-resolving
+	// (and thus re-consuming) the tracker entry per document in a batch.
+	curObjectID string
+}
+
+// resolveObjectID resolves and caches the tenant-scoped identifier mask.Column.ObjectID carries for
+// this reply, e.g. "org1:mongo:app:orders" — "" when orgID is unset or the reply's originating
+// request's collection couldn't be resolved (a path-aware Masker treats "" as "no label
+// available"). Must be called exactly once per reply message, before any nested masking, since
+// requestTracker.resolve consumes the tracked entry.
+func (m *bsonMasker) resolveObjectID(responseTo int32) {
+	if m.orgID == "" || m.tracker == nil {
+		m.curObjectID = ""
+		return
+	}
+	info, ok := m.tracker.resolve(responseTo)
+	if !ok || info.collection == "" {
+		m.curObjectID = ""
+		return
+	}
+	m.curObjectID = m.orgID + ":mongo:" + info.db + ":" + info.collection
+}
+
+// dbCommands is the set of top-level command names whose value is the target collection —
+// find/aggregate/count/distinct/insert/update/delete cover the shapes that return the result
+// batches this engine masks or that a getMore later continues. Commands not in this set (hello,
+// isMaster, ping, endSessions, ...) are intentionally left unresolved: they never carry a
+// firstBatch/nextBatch this engine descends into, so there's nothing for an ObjectID to label.
+var dbCommands = map[string]bool{
+	"find": true, "aggregate": true, "count": true, "distinct": true,
+	"insert": true, "update": true, "delete": true, "findAndModify": true,
+}
+
+// parseCommandInfo best-effort extracts the target database/collection from a client OP_MSG
+// command message, read-only (never mutates msg). Returns ok=false on anything it doesn't
+// recognize — malformed BSON, a non-command opcode, or a command outside dbCommands/getMore —
+// which callers treat identically to "collection unknown," never as an error.
+func parseCommandInfo(msg []byte) (collectionInfo, bool) {
+	if len(msg) < headerLen+4 {
+		return collectionInfo{}, false
+	}
+	flags := binary.LittleEndian.Uint32(msg[16:20])
+	end := len(msg)
+	if flags&flagChecksumPresent != 0 {
+		end -= 4
+	}
+	if end < 21 || msg[20] != 0 { // first section must be kind 0 (body document)
+		return collectionInfo{}, false
+	}
+	if end < 25 {
+		return collectionInfo{}, false
+	}
+	dl := int(binary.LittleEndian.Uint32(msg[21:25]))
+	if dl < 5 || 21+dl > end {
+		return collectionInfo{}, false
+	}
+	return parseCommandDoc(msg[21 : 21+dl])
+}
+
+// parseCommandDoc reads a command body document's top-level fields to find its collection — the
+// first key's string value when that key names a command in dbCommands (find/aggregate/...), or the
+// "collection" string field getMore carries instead (its first key, "getMore", holds a cursor id,
+// not a name) — and its "$db" string field.
+func parseCommandDoc(doc []byte) (collectionInfo, bool) {
+	if len(doc) < 5 {
+		return collectionInfo{}, false
+	}
+	total := int(binary.LittleEndian.Uint32(doc))
+	if total != len(doc) || doc[total-1] != 0x00 {
+		return collectionInfo{}, false
+	}
+	body := doc[4 : total-1]
+
+	var info collectionInfo
+	first := true
+	off := 0
+	for off < len(body) {
+		typ := body[off]
+		off++
+		nend := bytes.IndexByte(body[off:], 0x00)
+		if nend < 0 {
+			return collectionInfo{}, false
+		}
+		name := string(body[off : off+nend])
+		off += nend + 1
+
+		vlen, err := valueLen(typ, body[off:])
+		if err != nil || off+vlen > len(body) {
+			return collectionInfo{}, false
+		}
+		value := body[off : off+vlen]
+		off += vlen
+
+		switch {
+		case first && typ == bsonString && dbCommands[name]:
+			info.collection = readBSONString(value)
+		case typ == bsonString && name == "collection":
+			info.collection = readBSONString(value)
+		case typ == bsonString && name == "$db":
+			info.db = readBSONString(value)
+		}
+		first = false
+	}
+	if info.collection == "" || info.db == "" {
+		return collectionInfo{}, false
+	}
+	return info, true
+}
+
+// readBSONString reads a BSON string value (int32 length + bytes + NUL), returning "" on any
+// malformed input rather than an error — callers already treat "" as "unresolved."
+func readBSONString(value []byte) string {
+	if len(value) < 5 {
+		return ""
+	}
+	l := int(binary.LittleEndian.Uint32(value))
+	if l < 1 || 4+l > len(value) {
+		return ""
+	}
+	return string(value[4 : 4+l-1])
 }
 
 type elemFn func(typ byte, name string, value []byte) ([]byte, error)
@@ -189,7 +318,7 @@ func (m *bsonMasker) batch(arr []byte) ([]byte, error) {
 		if typ != bsonDoc {
 			return value, nil
 		}
-		masked, err := m.result(value)
+		masked, err := m.result(value, "")
 		if err != nil {
 			return value, err
 		}
@@ -235,25 +364,35 @@ func renderTopLevelDoc(doc []byte) string {
 	return b.String()
 }
 
-// result masks every string field in a result document, recursing into nested docs/arrays.
-func (m *bsonMasker) result(doc []byte) ([]byte, error) {
+// result masks every string field in a result document, recursing into nested docs/arrays. path is
+// the dotted, index-erased resolved path to doc itself ("" at the top level, then e.g. "profile" for
+// a nested doc under it), matching internal/pathlabel/docpath's path convention so PathOverlay's
+// (ObjectID, Path) lookups behave the same for the wire proxy as for the dbquery exec path.
+func (m *bsonMasker) result(doc []byte, path string) ([]byte, error) {
 	return rewriteDoc(doc, func(typ byte, name string, value []byte) ([]byte, error) {
 		switch typ {
 		case bsonString:
-			return m.maskString(name, value)
+			return m.maskString(name, joinPath(path, name), value)
 		case bsonDoc, bsonArray:
-			return m.result(value)
+			return m.result(value, joinPath(path, name))
 		default:
 			return value, nil
 		}
 	})
 }
 
+func joinPath(path, key string) string {
+	if path == "" {
+		return key
+	}
+	return path + "." + key
+}
+
 // maskString runs a single BSON string value (int32 length + bytes + NUL) through the masker. A
 // masker failure (e.g. mask.ErrMaskerUnavailable in strict mode) propagates as an error so the
 // caller aborts the connection instead of forwarding the raw value; a malformed BSON length or a
 // clean "nothing to mask" result is not an error.
-func (m *bsonMasker) maskString(name string, value []byte) ([]byte, error) {
+func (m *bsonMasker) maskString(name, path string, value []byte) ([]byte, error) {
 	if len(value) < 5 {
 		return value, nil
 	}
@@ -262,7 +401,7 @@ func (m *bsonMasker) maskString(name string, value []byte) ([]byte, error) {
 		return value, nil
 	}
 	s := value[4 : 4+l-1] // exclude trailing NUL
-	cols := []mask.Column{{Name: name, Text: true, FreeText: true}}
+	cols := []mask.Column{{Name: name, Path: path, ObjectID: m.curObjectID, Text: true, FreeText: true}}
 	out, err := m.masker.MaskRow(m.ctx, cols, [][]byte{append([]byte(nil), s...)})
 	if err != nil {
 		return value, err
