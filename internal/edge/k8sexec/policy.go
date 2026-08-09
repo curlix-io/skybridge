@@ -1,11 +1,14 @@
-// Package k8sexec runs governed kubectl commands at the customer edge. Defense-in-depth mirror of
-// whatever control-plane policy dispatches these commands — the platform validates first, but the
-// edge never trusts a dispatched command blindly, same posture as awsexec's read-only AWS CLI check.
+// Package k8sexec runs governed, read-only kubectl commands at the customer edge. Defense-in-depth
+// mirror of whatever control-plane policy dispatches these commands — the platform validates first,
+// but the edge never trusts a dispatched command blindly, same posture as awsexec's read-only AWS
+// CLI check.
 //
-// Scope: structured API calls only (get/describe/logs/apply/delete/patch/...). Interactive verbs
-// (exec/attach/cp/port-forward) are always rejected — see
-// docs/design/kubernetes-access-broker.md §2 for why brokering those is a separate, harder problem
-// deferred to a later phase.
+// Scope: read-only structured API calls only (get/describe/logs/top/explain/version/api-resources/
+// api-versions) — enforced via an allowlist of verbs, not a denylist of dangerous ones, since a
+// denylist reliably misses verbs as the kubectl surface grows. Interactive verbs
+// (exec/attach/cp/port-forward) and all mutating verbs (apply/patch/create/delete/scale/label/
+// cordon/drain/...) are rejected — see docs/design/kubernetes-access-broker.md §2 for why brokering
+// interactive sessions is a separate, harder problem deferred to a later phase.
 package k8sexec
 
 import (
@@ -19,17 +22,13 @@ var interactiveVerbs = map[string]bool{
 	"exec": true, "attach": true, "cp": true, "port-forward": true,
 }
 
+// readOnlyVerbs is the allowlist of verbs permitted through: this package brokers read-only cluster
+// access only, so any verb not on this list — apply, patch, create, delete, scale, label, cordon,
+// drain, and anything the kubectl surface adds later — is rejected. An allowlist is used rather than
+// a denylist of dangerous verbs because a denylist reliably misses verbs as that surface grows.
 var readOnlyVerbs = map[string]bool{
 	"get": true, "describe": true, "logs": true, "top": true, "explain": true,
 	"version": true, "api-resources": true, "api-versions": true,
-}
-
-// Destructive cluster-wide deletes blocked outright — mirrors the k8s-block-destructive guardrail
-// pattern (kubectl delete ns/namespace/all/crd/nodes) seeded platform-side.
-var blockedDeleteTargets = map[string]bool{
-	"ns": true, "namespace": true, "namespaces": true, "all": true,
-	"crd": true, "customresourcedefinition": true, "customresourcedefinitions": true,
-	"node": true, "nodes": true,
 }
 
 // Substrings that would chain commands, redirect I/O, or perform substitution — same defense as
@@ -79,6 +78,9 @@ func ValidateKubectlCommand(command string) (bool, string, ParsedCommand) {
 	if interactiveVerbs[verb] {
 		return false, "interactive verb not brokered: " + verb, ParsedCommand{}
 	}
+	if !readOnlyVerbs[verb] {
+		return false, "verb not on read-only allowlist: " + verb, ParsedCommand{}
+	}
 
 	resource := ""
 	for _, tok := range tokens[2:] {
@@ -89,11 +91,7 @@ func ValidateKubectlCommand(command string) (bool, string, ParsedCommand) {
 		break
 	}
 
-	if verb == "delete" && blockedDeleteTargets[resource] {
-		return false, "cluster-wide delete not allowed: " + resource, ParsedCommand{}
-	}
-
-	return true, "ok", ParsedCommand{Verb: verb, Resource: resource, ReadOnly: readOnlyVerbs[verb]}
+	return true, "ok", ParsedCommand{Verb: verb, Resource: resource, ReadOnly: true}
 }
 
 // shlexSplit is a minimal POSIX-style tokenizer: splits on whitespace honoring single and double
