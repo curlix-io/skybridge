@@ -107,12 +107,19 @@ internal/tunnel          egress multiplexed transport (agent <-> gateway)
 internal/gateway         agent registry + relay + optional control-plane session recording
 internal/edge            edge tool dispatch: envelope, policy, executor
 internal/edge/awsexec    read-only-allowlisted AWS CLI / CloudWatch tool implementations
-internal/edge/k8sexec    policy-gated kubectl tool implementation — blocks interactive verbs
-                         (exec/attach/cp/port-forward) and cluster-wide deletes; scoped mutations
-                         (apply/patch/single-resource delete) are allowed, same posture as the
-                         Curlix control plane's own kubectl policy this mirrors as defense-in-depth
-internal/edge/dbexec     [querystudio tag] db_query_{postgres,mysql,mongo,snowflake} one-shot exec tools
-internal/edge/dbquery    [querystudio tag] shared SQL/Mongo execute + PII masking for dbexec/studiotransport
+internal/edge/k8sexec    policy-gated kubectl tool implementation — allowlists read-only verbs only
+                         (get/describe/logs/top/explain/version/api-resources/api-versions); every
+                         other verb, including apply/patch/create/delete/scale/label/cordon/drain
+                         and the always-blocked interactive verbs (exec/attach/cp/port-forward), is
+                         rejected before exec.CommandContext runs it
+internal/edge/dbexec     [querystudio tag] db_query_{postgres,mysql,mongo,snowflake} one-shot
+                         read-only exec tools (EnforceReadOnly:true, never overridden) plus
+                         db_execute_write, a distinct write-capable tool gated by Curlix's own
+                         allow/deny decision made before dispatch, not by any local keyword/statement
+                         classification here — see dbquery.Options.Write's doc comment
+internal/edge/dbquery    [querystudio tag] shared SQL/Mongo execute + PII masking for dbexec/studiotransport;
+                         Options.Write routes to a separate ExecContext/CRUD write path (write.go),
+                         mutually exclusive with EnforceReadOnly
 internal/edge/transport  egress-only gRPC call-home client to the Connector Gateway
 internal/edge/studiotransport  [querystudio tag] second egress-only gRPC dial to a Query Studio gateway
 internal/edgeiam         edge enrollment / IAM helpers
@@ -193,7 +200,13 @@ default build/test/vet so the module has no required dependency on it:
 - `internal/edge/studiotransport/` — second outbound dial to a Studio Gateway (`:7200`) for Query
   Studio dispatch.
 - `internal/edge/dbexec/` + `internal/edge/dbquery/` — one-shot `db_query_{postgres,mysql,mongo,snowflake}`
-  execute path used by `POST /studio/exec`, sharing the PII masking pipeline with `studiotransport`.
+  read-only execute path used by `POST /studio/exec`, sharing the PII masking pipeline with
+  `studiotransport`, plus `db_execute_write` — a separate write-capable tool (Postgres/MySQL via
+  `ExecContext`, Mongo via direct insert/update/delete/replace/aggregate calls) that runs a
+  dispatched statement exactly as given. Whether a given statement should have been dispatched at
+  all is Curlix's own allow/deny decision made before dispatch, not something the edge re-derives by
+  inspecting the statement — the read-only `db_query_*` tools' `EnforceReadOnly: true` is untouched
+  and permanent regardless of this tool's existence.
 - `internal/genpb/curlix/studiogateway/v1/` — generated gRPC stubs for the Studio Gateway protocol.
 - `cmd/skybridge-edge/main_querystudio.go` (built with the tag) vs. `main_noquerystudio.go` (the
   default, no-op stub) implement `registerQueryStudioExtras`, the one hook `main.go` calls into.

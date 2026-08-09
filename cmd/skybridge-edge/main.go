@@ -12,6 +12,7 @@ import (
 	"github.com/curlix-io/skybridge/internal/edge"
 	"github.com/curlix-io/skybridge/internal/edge/awsexec"
 	"github.com/curlix-io/skybridge/internal/edge/k8sexec"
+	"github.com/curlix-io/skybridge/internal/edge/k8stoken"
 	"github.com/curlix-io/skybridge/internal/edge/transport"
 )
 
@@ -62,6 +63,14 @@ func main() {
 	// once that story is scoped).
 	if cfg.K8sKubeconfig != "" || cfg.K8sContext != "" {
 		k8sexec.Register(reg, k8sexec.Options{
+			Kubeconfig: cfg.K8sKubeconfig,
+			Context:    cfg.K8sContext,
+			KubectlBin: cfg.K8sBinary,
+		})
+		// Phase 2 (docs/design/kubernetes-access-broker.md §4/§7): per-session TokenRequest
+		// minting, same opt-in gate as k8sexec above — reuses the same kubeconfig/context/binary,
+		// no new config surface.
+		k8stoken.Register(reg, k8stoken.Options{
 			Kubeconfig: cfg.K8sKubeconfig,
 			Context:    cfg.K8sContext,
 			KubectlBin: cfg.K8sBinary,
