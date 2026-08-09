@@ -19,8 +19,11 @@ func enforceReadOnlySQL(q string) error {
 // isWriteSQL runs this against the statement with comments and string literals stripped, and scans
 // the whole statement rather than only its prefix — a leading `-- comment` or a data-modifying CTE
 // (`WITH d AS (DELETE FROM t RETURNING id) SELECT * FROM d`) would otherwise start with a harmless
-// keyword and slip past a prefix-only check.
-var writeKeywordRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|MERGE)\b`)
+// keyword and slip past a prefix-only check. INTO catches `SELECT ... INTO new_table` (Postgres) and
+// `SELECT ... INTO OUTFILE '/path'` (MySQL), both of which write without any DML keyword present.
+// CALL/EXEC/EXECUTE catch stored-procedure invocation, whose body can perform arbitrary writes that
+// this lexical check can never see — blocking the call itself is the only lever available here.
+var writeKeywordRe = regexp.MustCompile(`(?i)\b(INSERT|UPDATE|DELETE|DROP|ALTER|CREATE|TRUNCATE|GRANT|REVOKE|MERGE|INTO|CALL|EXEC|EXECUTE)\b`)
 
 func isWriteSQL(q string) bool {
 	return writeKeywordRe.MatchString(stripSQLNoise(q))

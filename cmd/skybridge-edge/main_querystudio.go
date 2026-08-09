@@ -26,6 +26,11 @@ func registerQueryStudioExtras(ctx context.Context, cfg config.Edge, reg *edge.R
 		Masker:           masker,
 		OrgID:            cfg.TenantID,
 	})
+	dbexec.RegisterMigration(reg, dbexec.MigrationOptions{
+		Targets:          execTargets,
+		FallbackUser:     cfg.StudioDBUser,
+		FallbackPassword: cfg.StudioDBPassword,
+	})
 
 	if !cfg.StudioEnabled() {
 		return

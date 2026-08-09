@@ -22,6 +22,15 @@ type Options struct {
 	MaxRows          int
 	Timeout          time.Duration
 	EnforceReadOnly  bool
+	// Write, when true, runs statement as a write instead of a read: SQL goes through ExecContext
+	// (rows-affected, not a result set) and Mongo statements are parsed as a CRUD/write operation
+	// rather than find/aggregate. Mutually exclusive with EnforceReadOnly — Execute rejects a caller
+	// that sets both, since which one wins would otherwise depend on read order in Execute's checks.
+	// The statement itself is never inspected or classified here: this package draws the read/write
+	// line by which entry point the caller uses, not by keyword-matching the statement text — that
+	// classification is the control plane's job (see internal/edge/dbexec's db_execute_write, gated
+	// by Curlix's own allow/deny decision before dispatch, not by a local keyword list here).
+	Write bool
 	// OrgID scopes the mask.Column.ObjectID built for each query (see objectID), so a path-scoped
 	// label store never leaks labels across tenants (pathlabel design doc §3.2.1). Empty disables
 	// path-scoped/table-scoped masking for the query (mask.Column.ObjectID is left empty, which
@@ -71,6 +80,9 @@ type Result struct {
 // Execute runs a statement against a resolved target.
 func Execute(ctx context.Context, target Target, dbType, database, statement string, opts Options) (map[string]any, error) {
 	opts = opts.withDefaults()
+	if opts.EnforceReadOnly && opts.Write {
+		return nil, fmt.Errorf("dbquery: EnforceReadOnly and Write are mutually exclusive")
+	}
 	if opts.EnforceReadOnly {
 		if normalizeDBType(dbType) == "mongo" {
 			if err := enforceReadOnlyMongo(statement); err != nil {
@@ -86,6 +98,19 @@ func Execute(ctx context.Context, target Target, dbType, database, statement str
 	masker := opts.Masker
 	if !opts.ApplyPII {
 		masker = nil
+	}
+
+	if opts.Write {
+		switch normalizeDBType(dbType) {
+		case "postgres":
+			return executeWriteSQL(runCtx, target, "postgres", database, statement, opts)
+		case "mysql":
+			return executeWriteSQL(runCtx, target, "mysql", database, statement, opts)
+		case "mongo":
+			return executeWriteMongo(runCtx, target, database, statement, opts)
+		default:
+			return nil, fmt.Errorf("unsupported db_type %q for write execution", dbType)
+		}
 	}
 
 	switch normalizeDBType(dbType) {

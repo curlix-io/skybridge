@@ -17,6 +17,13 @@ const (
 	ToolDBQueryPostgres = "db_query_postgres"
 	ToolDBQueryMySQL    = "db_query_mysql"
 	ToolDBQueryMongo    = "db_query_mongo"
+
+	// ToolDBExecuteWrite is a distinct write-capable tool, separate from the always-read-only
+	// db_query_* tools above (whose EnforceReadOnly:true in run() never changes). Whether a given
+	// statement should be allowed here is Curlix's own allow/deny decision made before dispatch —
+	// this handler runs whatever statement it's given, unmodified, via dbquery's write path
+	// (ExecContext for SQL, direct CRUD/aggregate calls for Mongo). See internal/edge/dbquery/write.go.
+	ToolDBExecuteWrite = "db_execute_write"
 )
 
 // Options configures db_query_* handlers on the connector edge.
@@ -48,12 +55,13 @@ func New(opts Options) Executor {
 	return Executor{opts: opts}
 }
 
-// Register wires db_query_{postgres,mysql,mongo} into the edge registry.
+// Register wires db_query_{postgres,mysql,mongo} and db_execute_write into the edge registry.
 func Register(reg *edge.Registry, opts Options) {
 	e := New(opts)
 	reg.Register(ToolDBQueryPostgres, e.runPostgres)
 	reg.Register(ToolDBQueryMySQL, e.runMySQL)
 	reg.Register(ToolDBQueryMongo, e.runMongo)
+	reg.Register(ToolDBExecuteWrite, e.runWrite)
 }
 
 func (e Executor) runPostgres(ctx context.Context, args map[string]any) (edge.Result, error) {
@@ -103,6 +111,44 @@ func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (
 		"tool":      toolName(dbType),
 		"result":    rows,
 		"row_count": len(rows),
+	}, nil
+}
+
+// runWrite executes a write statement dispatched to db_execute_write. Unlike run() above, it does
+// not apply PII masking (there's no result set to mask on most writes) and never sets
+// EnforceReadOnly — the statement runs exactly as given via dbquery.Options{Write: true}. Curlix's
+// allow/deny decision, made before this call was dispatched, is the only gate; the edge does not
+// re-derive it from the statement's shape.
+func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Result, error) {
+	dbType := strArg(args, "db_type")
+	database := strArg(args, "database")
+	scope := strArg(args, "connection_scope")
+	statement := strArg(args, "statement")
+	if dbType == "" || database == "" || statement == "" {
+		return edge.ErrorResult(ToolDBExecuteWrite, "db_type, database and statement are required"), nil
+	}
+
+	target, ok := dbquery.Resolve(e.opts.Targets, dbType, scope, database)
+	if !ok {
+		return edge.ErrorResult(ToolDBExecuteWrite, fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
+	}
+
+	raw, err := dbquery.Execute(ctx, target, dbType, database, statement, dbquery.Options{
+		FallbackUser:     e.opts.FallbackUser,
+		FallbackPassword: e.opts.FallbackPassword,
+		Timeout:          e.opts.QueryTimeout,
+		Write:            true,
+		OrgID:            e.opts.OrgID,
+	})
+	if err != nil {
+		return edge.ErrorResult(ToolDBExecuteWrite, err.Error()), nil
+	}
+
+	results, _ := raw["results"].(map[string]any)
+	return edge.Result{
+		"ok":      true,
+		"tool":    ToolDBExecuteWrite,
+		"results": results,
 	}, nil
 }
 
