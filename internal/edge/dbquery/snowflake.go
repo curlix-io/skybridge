@@ -9,29 +9,41 @@ import (
 	"strings"
 
 	"github.com/curlix-io/skybridge/internal/mask"
-	_ "github.com/jackc/pgx/v5/stdlib"
+	sf "github.com/snowflakedb/gosnowflake"
 )
 
-func executePostgres(ctx context.Context, target Target, database, q string, opts Options, masker mask.Masker) (map[string]any, error) {
+// executeSnowflake dials Snowflake's SQL API the same way executePostgres/executeMySQL dial their
+// engines — via the standard database/sql interface — so the resulting rows flow through the same
+// maskRows call before ever leaving the edge process. Target.Host carries the account locator
+// (e.g. "xy12345.us-east-1"), not a host:port pair; gosnowflake resolves the real endpoint itself.
+func executeSnowflake(ctx context.Context, target Target, database, q string, opts Options, masker mask.Masker) (map[string]any, error) {
 	q = strings.TrimSpace(q)
 	if q == "" {
 		return nil, errEmptyQuery
 	}
 	user, pass := creds(target, opts.FallbackUser, opts.FallbackPassword)
-	host := strings.TrimSpace(target.Host)
-	if host == "" {
-		return nil, fmt.Errorf("postgres target missing host")
+	account := strings.TrimSpace(target.Host)
+	if account == "" {
+		return nil, fmt.Errorf("snowflake target missing account locator")
 	}
 	dbName := strings.TrimSpace(database)
 	if dbName == "" {
 		dbName = strings.TrimSpace(target.DatabaseName)
 	}
-	sslmode := strings.TrimSpace(target.SSLMode)
-	if sslmode == "" {
-		sslmode = "require"
+	cfg := &sf.Config{
+		Account:   account,
+		User:      user,
+		Password:  pass,
+		Database:  dbName,
+		Schema:    strings.TrimSpace(target.Schema),
+		Warehouse: strings.TrimSpace(target.Warehouse),
+		Role:      strings.TrimSpace(target.Role),
 	}
-	dsn := fmt.Sprintf("postgres://%s:%s@%s/%s?sslmode=%s", urlEscape(user), urlEscape(pass), host, dbName, sslmode)
-	db, err := sql.Open("pgx", dsn)
+	dsn, err := sf.DSN(cfg)
+	if err != nil {
+		return nil, err
+	}
+	db, err := sql.Open("snowflake", dsn)
 	if err != nil {
 		return nil, err
 	}
@@ -67,7 +79,7 @@ func executePostgres(ctx context.Context, target Target, database, q string, opt
 		return nil, err
 	}
 	data = capRows(data, opts.MaxRows)
-	objID := objectID(opts.OrgID, "postgres", dbName, dbName)
+	objID := objectID(opts.OrgID, "snowflake", dbName, dbName)
 	masked, err := maskRows(ctx, masker, opts.Detector, opts.ProposeStore, objID, cols, data)
 	if err != nil {
 		return nil, err

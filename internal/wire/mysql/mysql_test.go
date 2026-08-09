@@ -52,8 +52,14 @@ func TestAppendLenEncIntRoundTrip(t *testing.T) {
 	}
 }
 
-// colDef builds a minimal PROTOCOL_41 column-definition payload with the given column name.
+// colDef builds a minimal PROTOCOL_41 column-definition payload with the given column name and
+// wire type (default VAR_STRING when 0x00 is passed — use colDefTyped for other types).
 func colDef(name string) []byte {
+	return colDefTyped(name, 0xFD) // VAR_STRING
+}
+
+// colDefTyped is colDef plus an explicit MySQL column wire type (see nonFreeTextColumnTypes).
+func colDefTyped(name string, colType byte) []byte {
 	var p []byte
 	lenStr := func(s string) {
 		p = appendLenEncInt(p, uint64(len(s)))
@@ -68,7 +74,7 @@ func colDef(name string) []byte {
 	p = append(p, 0x0c)                   // length of fixed-length fields
 	p = append(p, 0x21, 0x00)             // charset
 	p = append(p, 0x00, 0x01, 0x00, 0x00) // column length
-	p = append(p, 0xFD)                   // type (VAR_STRING)
+	p = append(p, colType)                // type
 	p = append(p, 0x00, 0x00)             // flags
 	p = append(p, 0x00)                   // decimals
 	p = append(p, 0x00, 0x00)             // filler
@@ -82,9 +88,39 @@ func TestColumnName(t *testing.T) {
 }
 
 func TestColumnIdentity(t *testing.T) {
-	name, schema, orgTable := columnIdentity(colDef("email"))
+	name, schema, orgTable, freeText := columnIdentity(colDef("email"))
 	if name != "email" || schema != "test" || orgTable != "t" {
 		t.Fatalf("columnIdentity = (%q,%q,%q) want (email,test,t)", name, schema, orgTable)
+	}
+	if !freeText {
+		t.Fatal("VAR_STRING column should be free-text eligible")
+	}
+}
+
+// TestColumnIdentityExcludesTypedColumnsFromFreeText is the regression test for the same class of
+// bug fixed in the Postgres engine (see postgres_test.go's
+// TestParseRowDescriptionExcludesTypedColumnsFromFreeText): Presidio's DATE_TIME/numeric
+// recognizers can confidently misclassify an ordinary DATETIME/DECIMAL/etc. value as PII and
+// redact it, producing a value the client's type decoder can no longer parse. MySQL's
+// column-definition packet carries the real wire type (unlike Postgres's separate mechanism, it's
+// a single trailing byte) — columnIdentity must report freeText=false for it.
+func TestColumnIdentityExcludesTypedColumnsFromFreeText(t *testing.T) {
+	cases := []struct {
+		name     string
+		colType  byte
+		freeText bool
+	}{
+		{"created_at", 0x0c, false}, // DATETIME
+		{"amount", 0xf6, false},     // NEWDECIMAL
+		{"is_active", 0x01, false},  // TINY (MySQL's bool)
+		{"note", 0xfd, true},        // VAR_STRING
+		{"description", 0xfc, true}, // BLOB (opaque, but historically treated as scannable text)
+	}
+	for _, c := range cases {
+		_, _, _, freeText := columnIdentity(colDefTyped(c.name, c.colType))
+		if freeText != c.freeText {
+			t.Errorf("col %q type=0x%02x: freeText=%v, want %v", c.name, c.colType, freeText, c.freeText)
+		}
 	}
 }
 
@@ -105,7 +141,7 @@ func TestState_ObjectID(t *testing.T) {
 }
 
 func TestMaskTextRow(t *testing.T) {
-	cols := []mask.Column{{Name: "id", Text: true}, {Name: "email", Text: true}}
+	cols := []mask.Column{{Name: "id", Text: true, FreeText: true}, {Name: "email", Text: true, FreeText: true}}
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
 
 	// row: id="7", email="alice@example.com"
@@ -135,7 +171,7 @@ func TestMaskTextRow(t *testing.T) {
 }
 
 func TestMaskTextRowPreservesNull(t *testing.T) {
-	cols := []mask.Column{{Name: "email", Text: true}}
+	cols := []mask.Column{{Name: "email", Text: true, FreeText: true}}
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
 	row := []byte{0xFB} // single NULL
 	out, _, ok, err := maskTextRow(context.Background(), row, cols, overlay)
@@ -148,7 +184,7 @@ func TestMaskTextRowPreservesNull(t *testing.T) {
 }
 
 func TestMaskTextRowPropagatesMaskerError(t *testing.T) {
-	cols := []mask.Column{{Name: "email", Text: true}}
+	cols := []mask.Column{{Name: "email", Text: true, FreeText: true}}
 	row := []byte{}
 	row = appendLenEncInt(row, uint64(len("alice@example.com")))
 	row = append(row, "alice@example.com"...)

@@ -19,6 +19,11 @@ type Target struct {
 	Password     string `json:"password,omitempty"`
 	SSLMode      string `json:"sslmode,omitempty"` // postgres
 	Name         string `json:"name,omitempty"`    // optional logical name (wire targets)
+	// Snowflake-only: Host carries the account locator (e.g. "xy12345.us-east-1"), not a
+	// host:port pair — gosnowflake resolves the real endpoint from the account identifier.
+	Warehouse string `json:"warehouse,omitempty"` // snowflake
+	Role      string `json:"role,omitempty"`      // snowflake
+	Schema    string `json:"schema,omitempty"`    // snowflake
 }
 
 // ParseTargets decodes SKYBRIDGE_STUDIO_TARGETS / SKYBRIDGE_TARGETS JSON arrays.
@@ -58,6 +63,8 @@ func normalizeDBType(dbType string) string {
 		return "postgres"
 	case "mongodb":
 		return "mongo"
+	case "snowflake":
+		return "snowflake"
 	default:
 		return d
 	}

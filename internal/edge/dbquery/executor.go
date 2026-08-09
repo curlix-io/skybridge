@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/pathlabel/label"
 )
 
 // Options configures local query execution.
@@ -26,6 +27,18 @@ type Options struct {
 	// path-scoped/table-scoped masking for the query (mask.Column.ObjectID is left empty, which
 	// PathOverlay treats as "no label available" and falls back to bare-key matching).
 	OrgID string
+	// Detector, when set, is run against each text leaf's pre-mask value to propose path-scoped PII
+	// labels for review (see internal/pathlabel). Optional — proposals are only generated when both
+	// Detector and ProposeStore are set; nil either one disables proposing without affecting masking
+	// itself. mask.Remote implements this (its /analyze call, reused rather than adding a second
+	// detection pass).
+	Detector interface {
+		Detect(ctx context.Context, text string) (category string, confidence float64, ok bool)
+	}
+	// ProposeStore receives SourceProposed labels from Detector's positive matches. Typically the
+	// same pathlabel/remotestore.Store backing the PathOverlay masker in this chain, but kept as a
+	// separate field (rather than trying to unwrap it from Masker) since Masker is an opaque Chain.
+	ProposeStore label.Store
 }
 
 // objectID builds the opaque, tenant-scoped identifier mask.Column.ObjectID carries for a query
@@ -82,6 +95,8 @@ func Execute(ctx context.Context, target Target, dbType, database, statement str
 		return executeMySQL(runCtx, target, database, statement, opts, masker)
 	case "mongo":
 		return executeMongo(runCtx, target, database, statement, opts, masker)
+	case "snowflake":
+		return executeSnowflake(runCtx, target, database, statement, opts, masker)
 	default:
 		return nil, fmt.Errorf("unsupported db_type %q", dbType)
 	}

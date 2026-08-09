@@ -262,7 +262,7 @@ func (m *bsonMasker) maskString(name string, value []byte) ([]byte, error) {
 		return value, nil
 	}
 	s := value[4 : 4+l-1] // exclude trailing NUL
-	cols := []mask.Column{{Name: name, Text: true}}
+	cols := []mask.Column{{Name: name, Text: true, FreeText: true}}
 	out, err := m.masker.MaskRow(m.ctx, cols, [][]byte{append([]byte(nil), s...)})
 	if err != nil {
 		return value, err

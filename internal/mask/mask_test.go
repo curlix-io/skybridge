@@ -8,7 +8,7 @@ import (
 func cols(names ...string) []Column {
 	out := make([]Column, len(names))
 	for i, n := range names {
-		out[i] = Column{Name: n, Text: true}
+		out[i] = Column{Name: n, Text: true, FreeText: true}
 	}
 	return out
 }

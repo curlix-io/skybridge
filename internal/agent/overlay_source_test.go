@@ -85,7 +85,7 @@ func TestStartOverlaySyncSeedsOverlay(t *testing.T) {
 	if !overlay.Enabled() {
 		t.Fatal("overlay should be seeded after sync")
 	}
-	out, _ := overlay.MaskRow(context.Background(), []mask.Column{{Name: "email", Text: true}}, [][]byte{[]byte("a@b.com")})
+	out, _ := overlay.MaskRow(context.Background(), []mask.Column{{Name: "email", Text: true, FreeText: true}}, [][]byte{[]byte("a@b.com")})
 	if string(out[0]) != "[email]" {
 		t.Fatalf("expected seeded rule applied, got %q", out[0])
 	}
@@ -95,7 +95,7 @@ func TestStartOverlaySyncNoURLIsNoop(t *testing.T) {
 	overlay := mask.NewOverlay(map[string]string{"email": "[static]"})
 	// No URL → must leave the static overlay untouched and not block.
 	startOverlaySync(context.Background(), config.Agent{}, overlay, log.Default())
-	out, _ := overlay.MaskRow(context.Background(), []mask.Column{{Name: "email", Text: true}}, [][]byte{[]byte("a@b.com")})
+	out, _ := overlay.MaskRow(context.Background(), []mask.Column{{Name: "email", Text: true, FreeText: true}}, [][]byte{[]byte("a@b.com")})
 	if string(out[0]) != "[static]" {
 		t.Fatalf("static overlay should remain, got %q", out[0])
 	}
@@ -103,12 +103,12 @@ func TestStartOverlaySyncNoURLIsNoop(t *testing.T) {
 
 func TestBuildMaskerWithOverlayIncludesDynamic(t *testing.T) {
 	// URL set but no static rules → overlay layer still present for later hot-swap.
-	_, overlay := buildMaskerWithOverlay(config.Agent{PIIOverlayURL: "http://x/overlay"})
+	_, overlay, _, _, _ := buildMaskerWithOverlay(config.Agent{PIIOverlayURL: "http://x/overlay"})
 	if overlay == nil {
 		t.Fatal("expected overlay handle when a dynamic source URL is configured")
 	}
 	// Neither static nor dynamic → no overlay layer.
-	_, overlay = buildMaskerWithOverlay(config.Agent{})
+	_, overlay, _, _, _ = buildMaskerWithOverlay(config.Agent{})
 	if overlay != nil {
 		t.Fatal("expected no overlay handle without static rules or URL")
 	}

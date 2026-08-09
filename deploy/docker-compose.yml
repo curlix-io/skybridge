@@ -40,6 +40,18 @@ services:
       # detected span with "[redacted]"; override to keep partial info, e.g.:
       #   {"US_SSN":{"type":"mask","masking_char":"*","chars_to_mask":5,"from_end":false}}
       - SKYBRIDGE_MASK_ANONYMIZERS=${SKYBRIDGE_MASK_ANONYMIZERS:-}
+      # Custom PII types via Presidio's ad_hoc_recognizers (sent on every /analyze call) — the
+      # supported way to detect org-specific patterns (e.g. an internal account-number format)
+      # without building and hosting a custom Presidio analyzer image. Presidio's own
+      # recognizer_registry.recognizers YAML shape; see ./recognizers.example.yaml. Local dev:
+      # mount a file and set SKYBRIDGE_MASK_RECOGNIZERS_FILE (below), pointed at
+      # ./recognizers.example.yaml (mounted at /etc/skybridge/recognizers.yaml). Production
+      # (ECS/Fargate): set SKYBRIDGE_MASK_RECOGNIZERS_YAML with the YAML content inline instead —
+      # see docs/design/skybridge-custom-pii-recognizers.md for the SSM Parameter Store wiring.
+      # SKYBRIDGE_MASK_RECOGNIZERS_YAML takes priority over the file when both are set. Unset by
+      # default (no custom recognizers).
+      - SKYBRIDGE_MASK_RECOGNIZERS_YAML=${SKYBRIDGE_MASK_RECOGNIZERS_YAML:-}
+      - SKYBRIDGE_MASK_RECOGNIZERS_FILE=${SKYBRIDGE_MASK_RECOGNIZERS_FILE:-}
       # best-effort (default) forwards a value unmasked if Presidio errors/is unreachable, so an
       # outage never blocks legitimate queries. strict aborts the row/connection instead — use this
       # for compliance-sensitive deployments where unmasked content must never reach the client
@@ -47,6 +59,9 @@ services:
       - SKYBRIDGE_MASK_MODE=${SKYBRIDGE_MASK_MODE:-best-effort}
       # Column overlay (off by default): JSON map of column name -> replacement token.
       - SKYBRIDGE_PII_OVERLAY=${SKYBRIDGE_PII_OVERLAY:-}
+    volumes:
+      # Mounted so SKYBRIDGE_MASK_RECOGNIZERS_FILE (above) can point at it; harmless if unused.
+      - ./recognizers.example.yaml:/etc/skybridge/recognizers.yaml:ro
     ports:
       - "15432:15432"
 

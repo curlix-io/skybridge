@@ -28,6 +28,17 @@ type Column struct {
 	// from Name for nested document fields (Mongo). Empty when the caller hasn't walked a nested
 	// path (falls back to Name).
 	Path string
+	// FreeText is true when the column's declared type is genuinely free-form text (varchar, text,
+	// json, ...), the only case a free-text PII detector (Presidio DATE_TIME/PERSON/etc.) should run
+	// against. Zero value is false, so every existing caller must set this explicitly true to keep
+	// today's behavior (Mongo/MySQL/dbquery/k8sexec callers that don't resolve a schema type do so
+	// unconditionally). A caller that DOES know a typed schema (the Postgres wire proxy, via
+	// RowDescription's typeOID) must set this false for date/time/numeric/boolean/uuid/binary
+	// columns, whose values are drawn from a fixed, driver-decoded wire format: a detector
+	// confidently misclassifying an ordinary timestamp as DATE_TIME and redacting it produces a
+	// value the client's type decoder can no longer parse, corrupting the response rather than just
+	// over-redacting free text.
+	FreeText bool
 }
 
 // Masker transforms a single result row. Implementations MUST return a slice the same length as

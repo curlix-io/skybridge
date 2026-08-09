@@ -61,7 +61,7 @@ func (o *Overlay) MaskRow(_ context.Context, cols []Column, row [][]byte) ([][]b
 		return row, nil
 	}
 	for i := range row {
-		if i >= len(cols) || row[i] == nil || !cols[i].Text {
+		if i >= len(cols) || row[i] == nil || !cols[i].Text || !cols[i].FreeText {
 			continue
 		}
 		if tok, ok := rules[strings.ToLower(cols[i].Name)]; ok {
