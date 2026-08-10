@@ -184,7 +184,9 @@ set, periodic push, flush-on-shutdown.
   swaps a client-presented opaque session token for a freshly-minted upstream DB credential
   (`/native-access/proxy-exchange`). The agent originates its own upstream auth with the minted
   credential; the client never holds a credential the database would accept directly. Implemented for
-  Postgres and MySQL; Mongo falls back to verbatim passthrough.
+  Postgres, MySQL, and Mongo (Mongo requires the client to be configured with
+  `authMechanism=PLAIN`, since a driver will not auto-discover it — real MongoDB servers never
+  advertise `PLAIN` via `hello`).
 - **Agent -> Control plane, pathlabel + recognizers + metrics** (all optional) — three independent
   pull/push HTTP loops layered on top of the same poll pattern as the flat overlay
   (`internal/agent/overlay_source.go`): `internal/pathlabel/remotestore` (pull confirmed labels,
