@@ -184,7 +184,7 @@ func TestScramClientExchange_MalformedServerFirst(t *testing.T) {
 	writeMsg(t, &in, msgAuthentication, authPayload)
 
 	err := scramClientExchange(&out, bufio.NewReader(&in), []byte(scramSHA256+"\x00"), "pw")
-	if err == nil || !strings.Contains(err.Error(), "malformed SCRAM server-first") {
+	if err == nil || !strings.Contains(err.Error(), "malformed server-first message") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -224,7 +224,7 @@ func TestScramClientExchange_BadSaltBase64(t *testing.T) {
 	writeAuthRaw(server, authSASLContinue, []byte(serverFirst))
 
 	err := <-errc
-	if err == nil || !strings.Contains(err.Error(), "bad SCRAM salt") {
+	if err == nil || !strings.Contains(err.Error(), "bad salt") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -242,7 +242,7 @@ func scramClientNonce(t *testing.T, srv *bufio.Reader) string {
 	rest := payload[zero+1:]
 	respLen := int(binary.BigEndian.Uint32(rest[0:4]))
 	clientFirst := string(rest[4 : 4+respLen])
-	return parseSCRAMAttrs(strings.TrimPrefix(clientFirst, "n,,"))["r"]
+	return parseSCRAMAttrsForTest(strings.TrimPrefix(clientFirst, "n,,"))["r"]
 }
 
 func TestScramClientExchange_BadIterationCount(t *testing.T) {
@@ -262,7 +262,7 @@ func TestScramClientExchange_BadIterationCount(t *testing.T) {
 	writeAuthRaw(server, authSASLContinue, []byte(serverFirst))
 
 	err := <-errc
-	if err == nil || !strings.Contains(err.Error(), "bad SCRAM iteration count") {
+	if err == nil || !strings.Contains(err.Error(), "bad iteration count") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -284,7 +284,7 @@ func TestScramClientExchange_ZeroIterationCountRejected(t *testing.T) {
 	writeAuthRaw(server, authSASLContinue, []byte(serverFirst))
 
 	err := <-errc
-	if err == nil || !strings.Contains(err.Error(), "bad SCRAM iteration count") {
+	if err == nil || !strings.Contains(err.Error(), "bad iteration count") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -377,7 +377,7 @@ func TestScramClientExchange_BadServerSignatureBase64(t *testing.T) {
 	rest := payload[zero+1:]
 	respLen := int(binary.BigEndian.Uint32(rest[0:4]))
 	clientFirst := string(rest[4 : 4+respLen])
-	clientNonce := parseSCRAMAttrs(strings.TrimPrefix(clientFirst, "n,,"))["r"]
+	clientNonce := parseSCRAMAttrsForTest(strings.TrimPrefix(clientFirst, "n,,"))["r"]
 
 	salt := []byte("0123456789abcdef")
 	serverFirst := "r=" + clientNonce + "serverpart,s=" + base64.StdEncoding.EncodeToString(salt) + ",i=4096"
@@ -389,7 +389,7 @@ func TestScramClientExchange_BadServerSignatureBase64(t *testing.T) {
 	writeAuthRaw(server, authSASLFinal, []byte("v=not-valid-base64!!"))
 
 	err = <-errc
-	if err == nil || !strings.Contains(err.Error(), "bad SCRAM server signature") {
+	if err == nil || !strings.Contains(err.Error(), "bad server signature") {
 		t.Fatalf("got %v", err)
 	}
 }
@@ -421,7 +421,7 @@ func TestScramClientExchange_UnexpectedFinalType(t *testing.T) {
 	rest := payload[zero+1:]
 	respLen := int(binary.BigEndian.Uint32(rest[0:4]))
 	clientFirst := string(rest[4 : 4+respLen])
-	clientNonce := parseSCRAMAttrs(strings.TrimPrefix(clientFirst, "n,,"))["r"]
+	clientNonce := parseSCRAMAttrsForTest(strings.TrimPrefix(clientFirst, "n,,"))["r"]
 
 	salt := []byte("0123456789abcdef")
 	serverFirst := "r=" + clientNonce + "serverpart,s=" + base64.StdEncoding.EncodeToString(salt) + ",i=4096"
@@ -438,10 +438,10 @@ func TestScramClientExchange_UnexpectedFinalType(t *testing.T) {
 }
 
 func TestMechanismOffered_MultipleAndAbsent(t *testing.T) {
-	if !mechanismOffered([]byte("SCRAM-SHA-1\x00SCRAM-SHA-256\x00"), scramSHA256) {
+	if !mechanismOfferedForTest([]byte("SCRAM-SHA-1\x00SCRAM-SHA-256\x00"), scramSHA256) {
 		t.Fatal("expected SCRAM-SHA-256 to be found among multiple offered mechanisms")
 	}
-	if mechanismOffered([]byte("SCRAM-SHA-1\x00"), scramSHA256) {
+	if mechanismOfferedForTest([]byte("SCRAM-SHA-1\x00"), scramSHA256) {
 		t.Fatal("expected mechanismOffered=false when SCRAM-SHA-256 is absent")
 	}
 }

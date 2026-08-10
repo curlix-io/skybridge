@@ -22,20 +22,15 @@ package postgres
 
 import (
 	"bufio"
-	"crypto/hmac"
 	"crypto/md5"
-	"crypto/rand"
-	"crypto/sha256"
-	"crypto/subtle"
-	"encoding/base64"
 	"encoding/binary"
 	"errors"
 	"fmt"
 	"io"
-	"strconv"
 	"strings"
 
 	"github.com/curlix-io/skybridge/internal/wire"
+	"github.com/curlix-io/skybridge/internal/wire/scram"
 )
 
 // Frontend/backend message types and authentication sub-codes used during the handshake.
@@ -265,18 +260,24 @@ func md5Hex(b []byte) string {
 // entry saslPayload is the AuthenticationSASL body (the null-separated list of mechanisms the server
 // offers). It returns after sending the client-final message and verifying the server signature from
 // AuthenticationSASLFinal; the trailing AuthenticationOk is consumed by the caller's loop.
+//
+// The SCRAM message algebra itself (nonce, PBKDF2, client-proof/server-signature) lives in
+// internal/wire/scram, shared with Mongo's upstream-auth origination (internal/wire/mongo/auth.go)
+// under that package's own BSON framing — this function owns only the Postgres 'p'/'R' message
+// framing around it.
 func scramClientExchange(upstream io.Writer, br *bufio.Reader, saslPayload []byte, password string) error {
 	if !mechanismOffered(saslPayload, scramSHA256) {
 		return fmt.Errorf("postgres: upstream did not offer %s (channel binding unsupported)", scramSHA256)
 	}
-	clientNonce, err := randomNonce()
+	// authcName="" (unlike Mongo): Postgres already knows the username via the StartupMessage, so
+	// the SCRAM "n=" field is conventionally left empty here (matches the prior inline behavior).
+	conv, err := scram.NewClientConversation(scram.SHA256, "", password)
 	if err != nil {
 		return err
 	}
-	clientFirstBare := "n=,r=" + clientNonce
+
 	// SASLInitialResponse: mechanism name (cstring) + int32 length of response + response bytes.
-	gs2 := "n,,"
-	initial := gs2 + clientFirstBare
+	initial := conv.ClientFirstMessage()
 	var buf []byte
 	buf = append(buf, scramSHA256...)
 	buf = append(buf, 0)
@@ -298,40 +299,10 @@ func scramClientExchange(upstream io.Writer, br *bufio.Reader, saslPayload []byt
 	if typ != msgAuthentication || len(payload) < 4 || binary.BigEndian.Uint32(payload[0:4]) != authSASLContinue {
 		return errors.New("postgres: expected AuthenticationSASLContinue")
 	}
-	serverFirst := string(payload[4:])
-	attrs := parseSCRAMAttrs(serverFirst)
-	combinedNonce := attrs["r"]
-	saltB64 := attrs["s"]
-	iterStr := attrs["i"]
-	if combinedNonce == "" || saltB64 == "" || iterStr == "" {
-		return errors.New("postgres: malformed SCRAM server-first message")
-	}
-	if !strings.HasPrefix(combinedNonce, clientNonce) {
-		return errors.New("postgres: SCRAM server nonce does not extend client nonce")
-	}
-	salt, err := base64.StdEncoding.DecodeString(saltB64)
+	clientFinal, err := conv.Step2(string(payload[4:]))
 	if err != nil {
-		return fmt.Errorf("postgres: bad SCRAM salt: %w", err)
+		return fmt.Errorf("postgres: %w", err)
 	}
-	iter, err := strconv.Atoi(iterStr)
-	if err != nil || iter <= 0 {
-		return fmt.Errorf("postgres: bad SCRAM iteration count %q", iterStr)
-	}
-
-	saltedPassword := pbkdf2SHA256([]byte(saslPrep(password)), salt, iter, sha256.Size)
-	clientKey := hmacSHA256(saltedPassword, []byte("Client Key"))
-	storedKey := sha256.Sum256(clientKey)
-
-	channelBinding := base64.StdEncoding.EncodeToString([]byte(gs2)) // "biws"
-	clientFinalWithoutProof := "c=" + channelBinding + ",r=" + combinedNonce
-	authMessage := clientFirstBare + "," + serverFirst + "," + clientFinalWithoutProof
-
-	clientSignature := hmacSHA256(storedKey[:], []byte(authMessage))
-	clientProof := make([]byte, len(clientKey))
-	for i := range clientKey {
-		clientProof[i] = clientKey[i] ^ clientSignature[i]
-	}
-	clientFinal := clientFinalWithoutProof + ",p=" + base64.StdEncoding.EncodeToString(clientProof)
 	if err := writeFrontend(upstream, msgPassword, []byte(clientFinal)); err != nil {
 		return err
 	}
@@ -346,16 +317,8 @@ func scramClientExchange(upstream io.Writer, br *bufio.Reader, saslPayload []byt
 	if typ != msgAuthentication || len(payload) < 4 || binary.BigEndian.Uint32(payload[0:4]) != authSASLFinal {
 		return errors.New("postgres: expected AuthenticationSASLFinal")
 	}
-	finalAttrs := parseSCRAMAttrs(string(payload[4:]))
-	serverSigB64 := finalAttrs["v"]
-	gotSig, err := base64.StdEncoding.DecodeString(serverSigB64)
-	if err != nil {
-		return fmt.Errorf("postgres: bad SCRAM server signature: %w", err)
-	}
-	serverKey := hmacSHA256(saltedPassword, []byte("Server Key"))
-	wantSig := hmacSHA256(serverKey, []byte(authMessage))
-	if subtle.ConstantTimeCompare(gotSig, wantSig) != 1 {
-		return errors.New("postgres: SCRAM server signature mismatch (wrong password or MITM)")
+	if err := conv.Step3(string(payload[4:])); err != nil {
+		return fmt.Errorf("postgres: %w", err)
 	}
 	return nil
 }
@@ -368,59 +331,6 @@ func mechanismOffered(payload []byte, mech string) bool {
 	}
 	return false
 }
-
-func parseSCRAMAttrs(s string) map[string]string {
-	out := map[string]string{}
-	for _, kv := range strings.Split(s, ",") {
-		if i := strings.IndexByte(kv, '='); i > 0 {
-			out[kv[:i]] = kv[i+1:]
-		}
-	}
-	return out
-}
-
-func randomNonce() (string, error) {
-	b := make([]byte, 18)
-	if _, err := rand.Read(b); err != nil {
-		return "", err
-	}
-	return base64.StdEncoding.EncodeToString(b), nil
-}
-
-func hmacSHA256(key, msg []byte) []byte {
-	h := hmac.New(sha256.New, key)
-	h.Write(msg)
-	return h.Sum(nil)
-}
-
-// pbkdf2SHA256 derives a key with PBKDF2-HMAC-SHA256 (RFC 8018), hand-rolled to keep the module
-// stdlib-only (no golang.org/x/crypto dependency).
-func pbkdf2SHA256(password, salt []byte, iter, keyLen int) []byte {
-	hLen := sha256.Size
-	numBlocks := (keyLen + hLen - 1) / hLen
-	out := make([]byte, 0, numBlocks*hLen)
-	var block [4]byte
-	for i := 1; i <= numBlocks; i++ {
-		binary.BigEndian.PutUint32(block[:], uint32(i))
-		u := hmacSHA256(password, append(append([]byte{}, salt...), block[:]...))
-		t := make([]byte, len(u))
-		copy(t, u)
-		for j := 1; j < iter; j++ {
-			u = hmacSHA256(password, u)
-			for k := range t {
-				t[k] ^= u[k]
-			}
-		}
-		out = append(out, t...)
-	}
-	return out[:keyLen]
-}
-
-// saslPrep is a minimal SASLprep: Postgres applies SASLprep to the password, but for the ASCII
-// passwords a credential broker typically mints it is the identity function. We deliberately do not
-// pull in a full stringprep table; non-ASCII passwords are passed through unchanged (documented
-// limitation).
-func saslPrep(password string) string { return password }
 
 // parseErrorResponse extracts the human-readable message ('M' field) from an ErrorResponse payload.
 func parseErrorResponse(payload []byte) string {
