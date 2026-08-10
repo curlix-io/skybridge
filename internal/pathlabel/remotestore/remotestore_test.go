@@ -258,4 +258,279 @@ func TestStore_LookupNeverBlocksOnNetwork(t *testing.T) {
 	}
 }
 
+func TestNew_FloorsPollAndPushIntervals(t *testing.T) {
+	cfg := config.Agent{
+		PathLabelURL:         "http://unused",
+		OrgID:                "org1",
+		PathLabelPollSeconds: 1, // below minPollSeconds
+		PathLabelPushSeconds: 1, // below minPushSeconds
+	}
+	s := New(cfg, nil)
+	if s.pollInterval != minPollSeconds*time.Second {
+		t.Fatalf("expected poll interval floored to %v, got %v", minPollSeconds*time.Second, s.pollInterval)
+	}
+	if s.pushInterval != minPushSeconds*time.Second {
+		t.Fatalf("expected push interval floored to %v, got %v", minPushSeconds*time.Second, s.pushInterval)
+	}
+	if s.logger == nil {
+		t.Fatal("expected New(..., nil) to default the logger rather than leave it nil")
+	}
+}
+
+func TestNew_KeepsIntervalsAboveFloor(t *testing.T) {
+	cfg := config.Agent{
+		PathLabelURL:         "http://unused",
+		PathLabelPollSeconds: 3600,
+		PathLabelPushSeconds: 120,
+	}
+	s := New(cfg, nil)
+	if s.pollInterval != 3600*time.Second {
+		t.Fatalf("expected poll interval to pass through unfloored, got %v", s.pollInterval)
+	}
+	if s.pushInterval != 120*time.Second {
+		t.Fatalf("expected push interval to pass through unfloored, got %v", s.pushInterval)
+	}
+}
+
+func TestObjectParts_RejectsTooFewSegments(t *testing.T) {
+	if _, _, _, ok := objectParts("only:three:parts"); ok {
+		t.Fatal("expected objectParts to reject an objectID with fewer than 4 ':'-separated parts")
+	}
+	if _, _, _, ok := objectParts(""); ok {
+		t.Fatal("expected objectParts to reject an empty objectID")
+	}
+}
+
+func TestObjectParts_TakesLastThreeSegments(t *testing.T) {
+	driver, db, obj, ok := objectParts("org:with:colons:mongo:app:orders")
+	if !ok {
+		t.Fatal("expected a 4+-segment objectID to parse")
+	}
+	if driver != "mongo" || db != "app" || obj != "orders" {
+		t.Fatalf("expected last 3 segments regardless of extra ':' earlier, got driver=%q db=%q obj=%q", driver, db, obj)
+	}
+}
+
+func TestStore_PutRejectsMissingObjectIDOrFieldPath(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	if err := s.Put(context.Background(), label.Label{FieldPath: "email", Source: label.SourceProposed}); err == nil {
+		t.Fatal("expected an error when ObjectID is empty")
+	}
+	if err := s.Put(context.Background(), label.Label{ObjectID: "org1:mongo:app:orders", Source: label.SourceProposed}); err == nil {
+		t.Fatal("expected an error when FieldPath is empty")
+	}
+}
+
+func TestStore_PutDefaultsMatchMode(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	_ = s.Put(context.Background(), label.Label{
+		ObjectID: "org1:mongo:app:orders", FieldPath: "email", Source: label.SourceProposed,
+	})
+	batches := s.drainPendingByObject()
+	got := batches["org1:mongo:app:orders"]
+	if len(got) != 1 || got[0].MatchMode != label.MatchPath {
+		t.Fatalf("expected MatchMode to default to label.MatchPath, got %+v", got)
+	}
+}
+
+func TestMergeProposed_KeepsEarlierLastObservedAtIfLater(t *testing.T) {
+	earlier := time.Now().Add(-time.Hour)
+	later := time.Now()
+	existing := label.Label{SampleCount: 2, Confidence: 0.3, LastObservedAt: later}
+	incoming := label.Label{SampleCount: 1, Confidence: 0.9, LastObservedAt: earlier}
+	merged := mergeProposed(existing, incoming)
+	if merged.SampleCount != 3 {
+		t.Fatalf("expected summed sample count, got %d", merged.SampleCount)
+	}
+	if merged.Confidence != 0.9 {
+		t.Fatalf("expected higher confidence retained, got %v", merged.Confidence)
+	}
+	if !merged.LastObservedAt.Equal(later) {
+		t.Fatalf("expected the later LastObservedAt to win even though it belonged to 'existing', got %v", merged.LastObservedAt)
+	}
+}
+
+func TestStore_SeedObjectTracksObjectForPull(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	if ids := s.knownObjectIDs(); len(ids) != 0 {
+		t.Fatalf("expected no known objects before seeding, got %v", ids)
+	}
+	s.SeedObject("org1:mongo:app:orders")
+	ids := s.knownObjectIDs()
+	if len(ids) != 1 || ids[0] != "org1:mongo:app:orders" {
+		t.Fatalf("expected SeedObject to register the object for pull, got %v", ids)
+	}
+	// Seeding twice must not create a duplicate cache entry / duplicate known-object.
+	s.SeedObject("org1:mongo:app:orders")
+	if ids := s.knownObjectIDs(); len(ids) != 1 {
+		t.Fatalf("expected SeedObject to be idempotent, got %v", ids)
+	}
+	// A seeded placeholder must never satisfy a real Lookup.
+	if _, ok, _ := s.Lookup(context.Background(), "org1:mongo:app:orders", "email"); ok {
+		t.Fatal("expected the seed placeholder to never match a real field-path lookup")
+	}
+}
+
+func TestStore_SeedObjectIgnoresEmpty(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	s.SeedObject("")
+	if ids := s.knownObjectIDs(); len(ids) != 0 {
+		t.Fatalf("expected empty objectID to be ignored, got %v", ids)
+	}
+}
+
+func TestStore_KnownObjectIDsIncludesPendingAndCache(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	_ = s.Put(context.Background(), label.Label{
+		ObjectID: "org1:mongo:app:orders", FieldPath: "email", Source: label.SourceProposed,
+	})
+	s.replaceCacheForObject("org1:mongo:app:users", []label.Label{
+		{ObjectID: "org1:mongo:app:users", FieldPath: "name", Source: label.SourceManual},
+	})
+	ids := s.knownObjectIDs()
+	seen := map[string]bool{}
+	for _, id := range ids {
+		seen[id] = true
+	}
+	if !seen["org1:mongo:app:orders"] || !seen["org1:mongo:app:users"] {
+		t.Fatalf("expected knownObjectIDs to include both pending and cached objects, got %v", ids)
+	}
+}
+
+func TestStore_RefreshPullUpdatesCacheForKnownObjects(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_ = json.NewEncoder(w).Encode(pullResponse{
+			Labels: []labelWire{
+				{FieldPath: "email", MatchMode: "path", Category: "email_fields", Source: "manual"},
+			},
+		})
+	}))
+	defer srv.Close()
+
+	s := New(testConfig(srv.URL), nil)
+	s.SeedObject("org1:mongo:app:orders")
+	s.refreshPull(context.Background())
+
+	if atomic.LoadInt32(&calls) != 1 {
+		t.Fatalf("expected exactly one pull call for the seeded object, got %d", calls)
+	}
+	l, ok, err := s.Lookup(context.Background(), "org1:mongo:app:orders", "email")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok || l.Category != "email_fields" {
+		t.Fatalf("expected refreshPull to populate the cache, got ok=%v l=%+v", ok, l)
+	}
+}
+
+func TestStore_RefreshPullLogsAndContinuesOnError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	s := New(testConfig(srv.URL), nil)
+	s.SeedObject("org1:mongo:app:orders")
+	// Must not panic and must leave the cache untouched (aside from the seed placeholder) on pull failure.
+	s.refreshPull(context.Background())
+	if _, ok, _ := s.Lookup(context.Background(), "org1:mongo:app:orders", "email"); ok {
+		t.Fatal("expected no cache entry to appear from a failed pull")
+	}
+}
+
+func TestStore_RefreshPullSkipsObjectsWithBadIDFormat(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	s.SeedObject("not-enough-parts")
+	// Should not panic despite an unparseable objectID.
+	s.refreshPull(context.Background())
+}
+
+func TestStore_ReplaceCacheForObjectOverwritesPriorEntries(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	objID := "org1:mongo:app:orders"
+	s.replaceCacheForObject(objID, []label.Label{
+		{ObjectID: objID, FieldPath: "a", Source: label.SourceManual, Category: "old"},
+	})
+	s.replaceCacheForObject(objID, []label.Label{
+		{ObjectID: objID, FieldPath: "b", Source: label.SourceManual, Category: "new"},
+	})
+	if _, ok, _ := s.Lookup(context.Background(), objID, "a"); ok {
+		t.Fatal("expected the stale field 'a' to be evicted when the object's labels were replaced")
+	}
+	l, ok, _ := s.Lookup(context.Background(), objID, "b")
+	if !ok || l.Category != "new" {
+		t.Fatalf("expected the new field 'b' to be cached, got ok=%v l=%+v", ok, l)
+	}
+}
+
+func TestStore_RestorePendingMergesWithExisting(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	ctx := context.Background()
+	_ = s.Put(ctx, label.Label{
+		ObjectID: "org1:mongo:app:orders", FieldPath: "email", Source: label.SourceProposed, Confidence: 0.4, SampleCount: 1,
+	})
+	// Simulate a failed flush restoring an overlapping observation.
+	s.restorePending("org1:mongo:app:orders", []label.Label{
+		{ObjectID: "org1:mongo:app:orders", FieldPath: "email", Source: label.SourceProposed, Confidence: 0.9, SampleCount: 2},
+	})
+	batches := s.drainPendingByObject()
+	got := batches["org1:mongo:app:orders"]
+	if len(got) != 1 || got[0].SampleCount != 3 {
+		t.Fatalf("expected restorePending to merge with the existing pending entry, got %+v", got)
+	}
+}
+
+func TestStore_PushPropagatesTransportError(t *testing.T) {
+	s := New(testConfig("http://127.0.0.1:1"), nil)
+	err := s.push(context.Background(), "mongo", "app", "orders", []label.Label{
+		{FieldPath: "email", Source: label.SourceProposed},
+	})
+	if err == nil {
+		t.Fatal("expected push to a dead endpoint to return an error")
+	}
+}
+
+func TestStore_FlushPushSkipsBadObjectID(t *testing.T) {
+	s := New(testConfig("http://unused"), nil)
+	// Insert a pending entry directly under a malformed objectID so drainPendingByObject groups it,
+	// but objectParts rejects it in flushPush — must not panic, and must not retain it either.
+	s.mu.Lock()
+	s.pending[pendingKey{objectID: "bad-id", fieldPath: "x"}] = label.Label{ObjectID: "bad-id", FieldPath: "x", Source: label.SourceProposed}
+	s.mu.Unlock()
+	s.flushPush(context.Background())
+	if batches := s.drainPendingByObject(); len(batches) != 0 {
+		t.Fatalf("expected the malformed-objectID pending entry to be dropped, not retained, got %+v", batches)
+	}
+}
+
+func TestStore_StartPullsImmediatelyAndStopsOnCancel(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_ = json.NewEncoder(w).Encode(pullResponse{})
+	}))
+	defer srv.Close()
+
+	cfg := testConfig(srv.URL)
+	s := New(cfg, nil)
+	s.SeedObject("org1:mongo:app:orders")
+
+	ctx, cancel := context.WithCancel(context.Background())
+	s.Start(ctx)
+	// Start does a synchronous refreshPull before spawning the background loops.
+	if atomic.LoadInt32(&calls) < 1 {
+		t.Fatal("expected Start to perform an immediate pull")
+	}
+
+	// Exercise the push loop's flush-on-cancel path too.
+	_ = s.Put(context.Background(), label.Label{
+		ObjectID: "org1:mongo:app:orders", FieldPath: "email", Source: label.SourceProposed, Confidence: 0.5, SampleCount: 1,
+	})
+	cancel()
+	// Give the goroutines a moment to observe cancellation and flush.
+	time.Sleep(100 * time.Millisecond)
+}
+
 var _ label.Store = (*Store)(nil)

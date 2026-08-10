@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"crypto/tls"
+	"crypto/x509"
 	"io"
 	"log"
 	"net"
@@ -73,6 +74,35 @@ func TestUpstreamTLSConfigForVerificationPosture(t *testing.T) {
 	vca := (&upstreamTLSPolicy{mode: "verify-ca"}).configFor("10.0.0.5")
 	if !vca.InsecureSkipVerify || vca.VerifyConnection == nil {
 		t.Fatalf("verify-ca config = %+v", vca)
+	}
+}
+
+func TestBuildUpstreamTLSPolicyVerifyCAWithSystemRoots(t *testing.T) {
+	// verify-ca with no explicit CA PEM falls back to the system trust pool.
+	p, err := buildUpstreamTLSPolicy(config.Agent{UpstreamTLSMode: "verify-ca"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p == nil || p.mode != "verify-ca" {
+		t.Fatalf("expected a verify-ca policy, got %+v", p)
+	}
+}
+
+func TestBuildUpstreamTLSPolicyWithServerNameOverride(t *testing.T) {
+	p, err := buildUpstreamTLSPolicy(config.Agent{UpstreamTLSMode: "require", UpstreamTLSServerName: "custom.example.com"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if p.serverName != "custom.example.com" {
+		t.Fatalf("expected serverName override to be captured, got %q", p.serverName)
+	}
+}
+
+func TestUpstreamTLSConfigForPreferMode(t *testing.T) {
+	p := &upstreamTLSPolicy{mode: "prefer"}
+	cfg := p.configFor("db.internal")
+	if !cfg.InsecureSkipVerify || cfg.ServerName != "db.internal" {
+		t.Fatalf("prefer config = %+v", cfg)
 	}
 }
 
@@ -182,6 +212,28 @@ func TestPolicyStartUpstreamTLSPostgres(t *testing.T) {
 	}
 }
 
+func TestPolicyStartUpstreamTLSDisabledPassesThrough(t *testing.T) {
+	var p *upstreamTLSPolicy
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	got, err := p.startUpstreamTLS("postgres", a, "db:5432")
+	if err != nil || got != a {
+		t.Fatalf("disabled policy should pass through unchanged: got=%v err=%v", got, err)
+	}
+}
+
+func TestPolicyStartUpstreamTLSUnknownDBTypePassesThrough(t *testing.T) {
+	p := &upstreamTLSPolicy{mode: "require"}
+	a, b := net.Pipe()
+	defer a.Close()
+	defer b.Close()
+	got, err := p.startUpstreamTLS("oracle", a, "db:1521")
+	if err != nil || got != a {
+		t.Fatalf("unknown db type should pass through unchanged: got=%v err=%v", got, err)
+	}
+}
+
 func TestHostOnly(t *testing.T) {
 	cases := map[string]string{
 		"db.internal:5432": "db.internal",
@@ -202,6 +254,48 @@ func TestIsMySQL(t *testing.T) {
 	if isMySQL("postgres") || isMySQL("") {
 		t.Fatal("expected non-mysql db types not to match")
 	}
+}
+
+func TestUpstreamTLSPolicyRequiredNilPolicy(t *testing.T) {
+	var p *upstreamTLSPolicy
+	if p.required() {
+		t.Fatal("a nil (disabled) policy must never be a hard requirement")
+	}
+}
+
+// TestUpstreamTLSConfigForVerifyCAVerifiesChain drives configFor("verify-ca")'s VerifyConnection
+// callback directly: it must reject a connection presenting no certificate, and successfully verify
+// a self-signed certificate that is itself in the trust pool.
+func TestUpstreamTLSConfigForVerifyCAVerifiesChain(t *testing.T) {
+	cert, err := generateSelfSignedCert()
+	if err != nil {
+		t.Fatal(err)
+	}
+	leaf, err := x509.ParseCertificate(cert.Certificate[0])
+	if err != nil {
+		t.Fatal(err)
+	}
+	roots := x509.NewCertPool()
+	roots.AddCert(leaf)
+
+	p := &upstreamTLSPolicy{mode: "verify-ca", roots: roots}
+	cfg := p.configFor("db.internal")
+	if cfg.VerifyConnection == nil {
+		t.Fatal("expected a VerifyConnection callback for verify-ca")
+	}
+
+	if err := cfg.VerifyConnection(tls.ConnectionState{}); err == nil {
+		t.Fatal("expected an error when no peer certificate is presented")
+	}
+	if err := cfg.VerifyConnection(tls.ConnectionState{PeerCertificates: []*x509.Certificate{leaf}}); err != nil {
+		t.Fatalf("expected the self-signed leaf (present in roots) to verify, got %v", err)
+	}
+}
+
+func TestLogUpstreamTLSModeDefaultsNilLogger(t *testing.T) {
+	// A nil logger must fall back to log.Default() rather than panic.
+	p := &upstreamTLSPolicy{mode: "require"}
+	logUpstreamTLSMode(p, []string{"postgres"}, nil)
 }
 
 func TestLogUpstreamTLSModeNoopWhenDisabled(t *testing.T) {

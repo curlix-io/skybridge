@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"io"
@@ -83,6 +84,118 @@ func TestServeTunnelConnServesOneStream(t *testing.T) {
 	}
 	if gotAddr != "db.internal:5432" {
 		t.Fatalf("expected dial to db.internal:5432, got %q", gotAddr)
+	}
+}
+
+func TestServeStreamSkipsOnBadMeta(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer serverEnd.Close()
+	clientSess := tunnel.Client(clientEnd)
+	defer clientSess.Close()
+	serverSess := tunnel.Server(serverEnd)
+	defer serverSess.Close()
+
+	if _, err := clientSess.Open([]byte("not json")); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	st, err := serverSess.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	dialCalled := false
+	deps := Deps{Dial: func(context.Context, string, string) (net.Conn, error) {
+		dialCalled = true
+		return nil, nil
+	}}.withDefaults(config.Agent{})
+
+	var buf bytes.Buffer
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(&buf, "", 0))
+	if dialCalled {
+		t.Fatal("expected serveStream to bail out before dialing on bad meta")
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("bad meta")) {
+		t.Fatalf("expected a bad-meta log, got %q", buf.String())
+	}
+}
+
+func TestServeStreamLogsUnsupportedDBType(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer serverEnd.Close()
+	clientSess := tunnel.Client(clientEnd)
+	defer clientSess.Close()
+	serverSess := tunnel.Server(serverEnd)
+	defer serverSess.Close()
+
+	if _, err := clientSess.Open(tunnel.OpenMeta{Target: "prod", Addr: "db:1", DBType: "oracle"}.Encode()); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	st, err := serverSess.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	deps := Deps{}.withDefaults(config.Agent{})
+	var buf bytes.Buffer
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(&buf, "", 0))
+	if !bytes.Contains(buf.Bytes(), []byte("stream open:")) {
+		t.Fatalf("expected an unsupported-db-type log, got %q", buf.String())
+	}
+}
+
+func TestServeStreamLogsUpstreamDialFailure(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer serverEnd.Close()
+	clientSess := tunnel.Client(clientEnd)
+	defer clientSess.Close()
+	serverSess := tunnel.Server(serverEnd)
+	defer serverSess.Close()
+
+	if _, err := clientSess.Open(tunnel.OpenMeta{Target: "prod", Addr: "db.internal:5432", DBType: "postgres"}.Encode()); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	st, err := serverSess.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	deps := Deps{Dial: func(context.Context, string, string) (net.Conn, error) {
+		return nil, errors.New("connection refused")
+	}}.withDefaults(config.Agent{})
+	var buf bytes.Buffer
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(&buf, "", 0))
+	if !bytes.Contains(buf.Bytes(), []byte("dial upstream")) {
+		t.Fatalf("expected a dial-failure log, got %q", buf.String())
+	}
+}
+
+func TestServeStreamLogsUpstreamTLSFailure(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer serverEnd.Close()
+	clientSess := tunnel.Client(clientEnd)
+	defer clientSess.Close()
+	serverSess := tunnel.Server(serverEnd)
+	defer serverSess.Close()
+
+	if _, err := clientSess.Open(tunnel.OpenMeta{Target: "prod", Addr: "db.internal:5432", DBType: "postgres"}.Encode()); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	st, err := serverSess.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+	upTLS := &upstreamTLSPolicy{mode: "require"}
+	deps := Deps{Dial: func(context.Context, string, string) (net.Conn, error) {
+		a, b := net.Pipe()
+		go b.Close() // upstream closes immediately, failing the TLS handshake
+		return a, nil
+	}, UpstreamTLS: upTLS}.withDefaults(config.Agent{})
+	var buf bytes.Buffer
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(&buf, "", 0))
+	if !bytes.Contains(buf.Bytes(), []byte("upstream TLS to")) {
+		t.Fatalf("expected an upstream-TLS-failure log, got %q", buf.String())
 	}
 }
 

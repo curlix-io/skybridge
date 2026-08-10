@@ -7,6 +7,43 @@ import (
 	"time"
 )
 
+func TestNoopRecorderDiscardsInputAndOutput(t *testing.T) {
+	// NoopRecorder's methods must be safe to call and must not panic or otherwise observably do
+	// anything — it's the default when session replay is disabled.
+	var rec NoopRecorder
+	rec.RecordInput([]byte("client bytes"))
+	rec.RecordOutput("rendered row")
+}
+
+func TestRecorderInputWriterTeesIntoRecorder(t *testing.T) {
+	got := &capturingRecorder{}
+	w := RecorderInputWriter(got)
+
+	n, err := w.Write([]byte("hello"))
+	if err != nil {
+		t.Fatalf("Write returned error: %v", err)
+	}
+	if n != 5 {
+		t.Fatalf("Write returned n=%d, want 5", n)
+	}
+	if len(got.inputs) != 1 || string(got.inputs[0]) != "hello" {
+		t.Fatalf("expected recorder to observe %q, got %v", "hello", got.inputs)
+	}
+}
+
+type capturingRecorder struct {
+	inputs  [][]byte
+	outputs []string
+}
+
+func (c *capturingRecorder) RecordInput(raw []byte) {
+	c.inputs = append(c.inputs, append([]byte(nil), raw...))
+}
+
+func (c *capturingRecorder) RecordOutput(text string) {
+	c.outputs = append(c.outputs, text)
+}
+
 func TestPassthroughCopiesBothDirectionsUntilClientCloses(t *testing.T) {
 	clientA, clientB := net.Pipe()
 	upstreamA, upstreamB := net.Pipe()

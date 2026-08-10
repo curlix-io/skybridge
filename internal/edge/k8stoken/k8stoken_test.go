@@ -4,7 +4,9 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
+	"time"
 
 	"github.com/curlix-io/skybridge/internal/edge"
 )
@@ -132,5 +134,100 @@ func TestTokenRequestRejectsUnparsableOutput(t *testing.T) {
 	})
 	if res["ok"] != false {
 		t.Fatalf("expected ok=false: %+v", res)
+	}
+}
+
+// TestTokenRequestReportsTimeout exercises the timedOut branch of run: a fake kubectl that sleeps
+// longer than the configured CLITimeout should be reported as a timed-out failure, not confused
+// with a generic exec error.
+func TestTokenRequestReportsTimeout(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kubectl")
+	script := "#!/bin/sh\nsleep 2\necho '{}'\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake kubectl: %v", err)
+	}
+	reg := edge.NewRegistry()
+	Register(reg, Options{KubectlBin: path, CLITimeout: 50 * time.Millisecond})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name:      ToolKubernetesTokenRequest,
+		Arguments: map[string]any{"namespace": "default", "service_account": "reader"},
+	})
+	if res["ok"] != false {
+		t.Fatalf("expected ok=false: %+v", res)
+	}
+	if res["timed_out"] != true {
+		t.Fatalf("expected timed_out=true: %+v", res)
+	}
+}
+
+// TestTokenRequestUsesKubeconfigAndContext covers the argv-construction branches that prepend
+// --kubeconfig/--context flags when Options set them, by having the fake kubectl echo its own
+// argv back as JSON in the token field so the test can assert on it.
+func TestTokenRequestUsesKubeconfigAndContext(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "kubectl")
+	script := "#!/bin/sh\necho '{\"status\":{\"token\":\"'\"$*\"'\",\"expirationTimestamp\":\"x\"}}'\n"
+	if err := os.WriteFile(path, []byte(script), 0o755); err != nil {
+		t.Fatalf("write fake kubectl: %v", err)
+	}
+	reg := edge.NewRegistry()
+	Register(reg, Options{KubectlBin: path, Kubeconfig: "/tmp/kc", Context: "my-ctx"})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name:      ToolKubernetesTokenRequest,
+		Arguments: map[string]any{"namespace": "default", "service_account": "reader"},
+	})
+	if res["ok"] != true {
+		t.Fatalf("expected ok=true: %+v", res)
+	}
+	token, _ := res["token"].(string)
+	if !strings.Contains(token, "--kubeconfig /tmp/kc") || !strings.Contains(token, "--context my-ctx") {
+		t.Fatalf("expected argv to include kubeconfig/context flags, got %q", token)
+	}
+}
+
+func TestIntArg(t *testing.T) {
+	cases := []struct {
+		name string
+		args map[string]any
+		want int64
+	}{
+		{"missing key", map[string]any{}, 0},
+		{"nil value", map[string]any{"duration_seconds": nil}, 0},
+		{"int64", map[string]any{"duration_seconds": int64(42)}, 42},
+		{"int", map[string]any{"duration_seconds": 7}, 7},
+		{"float64", map[string]any{"duration_seconds": 3.0}, 3},
+		{"unsupported type", map[string]any{"duration_seconds": "300"}, 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := intArg(c.args, "duration_seconds")
+			if got != c.want {
+				t.Fatalf("intArg() = %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+func TestClip(t *testing.T) {
+	cases := []struct {
+		name string
+		s    string
+		max  int
+		want string
+	}{
+		{"under limit unchanged", "short", 100, "short"},
+		{"exact limit unchanged", "abcde", 5, "abcde"},
+		{"over limit truncated", "abcdef", 5, "abcde"},
+		{"zero max returns unchanged", "abcdef", 0, "abcdef"},
+		{"negative max returns unchanged", "abcdef", -1, "abcdef"},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := clip(c.s, c.max)
+			if got != c.want {
+				t.Fatalf("clip(%q, %d) = %q, want %q", c.s, c.max, got, c.want)
+			}
+		})
 	}
 }

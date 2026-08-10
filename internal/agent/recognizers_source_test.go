@@ -1,12 +1,15 @@
 package agent
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/curlix-io/skybridge/internal/config"
@@ -77,6 +80,32 @@ func TestRecognizersSourceFetchSendsEmptyConnectionRoleWhenUnset(t *testing.T) {
 	}
 }
 
+func TestRecognizersSourceFetchBadJSONDecode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "not json")
+	}))
+	defer srv.Close()
+
+	src := newRecognizersSource(config.Agent{PIIRecognizersURL: srv.URL})
+	if _, err := src.fetch(context.Background()); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("expected a decode error, got %v", err)
+	}
+}
+
+func TestRecognizersSourceFetchDialFailure(t *testing.T) {
+	src := newRecognizersSource(config.Agent{PIIRecognizersURL: "http://127.0.0.1:1"})
+	if _, err := src.fetch(context.Background()); err == nil {
+		t.Fatal("expected a transport-level error on connection refused")
+	}
+}
+
+func TestRecognizersSourceRequestURLRejectsInvalidURL(t *testing.T) {
+	src := newRecognizersSource(config.Agent{PIIRecognizersURL: "http://[::1]:namedport/bad"})
+	if _, err := src.requestURL(); err == nil {
+		t.Fatal("expected an error for a malformed base URL")
+	}
+}
+
 func TestRecognizersSourceFetchHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -105,6 +134,37 @@ func TestStartRecognizersSyncSeedsRemote(t *testing.T) {
 	// No direct getter is exported on Remote besides ReplaceConfig; the sync path having run to
 	// completion is asserted indirectly by the fact that startRecognizersSync (which calls fetch
 	// synchronously once before returning in fetch-once mode) returns without blocking or panicking.
+}
+
+func TestStartRecognizersSyncLogsFailedInitialFetch(t *testing.T) {
+	remote := mask.NewRemote(mask.RemoteConfig{})
+	var buf bytes.Buffer
+	cfg := config.Agent{PIIRecognizersURL: "http://127.0.0.1:0", PIIRecognizersPollSeconds: -1}
+	startRecognizersSync(context.Background(), cfg, remote, log.New(&buf, "", 0))
+	if !strings.Contains(buf.String(), "pii-recognizers refresh failed") {
+		t.Fatalf("expected a refresh-failure log, got %q", buf.String())
+	}
+}
+
+func TestStartRecognizersSyncPollsInBackground(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		_ = json.NewEncoder(w).Encode(recognizersResponse{Recognizers: []any{}})
+	}))
+	defer srv.Close()
+
+	remote := mask.NewRemote(mask.RemoteConfig{})
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// PIIRecognizersPollSeconds unset (0) exercises the "below recognizersMinPoll, clamp up" branch
+	// and launches the background poll goroutine; we only assert the synchronous initial fetch ran.
+	cfg := config.Agent{PIIRecognizersURL: srv.URL, PIIRecognizersPollSeconds: 0}
+	startRecognizersSync(ctx, cfg, remote, log.Default())
+
+	if atomic.LoadInt32(&calls) < 1 {
+		t.Fatal("expected at least one synchronous initial fetch")
+	}
 }
 
 func TestStartRecognizersSyncNoURLIsNoop(t *testing.T) {

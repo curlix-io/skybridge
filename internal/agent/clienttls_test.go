@@ -119,6 +119,89 @@ func TestEngineFactoryWithClientTLSForPostgresAndMySQL(t *testing.T) {
 	}
 }
 
+func TestEngineFactoryWithPostgresCatalogResolver(t *testing.T) {
+	r, err := buildPostgresCatalogResolver(config.Agent{PostgresCatalogDSN: "postgres://db.internal:5432/postgres"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	factory := engineFactory(nil, "org-1", r)
+	pg, err := factory("postgres")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pg.Name() != "postgres" {
+		t.Fatalf("expected a postgres engine wired with the catalog resolver, got %v", pg)
+	}
+}
+
+func TestLogPostgresCatalogModeDefaultsNilLogger(t *testing.T) {
+	// A nil logger must fall back to log.Default() rather than panic.
+	r, err := buildPostgresCatalogResolver(config.Agent{PostgresCatalogDSN: "postgres://db.internal:5432/postgres"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	logPostgresCatalogMode(config.Agent{}, r, nil)
+}
+
+func TestBuildPostgresCatalogResolverNilWhenUnconfigured(t *testing.T) {
+	r, err := buildPostgresCatalogResolver(config.Agent{})
+	if err != nil || r != nil {
+		t.Fatalf("expected (nil, nil) when SKYBRIDGE_POSTGRES_CATALOG_DSN is unset, got %v, %v", r, err)
+	}
+}
+
+func TestBuildPostgresCatalogResolverRejectsBadDSN(t *testing.T) {
+	if _, err := buildPostgresCatalogResolver(config.Agent{PostgresCatalogDSN: "not-a-dsn"}); err == nil {
+		t.Fatal("expected an error for a malformed catalog DSN")
+	}
+}
+
+func TestBuildPostgresCatalogResolverFromValidDSN(t *testing.T) {
+	r, err := buildPostgresCatalogResolver(config.Agent{PostgresCatalogDSN: "postgres://user:pass@db.internal:5432/postgres"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r == nil {
+		t.Fatal("expected a configured catalog resolver")
+	}
+}
+
+func TestLogPostgresCatalogModeNoopWhenNil(t *testing.T) {
+	var buf bytes.Buffer
+	logPostgresCatalogMode(config.Agent{}, nil, log.New(&buf, "", 0))
+	if buf.Len() != 0 {
+		t.Fatalf("expected no output when resolver is nil, got %q", buf.String())
+	}
+}
+
+func TestLogPostgresCatalogModeNotesMissingPathLabelURL(t *testing.T) {
+	r, err := buildPostgresCatalogResolver(config.Agent{PostgresCatalogDSN: "postgres://db.internal:5432/postgres"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	logPostgresCatalogMode(config.Agent{}, r, log.New(&buf, "", 0))
+	out := buf.String()
+	if !bytes.Contains(buf.Bytes(), []byte("ENABLED")) {
+		t.Fatalf("expected an enabled message, got %q", out)
+	}
+	if !bytes.Contains(buf.Bytes(), []byte("SKYBRIDGE_PATH_LABEL_URL is not set")) {
+		t.Fatalf("expected a note about PathOverlay not being wired in, got %q", out)
+	}
+}
+
+func TestLogPostgresCatalogModeSilentNoteWhenPathLabelConfigured(t *testing.T) {
+	r, err := buildPostgresCatalogResolver(config.Agent{PostgresCatalogDSN: "postgres://db.internal:5432/postgres"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	logPostgresCatalogMode(config.Agent{PathLabelURL: "https://cp.example.com"}, r, log.New(&buf, "", 0))
+	if bytes.Contains(buf.Bytes(), []byte("is not set")) {
+		t.Fatalf("expected no missing-path-label note, got %q", buf.String())
+	}
+}
+
 // selfSignedCertPEMForTest returns PEM-encoded cert/key bytes for building an agent client TLS config.
 func selfSignedCertPEMForTest(t *testing.T) (certPEM, keyPEM []byte, err error) {
 	t.Helper()

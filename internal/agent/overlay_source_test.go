@@ -4,12 +4,15 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/mask"
@@ -59,6 +62,68 @@ func TestOverlaySourceFetchUsesCustomOrgHeader(t *testing.T) {
 	}
 }
 
+func TestOverlaySourceFetchNilColumnsDefaultsToEmptyMap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"organization_id":"org-9"}`)
+	}))
+	defer srv.Close()
+
+	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL})
+	rules, err := src.fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules == nil || len(rules) != 0 {
+		t.Fatalf("expected a non-nil, empty rules map, got %v", rules)
+	}
+}
+
+func TestStartOverlaySyncDefaultsNilLogger(t *testing.T) {
+	// A nil logger must fall back to log.Default() rather than panic.
+	overlay := mask.NewOverlay(nil)
+	cfg := config.Agent{PIIOverlayURL: "http://127.0.0.1:0", PIIOverlayPollSeconds: -1}
+	startOverlaySync(context.Background(), cfg, overlay, nil)
+}
+
+// TestStartOverlaySyncPollStopsOnContextCancel drives the poll goroutine's ctx.Done() branch by
+// using a very short poll interval and cancelling ctx shortly after — asserting only that the
+// goroutine exits without leaking (best-effort: we can't directly observe the goroutine's exit, but
+// this at least exercises the ticker path beyond the initial synchronous seed).
+func TestStartOverlaySyncPollStopsOnContextCancel(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(overlayResponse{Columns: map[string]string{"email": "[email]"}})
+	}))
+	defer srv.Close()
+
+	overlay := mask.NewOverlay(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	cfg := config.Agent{PIIOverlayURL: srv.URL, PIIOverlayPollSeconds: 15}
+	startOverlaySync(ctx, cfg, overlay, log.Default())
+	cancel()
+	// Give the background goroutine a moment to observe cancellation; nothing to assert beyond "no
+	// panic/hang", which the test harness itself verifies via completion.
+	time.Sleep(20 * time.Millisecond)
+}
+
+func TestOverlaySourceFetchBadJSONDecode(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, "not json")
+	}))
+	defer srv.Close()
+
+	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL})
+	if _, err := src.fetch(context.Background()); err == nil || !strings.Contains(err.Error(), "decode") {
+		t.Fatalf("expected a decode error, got %v", err)
+	}
+}
+
+func TestOverlaySourceFetchDialFailure(t *testing.T) {
+	src := newOverlaySource(config.Agent{PIIOverlayURL: "http://127.0.0.1:1"})
+	if _, err := src.fetch(context.Background()); err == nil {
+		t.Fatal("expected a transport-level error on connection refused")
+	}
+}
+
 func TestOverlaySourceFetchHTTPError(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusForbidden)
@@ -88,6 +153,46 @@ func TestStartOverlaySyncSeedsOverlay(t *testing.T) {
 	out, _ := overlay.MaskRow(context.Background(), []mask.Column{{Name: "email", Text: true, FreeText: true}}, [][]byte{[]byte("a@b.com")})
 	if string(out[0]) != "[email]" {
 		t.Fatalf("expected seeded rule applied, got %q", out[0])
+	}
+}
+
+func TestStartOverlaySyncLogsFailedInitialFetch(t *testing.T) {
+	overlay := mask.NewOverlay(map[string]string{"email": "[static]"})
+	var buf bytes.Buffer
+	cfg := config.Agent{PIIOverlayURL: "http://127.0.0.1:0", PIIOverlayPollSeconds: -1}
+	startOverlaySync(context.Background(), cfg, overlay, log.New(&buf, "", 0))
+	if !strings.Contains(buf.String(), "pii-overlay refresh failed") {
+		t.Fatalf("expected a refresh-failure log, got %q", buf.String())
+	}
+	// Static overlay must survive the failed refresh.
+	out, _ := overlay.MaskRow(context.Background(), []mask.Column{{Name: "email", Text: true, FreeText: true}}, [][]byte{[]byte("a@b.com")})
+	if string(out[0]) != "[static]" {
+		t.Fatalf("expected static overlay to remain, got %q", out[0])
+	}
+}
+
+func TestStartOverlaySyncPollsInBackground(t *testing.T) {
+	var calls int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		n := atomic.AddInt32(&calls, 1)
+		_ = json.NewEncoder(w).Encode(overlayResponse{Columns: map[string]string{"email": fmt.Sprintf("[email-%d]", n)}})
+	}))
+	defer srv.Close()
+
+	overlay := mask.NewOverlay(nil)
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	// PIIOverlayPollSeconds unset (0) exercises the "below overlayMinPoll, clamp up" branch; we
+	// don't want to wait a full 15s in a unit test, so just confirm the initial synchronous seed
+	// happened and the background goroutine was launched without blocking or panicking.
+	cfg := config.Agent{PIIOverlayURL: srv.URL, PIIOverlayPollSeconds: 0}
+	startOverlaySync(ctx, cfg, overlay, log.Default())
+
+	if atomic.LoadInt32(&calls) < 1 {
+		t.Fatal("expected at least one synchronous initial fetch")
+	}
+	if !overlay.Enabled() {
+		t.Fatal("expected overlay to be seeded")
 	}
 }
 
@@ -138,6 +243,22 @@ func TestGuardrailHalfConfiguredPresidio(t *testing.T) {
 	out := guardrailLog(config.Agent{MaskAnalyzeURL: "http://a"})
 	if !strings.Contains(out, "half-configured") {
 		t.Fatalf("expected half-config warning, got %q", out)
+	}
+}
+
+func TestGuardrailDefaultsNilLogger(t *testing.T) {
+	// A nil logger must fall back to log.Default() rather than panic.
+	logMaskingGuardrails(config.Agent{}, nil)
+}
+
+func TestGuardrailStrictModeWarnsAboutAbort(t *testing.T) {
+	out := guardrailLog(config.Agent{
+		MaskAnalyzeURL:   "http://a",
+		MaskAnonymizeURL: "http://b",
+		MaskMode:         config.ModeStrict,
+	})
+	if !strings.Contains(out, "SKYBRIDGE_MASK_MODE=strict") {
+		t.Fatalf("expected a strict-mode warning, got %q", out)
 	}
 }
 

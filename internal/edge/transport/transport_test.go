@@ -238,3 +238,208 @@ done:
 		t.Fatalf("expected error stop, got: %+v", resp)
 	}
 }
+
+// fakeGatewayPing registers the connector then sends a Ping, waiting for the connector's Heartbeat
+// reply before ending the stream cleanly (io.EOF on the client side).
+type fakeGatewayPing struct {
+	connectorv1.UnimplementedConnectorGatewayServer
+	gotReg       chan *connectorv1.Register
+	gotHeartbeat chan struct{}
+}
+
+func (g *fakeGatewayPing) Connect(stream connectorv1.ConnectorGateway_ConnectServer) error {
+	first, err := stream.Recv()
+	if err != nil {
+		return err
+	}
+	if first.GetRegister() == nil {
+		return errors.New("expected Register first")
+	}
+	g.gotReg <- first.GetRegister()
+
+	if err := stream.Send(&connectorv1.GatewayMessage{
+		Msg: &connectorv1.GatewayMessage_Ping{Ping: &connectorv1.Ping{}},
+	}); err != nil {
+		return err
+	}
+
+	for {
+		msg, err := stream.Recv()
+		if err != nil {
+			if errors.Is(err, io.EOF) {
+				return nil
+			}
+			return err
+		}
+		if msg.GetHeartbeat() != nil {
+			select {
+			case g.gotHeartbeat <- struct{}{}:
+			default:
+			}
+			return nil // end the stream cleanly once we've observed the heartbeat
+		}
+	}
+}
+
+func TestServeRespondsToPingWithHeartbeat(t *testing.T) {
+	fg := &fakeGatewayPing{
+		gotReg:       make(chan *connectorv1.Register, 1),
+		gotHeartbeat: make(chan struct{}, 1),
+	}
+
+	lis := bufconn.Listen(1024 * 1024)
+	srv := grpc.NewServer()
+	connectorv1.RegisterConnectorGatewayServer(srv, fg)
+	go srv.Serve(lis)
+	defer srv.Stop()
+
+	conn := dialBufconn(t, srv, lis)
+	defer conn.Close()
+
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	serveErr := make(chan error, 1)
+	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true) }()
+
+	select {
+	case <-fg.gotReg:
+	case <-ctx.Done():
+		t.Fatal("never received Register")
+	}
+	select {
+	case <-fg.gotHeartbeat:
+	case <-ctx.Done():
+		t.Fatal("never received heartbeat")
+	}
+	select {
+	case err := <-serveErr:
+		if err != nil {
+			t.Fatalf("serve returned error: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatal("serve did not return after server closed stream")
+	}
+}
+
+// fakeGatewayConnectErr always rejects Connect, exercising the dial-error path of serve.
+type fakeGatewayConnectErr struct {
+	connectorv1.UnimplementedConnectorGatewayServer
+}
+
+func (fakeGatewayConnectErr) Connect(stream connectorv1.ConnectorGateway_ConnectServer) error {
+	return errors.New("connect rejected")
+}
+
+func TestServeReturnsErrorWhenStreamRejected(t *testing.T) {
+	fg := fakeGatewayConnectErr{}
+	lis := bufconn.Listen(1024 * 1024)
+	srv := grpc.NewServer()
+	connectorv1.RegisterConnectorGatewayServer(srv, fg)
+	go srv.Serve(lis)
+	defer srv.Stop()
+
+	conn := dialBufconn(t, srv, lis)
+	defer conn.Close()
+
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	err := c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true)
+	if err == nil {
+		t.Fatal("expected error from rejected stream")
+	}
+}
+
+func TestCancelWorkCancelsTrackedRun(t *testing.T) {
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+
+	runCtx, cancel := context.WithCancel(context.Background())
+	c.mu.Lock()
+	c.runs["run-1"] = cancel
+	c.mu.Unlock()
+
+	c.cancelWork("run-1")
+	select {
+	case <-runCtx.Done():
+	case <-time.After(time.Second):
+		t.Fatal("cancelWork did not cancel run context")
+	}
+
+	// Cancelling an unknown run id must be a no-op, not a panic.
+	c.cancelWork("does-not-exist")
+}
+
+func TestStartWorkIgnoresEmptyRunID(t *testing.T) {
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c.startWork(context.Background(), &safeStream{}, &connectorv1.WorkAssignment{RunId: ""})
+	c.mu.Lock()
+	n := len(c.runs)
+	c.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("expected no run tracked for empty run id, got %d", n)
+	}
+}
+
+func TestStartWorkDuplicateRunIDIsRejected(t *testing.T) {
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c.mu.Lock()
+	c.runs["dup"] = func() {}
+	c.mu.Unlock()
+
+	// startWork on a duplicate run id must return before ever touching ss, so a nil stream here is
+	// safe and proves the early-return path.
+	c.startWork(context.Background(), nil, &connectorv1.WorkAssignment{RunId: "dup"})
+
+	c.mu.Lock()
+	n := len(c.runs)
+	c.mu.Unlock()
+	if n != 1 {
+		t.Fatalf("expected duplicate run id to be ignored, got %d runs", n)
+	}
+}
+
+func TestDialProducesClientForInsecureAndSystemRoots(t *testing.T) {
+	c := New(Config{Target: "127.0.0.1:0", Insecure: true}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	conn, err := c.dial(nil)
+	if err != nil {
+		t.Fatalf("dial insecure: %v", err)
+	}
+	_ = conn.Close()
+
+	c2 := New(Config{Target: "127.0.0.1:0"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	conn2, err := c2.dial(nil)
+	if err != nil {
+		t.Fatalf("dial system-roots TLS: %v", err)
+	}
+	_ = conn2.Close()
+}
+
+func TestRunFatalConfigErrorReturnsWithoutReconnect(t *testing.T) {
+	ca := newTestCA(t)
+	c := New(Config{
+		Target:      "127.0.0.1:0",
+		TenantID:    "org-1",
+		ConnectorID: "edge-1",
+		CABundlePEM: ca.certPEM,
+		TLSDir:      t.TempDir(), // no cert on disk, no enroll token -> fatal
+	}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+
+	err := c.Run(context.Background())
+	if err == nil {
+		t.Fatal("expected fatal config error from Run")
+	}
+}
+
+func TestRunReconnectsUntilContextCancelled(t *testing.T) {
+	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 5 * time.Millisecond}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+	err := c.Run(ctx)
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected context.DeadlineExceeded, got %v", err)
+	}
+}

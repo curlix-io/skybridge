@@ -134,6 +134,13 @@ func negotiateUpstreamTLS(upstream net.Conn, cred UpstreamCredential) (*tls.Conn
 		if pool.AppendCertsFromPEM(cred.CACertPEM) {
 			tlsCfg.RootCAs = pool
 			tlsCfg.InsecureSkipVerify = false
+			// tls.Client requires either ServerName or InsecureSkipVerify; derive it from the
+			// already-dialed connection's remote address since the cluster API server's hostname/IP
+			// is not otherwise available here (CredentialResolver resolves per-request auth, not
+			// connection-time identity).
+			if host, _, err := net.SplitHostPort(upstream.RemoteAddr().String()); err == nil && host != "" {
+				tlsCfg.ServerName = host
+			}
 		}
 	}
 	tconn := tls.Client(upstream, tlsCfg)

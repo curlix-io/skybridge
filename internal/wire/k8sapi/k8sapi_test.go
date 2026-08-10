@@ -199,6 +199,294 @@ func TestProxyInjectRejectsMissingBearerToken(t *testing.T) {
 	<-done
 }
 
+func TestNegotiateUpstreamTLSHandshakeFailure(t *testing.T) {
+	upstreamA, upstreamB := net.Pipe()
+	defer upstreamB.Close()
+	go func() {
+		buf := make([]byte, 4096)
+		_, _ = upstreamB.Read(buf)
+		_ = upstreamB.Close()
+	}()
+
+	_, err := negotiateUpstreamTLS(upstreamA, UpstreamCredential{InsecureSkipVerify: true})
+	if err == nil || !strings.Contains(err.Error(), "upstream TLS handshake") {
+		t.Fatalf("expected upstream TLS handshake error, got %v", err)
+	}
+}
+
+func TestNegotiateUpstreamTLSWithValidCACertPEM(t *testing.T) {
+	// negotiateUpstreamTLS derives ServerName from upstream.RemoteAddr() when a CACertPEM is
+	// supplied without InsecureSkipVerify, so cluster-CA-pinned upstream verification succeeds
+	// against a well-behaved upstream reachable over a real (non-net.Pipe) connection — net.Pipe's
+	// RemoteAddr() is the string "pipe", which has no host to derive a ServerName from, so this test
+	// uses a real TCP loopback listener instead.
+	certPEM, tlsCert := selfSignedCertPEM(t)
+	serverCfg := &tls.Config{Certificates: []tls.Certificate{tlsCert}}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("listen: %v", err)
+	}
+	defer ln.Close()
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			return
+		}
+		tconn := tls.Server(conn, serverCfg)
+		_ = tconn.Handshake()
+		_ = tconn.Close()
+	}()
+
+	upstream, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatalf("dial: %v", err)
+	}
+	defer upstream.Close()
+
+	tconn, err := negotiateUpstreamTLS(upstream, UpstreamCredential{CACertPEM: certPEM, InsecureSkipVerify: false})
+	if err != nil {
+		t.Fatalf("expected handshake to succeed with ServerName derived from the upstream's remote address, got: %v", err)
+	}
+	defer tconn.Close()
+}
+
+func TestRecordRequestBodyNilBody(t *testing.T) {
+	rec := &captureRecorder{}
+	req, _ := http.NewRequest(http.MethodGet, "http://cluster/api/v1/namespaces/default/pods", nil)
+	req.Body = nil
+	if err := recordRequestBody(rec, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rec.inputs) != 1 || rec.inputs[0] != "GET /api/v1/namespaces/default/pods" {
+		t.Fatalf("unexpected recorded input: %v", rec.inputs)
+	}
+}
+
+func TestRecordRequestBodyWithBody(t *testing.T) {
+	rec := &captureRecorder{}
+	req, _ := http.NewRequest(http.MethodPost, "http://cluster/api/v1/namespaces/default/pods", strings.NewReader(`{"a":1}`))
+	if err := recordRequestBody(rec, req); err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(rec.inputs) != 1 || !strings.Contains(rec.inputs[0], `{"a":1}`) {
+		t.Fatalf("expected body captured in recorded input, got %v", rec.inputs)
+	}
+	// The body must still be readable downstream after recordRequestBody re-wraps it.
+	replayed, err := io.ReadAll(req.Body)
+	if err != nil {
+		t.Fatalf("re-reading req.Body: %v", err)
+	}
+	if string(replayed) != `{"a":1}` {
+		t.Fatalf("expected req.Body replayable, got %q", replayed)
+	}
+}
+
+type captureRecorder struct {
+	inputs  []string
+	outputs []string
+}
+
+func (c *captureRecorder) RecordInput(raw []byte)   { c.inputs = append(c.inputs, string(raw)) }
+func (c *captureRecorder) RecordOutput(text string) { c.outputs = append(c.outputs, text) }
+
+func TestDrainAndCloseNilBody(t *testing.T) {
+	// Must not panic on a nil body (e.g. a GET request with no body).
+	drainAndClose(nil)
+}
+
+func TestDrainAndCloseDrainsAndCloses(t *testing.T) {
+	rc := io.NopCloser(strings.NewReader("leftover unread bytes"))
+	drainAndClose(rc)
+	// NopCloser's Close is a no-op, so just confirm draining doesn't error/panic and consumes input.
+	n, err := rc.Read(make([]byte, 1))
+	if err != io.EOF && n != 0 {
+		t.Fatalf("expected reader drained to EOF, got n=%d err=%v", n, err)
+	}
+}
+
+// selfSignedCertPEM builds a fresh self-signed cert and returns both its PEM-encoded bytes and the
+// parsed tls.Certificate, for tests that need the raw PEM to feed into UpstreamCredential.CACertPEM.
+func selfSignedCertPEM(t *testing.T) ([]byte, tls.Certificate) {
+	t.Helper()
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("key: %v", err)
+	}
+	tmpl := &x509.Certificate{
+		SerialNumber: big.NewInt(1),
+		Subject:      pkix.Name{CommonName: "skybridge-test"},
+		NotBefore:    time.Now().Add(-time.Hour),
+		NotAfter:     time.Now().Add(time.Hour),
+		DNSNames:     []string{"localhost"},
+		IPAddresses:  []net.IP{net.ParseIP("127.0.0.1")},
+	}
+	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
+	if err != nil {
+		t.Fatalf("cert: %v", err)
+	}
+	keyDER, _ := x509.MarshalECPrivateKey(key)
+	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	cert, err := tls.X509KeyPair(certPEM, keyPEM)
+	if err != nil {
+		t.Fatalf("keypair: %v", err)
+	}
+	return certPEM, cert
+}
+
+func TestEngineName(t *testing.T) {
+	e := New(nil)
+	if e.Name() != "kubernetes" {
+		t.Fatalf("expected Name()=kubernetes, got %q", e.Name())
+	}
+}
+
+func TestProxyInjectRequiresResolver(t *testing.T) {
+	clientA, clientB := net.Pipe()
+	defer clientA.Close()
+	defer clientB.Close()
+	upstreamA, upstreamB := net.Pipe()
+	defer upstreamA.Close()
+	defer upstreamB.Close()
+
+	engine := New(selfSignedTLSConfig(t))
+	err := engine.ProxyInject(context.Background(), clientB, upstreamB, nil, wire.NoopRecorder{})
+	if err == nil || !strings.Contains(err.Error(), "credential injection requires a resolver") {
+		t.Fatalf("expected resolver-required error, got %v", err)
+	}
+}
+
+func TestProxyInjectRequiresClientTLS(t *testing.T) {
+	clientA, clientB := net.Pipe()
+	defer clientA.Close()
+	defer clientB.Close()
+	upstreamA, upstreamB := net.Pipe()
+	defer upstreamA.Close()
+	defer upstreamB.Close()
+
+	resolver := func(ctx context.Context, sessionToken string) (UpstreamCredential, error) {
+		t.Fatal("resolver should not be called when client TLS is unconfigured")
+		return UpstreamCredential{}, nil
+	}
+	engine := New(nil)
+	err := engine.ProxyInject(context.Background(), clientB, upstreamB, resolver, nil)
+	if err == nil || !strings.Contains(err.Error(), "client TLS must be configured") {
+		t.Fatalf("expected client-TLS-required error, got %v", err)
+	}
+}
+
+func TestProxyInjectFailsOnBadClientHandshake(t *testing.T) {
+	clientA, clientB := net.Pipe()
+	upstreamA, upstreamB := net.Pipe()
+	defer upstreamA.Close()
+	defer upstreamB.Close()
+
+	resolver := func(ctx context.Context, sessionToken string) (UpstreamCredential, error) {
+		t.Fatal("resolver should not be called when the client TLS handshake fails")
+		return UpstreamCredential{}, nil
+	}
+	engine := New(selfSignedTLSConfig(t))
+	done := make(chan error, 1)
+	go func() {
+		done <- engine.ProxyInject(context.Background(), clientB, upstreamB, resolver, wire.NoopRecorder{})
+	}()
+
+	// Write non-TLS bytes at the "server" so its TLS handshake fails.
+	_, _ = clientA.Write([]byte("not a tls handshake at all, definitely not"))
+	_ = clientA.Close()
+
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "client TLS handshake") {
+			t.Fatalf("expected client TLS handshake error, got %v", err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ProxyInject did not return after bad client handshake")
+	}
+}
+
+func TestProxyInjectRejectsResolverError(t *testing.T) {
+	clientPlain, agentClientEnd := net.Pipe()
+	_, agentUpstreamEnd := net.Pipe()
+	defer clientPlain.Close()
+
+	serverTLS := selfSignedTLSConfig(t)
+	resolver := func(ctx context.Context, sessionToken string) (UpstreamCredential, error) {
+		return UpstreamCredential{}, errors.New("session expired")
+	}
+
+	engine := New(serverTLS)
+	done := make(chan error, 1)
+	go func() {
+		done <- engine.ProxyInject(context.Background(), agentClientEnd, agentUpstreamEnd, resolver, wire.NoopRecorder{})
+	}()
+
+	clientTLSConn := tls.Client(clientPlain, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test
+	req, _ := http.NewRequest(http.MethodGet, "https://cluster/api/v1/namespaces/default/pods", nil)
+	req.Header.Set("Authorization", "Bearer session-token")
+	if err := req.Write(clientTLSConn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(clientTLSConn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusForbidden {
+		t.Fatalf("expected 403, got %d", resp.StatusCode)
+	}
+	_ = clientTLSConn.Close()
+	<-done
+}
+
+func TestProxyInjectBadGatewayOnUpstreamTLSFailure(t *testing.T) {
+	clientPlain, agentClientEnd := net.Pipe()
+	agentUpstreamEnd, upstreamPlain := net.Pipe()
+	defer clientPlain.Close()
+
+	// upstreamPlain never speaks TLS back — negotiateUpstreamTLS's handshake must fail.
+	go func() {
+		buf := make([]byte, 4096)
+		_, _ = upstreamPlain.Read(buf)
+		_ = upstreamPlain.Close()
+	}()
+
+	serverTLS := selfSignedTLSConfig(t)
+	resolver := func(ctx context.Context, sessionToken string) (UpstreamCredential, error) {
+		return UpstreamCredential{BearerToken: "real-token", InsecureSkipVerify: true}, nil
+	}
+
+	engine := New(serverTLS)
+	done := make(chan error, 1)
+	go func() {
+		done <- engine.ProxyInject(context.Background(), agentClientEnd, agentUpstreamEnd, resolver, wire.NoopRecorder{})
+	}()
+
+	clientTLSConn := tls.Client(clientPlain, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test
+	req, _ := http.NewRequest(http.MethodGet, "https://cluster/api/v1/namespaces/default/pods", nil)
+	req.Header.Set("Authorization", "Bearer session-token")
+	if err := req.Write(clientTLSConn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+	resp, err := http.ReadResponse(bufio.NewReader(clientTLSConn), req)
+	if err != nil {
+		t.Fatalf("read response: %v", err)
+	}
+	if resp.StatusCode != http.StatusBadGateway {
+		t.Fatalf("expected 502, got %d", resp.StatusCode)
+	}
+	_ = clientTLSConn.Close()
+
+	select {
+	case err := <-done:
+		if err == nil {
+			t.Fatal("expected ProxyInject to return the upstream TLS handshake error")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("ProxyInject did not return after upstream TLS failure")
+	}
+}
+
 func TestProxyInjectRejectsInteractiveSubresource(t *testing.T) {
 	clientPlain, agentClientEnd := net.Pipe()
 	_, agentUpstreamEnd := net.Pipe()
