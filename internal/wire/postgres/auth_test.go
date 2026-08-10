@@ -3,10 +3,10 @@ package postgres
 import (
 	"bufio"
 	"context"
+	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
-	"encoding/hex"
 	"errors"
 	"io"
 	"net"
@@ -18,18 +18,35 @@ import (
 	"github.com/curlix-io/skybridge/internal/wire"
 )
 
-func TestPBKDF2SHA256Vectors(t *testing.T) {
-	// Well-known PBKDF2-HMAC-SHA256 test vector (P="password", S="salt", c=1, dkLen=32).
-	got := hex.EncodeToString(pbkdf2SHA256([]byte("password"), []byte("salt"), 1, 32))
-	want := "120fb6cffcf8b32c43e7225256c4f837a86548c92ccc35480805987cb70be17b"
-	if got != want {
-		t.Fatalf("pbkdf2 c=1: got %s want %s", got, want)
+// pbkdf2SHA256ForTest/hmacSHA256ForTest are test-only re-implementations of the math extracted to
+// internal/wire/scram (see TestPBKDF2_SHA256_RFCVectors there for the RFC-vector regression test
+// that pins the shared implementation) — kept local here purely so this file's fake SCRAM-SHA-256
+// server fixture doesn't need to import scram's unexported internals.
+func pbkdf2SHA256ForTest(password, salt []byte, iter, keyLen int) []byte {
+	hLen := sha256.Size
+	numBlocks := (keyLen + hLen - 1) / hLen
+	out := make([]byte, 0, numBlocks*hLen)
+	var block [4]byte
+	for i := 1; i <= numBlocks; i++ {
+		binary.BigEndian.PutUint32(block[:], uint32(i))
+		u := hmacSHA256ForTest(password, append(append([]byte{}, salt...), block[:]...))
+		t := make([]byte, len(u))
+		copy(t, u)
+		for j := 1; j < iter; j++ {
+			u = hmacSHA256ForTest(password, u)
+			for k := range t {
+				t[k] ^= u[k]
+			}
+		}
+		out = append(out, t...)
 	}
-	got2 := hex.EncodeToString(pbkdf2SHA256([]byte("password"), []byte("salt"), 2, 32))
-	want2 := "ae4d0c95af6b46d32d0adff928f06dd02a303f8ef3c251dfd6e2d85a95474c43"
-	if got2 != want2 {
-		t.Fatalf("pbkdf2 c=2: got %s want %s", got2, want2)
-	}
+	return out[:keyLen]
+}
+
+func hmacSHA256ForTest(key, msg []byte) []byte {
+	h := hmac.New(sha256.New, key)
+	h.Write(msg)
+	return h.Sum(nil)
 }
 
 func TestMD5Password(t *testing.T) {
@@ -419,7 +436,7 @@ func scramServerHandshake(server net.Conn, password string) error {
 	respLen := int(binary.BigEndian.Uint32(rest[0:4]))
 	clientFirst := string(rest[4 : 4+respLen])
 	clientFirstBare := strings.TrimPrefix(clientFirst, "n,,")
-	clientNonce := parseSCRAMAttrs(clientFirstBare)["r"]
+	clientNonce := parseSCRAMAttrsForTest(clientFirstBare)["r"]
 
 	salt := []byte("0123456789abcdef")
 	iter := 4096
@@ -440,11 +457,11 @@ func scramServerHandshake(server net.Conn, password string) error {
 	proofB64 := strings.Split(clientFinal, ",p=")[1]
 	gotProof, _ := base64.StdEncoding.DecodeString(proofB64)
 
-	saltedPassword := pbkdf2SHA256([]byte(password), salt, iter, sha256.Size)
-	clientKey := hmacSHA256(saltedPassword, []byte("Client Key"))
+	saltedPassword := pbkdf2SHA256ForTest([]byte(password), salt, iter, sha256.Size)
+	clientKey := hmacSHA256ForTest(saltedPassword, []byte("Client Key"))
 	storedKey := sha256.Sum256(clientKey)
 	authMessage := clientFirstBare + "," + serverFirst + "," + clientFinalWithoutProof
-	clientSignature := hmacSHA256(storedKey[:], []byte(authMessage))
+	clientSignature := hmacSHA256ForTest(storedKey[:], []byte(authMessage))
 	// Recover the client key the client used and verify it matches our stored key.
 	recovered := make([]byte, len(gotProof))
 	for i := range gotProof {
@@ -456,8 +473,8 @@ func scramServerHandshake(server net.Conn, password string) error {
 		writeErr(server, "invalid SCRAM proof")
 		return errors.New("client proof did not verify")
 	}
-	serverKey := hmacSHA256(saltedPassword, []byte("Server Key"))
-	serverSignature := hmacSHA256(serverKey, []byte(authMessage))
+	serverKey := hmacSHA256ForTest(saltedPassword, []byte("Server Key"))
+	serverSignature := hmacSHA256ForTest(serverKey, []byte(authMessage))
 	writeAuthRaw(server, authSASLFinal, []byte("v="+base64.StdEncoding.EncodeToString(serverSignature)))
 	writeAuthRaw(server, authOK, nil)
 	return nil
