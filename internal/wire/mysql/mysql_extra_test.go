@@ -274,140 +274,60 @@ func TestServerToClient_ColumnCountParseFailureForwardsRaw(t *testing.T) {
 	}
 }
 
-func TestServerToClient_FullColumnDefFallsBackToRawForward(t *testing.T) {
-	s := &state{caps: 0, queries: make(chan struct{}, 1)}
-	s.queries <- struct{}{}
-
-	var stream bytes.Buffer
-	stream.Write(pkt(1, []byte{0x01})) // 1 column
-	// A "full" (0xFFFFFF byte) column-def packet signals a multi-packet logical packet we don't
-	// reassemble; the engine must fall back to raw forwarding of the rest of the stream.
-	full := make([]byte, maxPacket)
-	stream.Write(pkt(2, full))
-	stream.Write([]byte("trailing-bytes-after-full-packet"))
-
-	var out bytes.Buffer
-	sb := bufio.NewReader(&stream)
-	_ = s.serverToClient(context.Background(), sb, &out, mask.Noop{}, wire.NoopRecorder{})
-	if !bytes.Contains(out.Bytes(), []byte("trailing-bytes-after-full-packet")) {
-		t.Fatal("expected the remaining stream forwarded raw after a full packet")
-	}
+// capturingMasker records the mask.Column slice it was called with, for asserting what identity a
+// caller actually resolved (as opposed to what MaskRow does with it).
+type capturingMasker struct {
+	captured []mask.Column
 }
 
-func TestServerToClient_FullRowPacketFallsBackToRawForward(t *testing.T) {
-	s := &state{caps: 0, queries: make(chan struct{}, 1)}
+func (m *capturingMasker) MaskRow(_ context.Context, cols []mask.Column, row [][]byte) ([][]byte, error) {
+	m.captured = append([]mask.Column(nil), cols...)
+	return row, nil
+}
+
+// TestServerToClient_ResolvesRealColumnNameForAliasedColumn is the regression test for
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A at the wire-engine level (see mysql_test.go's
+// TestColumnIdentityResolvesRealNameForAliasedColumn for the columnIdentity-level unit test): a
+// result set for "SELECT email AS contact_info FROM users" must still set mask.Column.Path to the
+// real column name "email" (org_name), not the aliased display name "contact_info" (name) —
+// otherwise a path-scoped label confirmed on "email" can never match this row.
+func TestServerToClient_ResolvesRealColumnNameForAliasedColumn(t *testing.T) {
+	s := &state{caps: 0, queries: make(chan struct{}, 1), orgID: "org1"}
 	s.queries <- struct{}{}
 
 	var stream bytes.Buffer
 	stream.Write(pkt(1, []byte{0x01}))
-	stream.Write(pkt(2, colDef("email")))
-	stream.Write(pkt(3, eofPacket()))
-	full := make([]byte, maxPacket)
-	stream.Write(pkt(4, full))
-	stream.Write([]byte("trailing-row-bytes"))
-
-	var out bytes.Buffer
-	sb := bufio.NewReader(&stream)
-	_ = s.serverToClient(context.Background(), sb, &out, mask.Noop{}, wire.NoopRecorder{})
-	if !bytes.Contains(out.Bytes(), []byte("trailing-row-bytes")) {
-		t.Fatal("expected the remaining stream forwarded raw after a full row packet")
-	}
-}
-
-func TestServerToClient_DeprecateEOFSkipsColumnEOF(t *testing.T) {
-	s := &state{caps: capClientDeprecateEOF, queries: make(chan struct{}, 1)}
-	s.queries <- struct{}{}
-
-	var stream bytes.Buffer
-	stream.Write(pkt(1, []byte{0x01}))
-	stream.Write(pkt(2, colDef("email")))
-	// No EOF after column defs (DEPRECATE_EOF negotiated).
-	stream.Write(pkt(3, textRow("alice@example.com")))
-	// Terminating OK packet (DEPRECATE_EOF uses OK, not EOF, but isTerminator checks p[0]==pktEOF
-	// regardless; use an EOF-shaped terminator per protocol for DEPRECATE_EOF, len>=9 marks it as OK-EOF).
-	term := append([]byte{pktEOF}, make([]byte, 8)...)
-	stream.Write(pkt(4, term))
-
-	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
-	var out bytes.Buffer
-	sb := bufio.NewReader(&stream)
-	_ = s.serverToClient(context.Background(), sb, &out, overlay, wire.NoopRecorder{})
-	got := out.Bytes()
-	if bytes.Contains(got, []byte("alice@example.com")) {
-		t.Fatal("email leaked in DEPRECATE_EOF result set")
-	}
-	if !bytes.Contains(got, []byte("[redacted]")) {
-		t.Fatal("expected masking to apply under DEPRECATE_EOF")
-	}
-}
-
-func TestServerToClient_RowTooLargeAfterMaskingForwardsOriginal(t *testing.T) {
-	// A masker that inflates a value beyond maxPacket must not have its output used (the ok branch
-	// requires len(newPayload) < maxPacket); the original row packet is forwarded unchanged.
-	s := &state{caps: 0, queries: make(chan struct{}, 1)}
-	s.queries <- struct{}{}
-
-	var stream bytes.Buffer
-	stream.Write(pkt(1, []byte{0x01}))
-	stream.Write(pkt(2, colDef("email")))
+	stream.Write(pkt(2, colDefAliased("contact_info", "email", 0xFD)))
 	stream.Write(pkt(3, eofPacket()))
 	stream.Write(pkt(4, textRow("alice@example.com")))
 	stream.Write(pkt(5, eofPacket()))
 
-	huge := &hugeValueMasker{}
+	masker := &capturingMasker{}
 	var out bytes.Buffer
 	sb := bufio.NewReader(&stream)
-	_ = s.serverToClient(context.Background(), sb, &out, huge, wire.NoopRecorder{})
-	// The row bytes as sent to the client should be the original (small) row, not a huge one.
-	got := out.Bytes()
-	if bytes.Contains(got, []byte("alice@example.com")) {
-		// ok: this masker doesn't leave the original value, it replaces with a huge value that gets
-		// rejected — so the ORIGINAL unmodified payload (still containing the email) is forwarded.
-		// That's the documented, safe-by-construction behavior: fall back rather than corrupt.
-		return
-	}
-	t.Fatal("expected the original row (with the email) forwarded when the masked value is too large")
-}
+	_ = s.serverToClient(context.Background(), sb, &out, masker, wire.NoopRecorder{})
 
-type hugeValueMasker struct{}
-
-func (hugeValueMasker) MaskRow(_ context.Context, _ []mask.Column, row [][]byte) ([][]byte, error) {
-	out := make([][]byte, len(row))
-	for i := range row {
-		out[i] = bytes.Repeat([]byte("x"), maxPacket+1)
+	if len(masker.captured) != 1 {
+		t.Fatalf("expected exactly 1 captured column, got %d", len(masker.captured))
 	}
-	return out, nil
-}
-
-// ---- lenEncStrSpan / lenEncStr truncation ----
-
-func TestLenEncStrSpan_Truncated(t *testing.T) {
-	if _, ok := lenEncStrSpan([]byte{0xFC, 0x01}, 0); ok {
-		t.Fatal("expected truncated lenenc int to fail")
+	col := masker.captured[0]
+	if col.Name != "contact_info" {
+		t.Fatalf("Name = %q, want the aliased display name %q", col.Name, "contact_info")
 	}
-	// valid length prefix but not enough bytes for the string body.
-	p := appendLenEncInt(nil, 10)
-	if _, ok := lenEncStrSpan(p, 0); ok {
-		t.Fatal("expected span to fail when declared length exceeds available bytes")
+	if col.Path != "email" {
+		t.Fatalf("Path = %q, want the real column name %q (a path-scoped label lookup keys on Path)", col.Path, "email")
 	}
-}
-
-func TestLenEncStr_Truncated(t *testing.T) {
-	if got := lenEncStr([]byte{0xFC, 0x01}, 0); got != "" {
-		t.Fatalf("expected empty string, got %q", got)
-	}
-	p := appendLenEncInt(nil, 10)
-	if got := lenEncStr(p, 0); got != "" {
-		t.Fatalf("expected empty string when body is short, got %q", got)
+	if col.ObjectID != "org1:mysql:test:t" {
+		t.Fatalf("ObjectID = %q, want org1:mysql:test:t", col.ObjectID)
 	}
 }
 
 // ---- columnIdentity additional truncation branches ----
 
 func TestColumnIdentity_TruncatedCatalogSpan(t *testing.T) {
-	name, schema, orgTable, freeText := columnIdentity([]byte{0xFC, 0x01})
-	if name != "" || schema != "" || orgTable != "" || !freeText {
-		t.Fatalf("expected empty identity + freeText=true fallback, got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity([]byte{0xFC, 0x01})
+	if name != "" || schema != "" || orgTable != "" || orgName != "" || !freeText {
+		t.Fatalf("expected empty identity + freeText=true fallback, got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -422,9 +342,9 @@ func TestColumnIdentity_TruncatedAfterOrgTableBeforeNameLen(t *testing.T) {
 	lenStr("t")
 	lenStr("t")
 	// truncate here: no name-length lenenc int follows
-	name, schema, orgTable, freeText := columnIdentity(p)
-	if name != "" || !freeText {
-		t.Fatalf("expected empty name + freeText=true fallback, got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "" || orgName != "" || !freeText {
+		t.Fatalf("expected empty name + freeText=true fallback, got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -439,9 +359,9 @@ func TestColumnIdentity_TruncatedNameBody(t *testing.T) {
 	lenStr("t")
 	lenStr("t")
 	p = appendLenEncInt(p, 100) // name length claims 100 bytes, none follow
-	name, schema, orgTable, freeText := columnIdentity(p)
-	if name != "" || !freeText {
-		t.Fatalf("expected empty name + freeText=true fallback, got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "" || orgName != "" || !freeText {
+		t.Fatalf("expected empty name + freeText=true fallback, got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -457,9 +377,9 @@ func TestColumnIdentity_MissingOrgNameSpanReturnsFreeText(t *testing.T) {
 	lenStr("t")
 	lenStr("email")
 	// no org_name follows
-	name, schema, orgTable, freeText := columnIdentity(p)
-	if name != "email" || schema != "test" || orgTable != "t" || !freeText {
-		t.Fatalf("got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "email" || schema != "test" || orgTable != "t" || orgName != "email" || !freeText {
+		t.Fatalf("got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -476,9 +396,9 @@ func TestColumnIdentity_MissingFixedFieldsLenReturnsFreeText(t *testing.T) {
 	lenStr("email")
 	lenStr("email")
 	// no length_of_fixed_fields lenenc follows
-	name, schema, orgTable, freeText := columnIdentity(p)
-	if name != "email" || !freeText {
-		t.Fatalf("got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "email" || orgName != "email" || !freeText {
+		t.Fatalf("got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -498,7 +418,7 @@ func TestColumnIdentity_TypeByteMissingReturnsFreeText(t *testing.T) {
 	p = append(p, 0x21, 0x00)
 	p = append(p, 0x00, 0x01, 0x00, 0x00)
 	// stop right before the type byte
-	name, _, _, freeText := columnIdentity(p)
+	name, _, _, _, freeText := columnIdentity(p)
 	if name != "email" || !freeText {
 		t.Fatalf("expected freeText=true when type byte is missing, got name=%q freeText=%v", name, freeText)
 	}

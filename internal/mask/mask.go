@@ -39,7 +39,41 @@ type Column struct {
 	// value the client's type decoder can no longer parse, corrupting the response rather than just
 	// over-redacting free text.
 	FreeText bool
+	// TypeKind optionally refines FreeText==false with the column's actual type shape, letting
+	// PathOverlay substitute a type-valid placeholder for a *confirmed* label's redaction request
+	// instead of unconditionally skipping the column — see
+	// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B. Zero value (TypeKindUnspecified) means "no
+	// type detail beyond FreeText" — every existing caller that only ever set FreeText needs no
+	// change; PathOverlay falls back to today's unconditional-skip behavior for FreeText==false,
+	// TypeKindUnspecified columns, exactly as before this field existed. Content detectors
+	// (mask.Remote) and the flat Overlay layer ignore this field entirely — it only ever changes
+	// PathOverlay's behavior for a confirmed (manual/platform) label, never a probabilistic guess.
+	TypeKind TypeKind
 }
+
+// TypeKind classifies a non-free-text column's wire type shape, for PathOverlay's type-valid
+// placeholder substitution (see Column.TypeKind and docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's
+// Gap B). Meaningless when Column.FreeText is true.
+type TypeKind int
+
+const (
+	// TypeKindUnspecified means "no type detail beyond FreeText" — the zero value, so every
+	// existing caller that never set this field keeps today's behavior unchanged.
+	TypeKindUnspecified TypeKind = iota
+	TypeKindDate                 // date/time/timestamp/timestamptz/interval
+	TypeKindNumeric              // int/float/decimal/numeric
+	TypeKindBool
+	TypeKindUUID
+	// TypeKindObjectID is Mongo's 12-byte BSON ObjectID — kept distinct from TypeKindUUID (a
+	// 36-character string-form UUID) since the two have different canonical text/binary shapes.
+	// PathOverlay's typeValidPlaceholder for this kind is never actually used: Mongo substitutes
+	// its own 12-byte-binary placeholder directly (BSON values aren't the plain-string wire format
+	// PathOverlay's placeholder table assumes) — this constant exists so mask.Column can still
+	// carry TypeKind for a BSON ObjectID field, and so a future SQL-side "uuid-shaped column
+	// backed by a binary type" caller has a distinct kind to reach for instead of overloading
+	// TypeKindUUID's string-placeholder semantics.
+	TypeKindObjectID
+)
 
 // Masker transforms a single result row. Implementations MUST return a slice the same length as
 // row; a nil element represents SQL NULL and should stay nil. Implementations should be

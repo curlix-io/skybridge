@@ -56,8 +56,8 @@ type Agent struct {
 	// comma-separated, e.g. "EMAIL_ADDRESS,US_SSN,CREDIT_CARD"). Empty means the masker falls back
 	// to a low-cost regex/rule-based default set rather than Presidio's all-45-recognizers default —
 	// NER-backed types (PERSON, LOCATION, ORGANIZATION, NRP) require full spaCy inference per value
-	// and are prone to false positives on ordinary business data (see Presidio's NER entity cost
-	// tiers, e.g. https://hoop.dev/docs/setup/deployment/presidio). Opt into those explicitly.
+	// and are prone to false positives on ordinary business data (see Presidio's own docs for its
+	// NER entity cost tiers). Opt into those explicitly.
 	MaskEntities []string
 	// MaskAnonymizers is Presidio's /anonymize "anonymizers" object verbatim (SKYBRIDGE_MASK_ANONYMIZERS,
 	// JSON), letting each entity type get its own strategy (e.g. partial-mask SSNs, hash emails)
@@ -65,10 +65,11 @@ type Agent struct {
 	MaskAnonymizers map[string]any
 	// MaskMode controls what happens when the remote masker itself fails (Presidio unreachable,
 	// errors, malformed response) — SKYBRIDGE_MASK_MODE, "best-effort" (default) or "strict".
-	// best-effort forwards the value unmasked so a masker outage never blocks legitimate queries
-	// (hoop.dev's DLP_MODE=best-effort). strict fails the row/connection instead of ever letting
-	// unmasked content reach the client — hoop.dev's DLP_MODE=strict. A detection MISS (the masker
-	// ran fine and found nothing) is not a failure in either mode; only masker errors are affected.
+	// best-effort forwards the value unmasked so a masker outage never blocks legitimate queries.
+	// strict fails the row/connection instead of ever letting unmasked content reach the client — a
+	// posture other DLP-gated access proxies offer under their own equivalent strict mode. A
+	// detection MISS (the masker ran fine and found nothing) is not a failure in either mode; only
+	// masker errors are affected.
 	MaskMode string
 	// MaskAdHocRecognizers is Presidio's /analyze "ad_hoc_recognizers" array verbatim (see
 	// mask.RemoteConfig.AdHocRecognizers), resolved from either SKYBRIDGE_MASK_RECOGNIZERS_YAML or
@@ -195,7 +196,7 @@ type Agent struct {
 	// on every renewal/restart. Takes priority over WireMtlsClientCertPEM/WireMtlsEnrollToken when set.
 	WireMtlsIamAuthEnabled bool // SKYBRIDGE_WIRE_MTLS_IAM_AUTH (truthy)
 
-	// Session replay (hoop.dev parity, session replay design). When enabled AND the gateway put a
+	// Session replay (see the session replay design doc). When enabled AND the gateway put a
 	// SessionID on OpenMeta (control-plane session recording is on there too), the agent's wire
 	// engines capture a transcript of already-masked input/output and flush it back over the
 	// tunnel control channel on session end. Off by default — belt-and-suspenders alongside any
@@ -539,6 +540,112 @@ func LoadGateway() Gateway {
 		WireMtlsServerCert:  pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM", "SKYBRIDGE_GW_MTLS_SERVER_CERT_FILE"),
 		WireMtlsServerKey:   pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM", "SKYBRIDGE_GW_MTLS_SERVER_KEY_FILE"),
 	}
+}
+
+// Labeller is the resolved configuration for skybridge-labeller, the periodic AI-based path-label
+// scan job (internal/pathlabel/aiclassifier) — see docs/AI_PATH_LABELLING_DESIGN.md. Distinct from
+// Agent/Gateway because it's a separate process with no wire-proxy or client-listener concerns of
+// its own; it only samples a database on a schedule and proposes labels to the control plane.
+type Labeller struct {
+	OrgID string // tenant this scan job proposes labels for; required
+	Token string // bearer token (defaults to SKYBRIDGE_TOKEN)
+
+	// DBType/DSN identify the one database this run samples — SKYBRIDGE_LABELLER_DB_TYPE (postgres |
+	// mysql) and SKYBRIDGE_LABELLER_DSN (a read-only credential's connection string, analogous to
+	// SKYBRIDGE_POSTGRES_CATALOG_DSN's "dedicated, read-only, independent of any client session"
+	// posture — this DSN is never the same credential a native client's session uses).
+	DBType string
+	DSN    string
+	// Database is the logical database name embedded in the resulting ObjectID
+	// ("{org}:{driver}:{database}:{table}", matching internal/edge/dbquery's objectID convention),
+	// since a DSN's own embedded database name isn't reliably recoverable from every driver's DSN
+	// syntax.
+	Database string
+	// Tables is the set of tables to scan every run (SKYBRIDGE_LABELLER_TABLES, comma-separated).
+	// This job does not discover the schema itself — see docs/AI_PATH_LABELLING_DESIGN.md §8 for why
+	// starting with an explicit list, rather than an automatic information_schema crawl, is the
+	// simpler first cut.
+	Tables []string
+	// MaxSamplesPerField bounds how many non-null values are read per table column per scan —
+	// SKYBRIDGE_LABELLER_MAX_SAMPLES (default aiclassifier.defaultMaxSamples via 0).
+	MaxSamplesPerField int
+	// ScanIntervalSeconds is how often the full table list is rescanned — SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS
+	// (floored, see labellerMinScanIntervalSeconds — this is a periodic background job, not a
+	// once-per-second poll).
+	ScanIntervalSeconds int
+
+	// LLM classifier backend (internal/pathlabel/aiclassifier.LLM) — see
+	// docs/AI_PATH_LABELLING_DESIGN.md §5.1a/§8 item 1. Endpoint is required for this binary to do
+	// anything; unset, LoadLabeller still returns a value (so -help works) but main.go refuses to
+	// start the scan loop.
+	LLMEndpoint      string   // SKYBRIDGE_LABELLER_LLM_ENDPOINT
+	LLMAPIKey        string   // SKYBRIDGE_LABELLER_LLM_API_KEY
+	LLMCategories    []string // SKYBRIDGE_LABELLER_LLM_CATEGORIES, comma-separated taxonomy — required alongside Endpoint
+	LLMMinConfidence float64  // SKYBRIDGE_LABELLER_LLM_MIN_CONFIDENCE (0 accepts any response)
+
+	// Path-label propose endpoint (internal/pathlabel/remotestore) — same control-plane contract
+	// mask.PathOverlay's confirmed-label pull already uses; this job only ever pushes proposals
+	// through it, per SourceProposed's "never redacts on its own" contract.
+	PathLabelURL         string
+	PathLabelToken       string
+	PathLabelPollSeconds int
+	PathLabelPushSeconds int
+}
+
+// labellerMinScanIntervalSeconds floors SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS — this job samples
+// live rows from the target database on every run; a floor keeps a misconfigured low value from
+// turning the "periodic, off the query hot path" job (docs/AI_PATH_LABELLING_DESIGN.md §5.2) into
+// something that competes with real traffic for the read-only credential.
+const labellerMinScanIntervalSeconds = 300
+
+// LoadLabeller reads skybridge-labeller's config from the environment.
+func LoadLabeller() Labeller {
+	return Labeller{
+		OrgID:               env("SKYBRIDGE_ORG_ID", ""),
+		Token:               env("SKYBRIDGE_TOKEN", ""),
+		DBType:              strings.ToLower(env("SKYBRIDGE_LABELLER_DB_TYPE", "postgres")),
+		DSN:                 env("SKYBRIDGE_LABELLER_DSN", ""),
+		Database:            env("SKYBRIDGE_LABELLER_DATABASE", ""),
+		Tables:              splitCSV(env("SKYBRIDGE_LABELLER_TABLES", "")),
+		MaxSamplesPerField:  atoiDefault(env("SKYBRIDGE_LABELLER_MAX_SAMPLES", ""), 0),
+		ScanIntervalSeconds: max(atoiDefault(env("SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS", ""), 3600), labellerMinScanIntervalSeconds),
+
+		LLMEndpoint:      env("SKYBRIDGE_LABELLER_LLM_ENDPOINT", ""),
+		LLMAPIKey:        env("SKYBRIDGE_LABELLER_LLM_API_KEY", ""),
+		LLMCategories:    splitCSV(env("SKYBRIDGE_LABELLER_LLM_CATEGORIES", "")),
+		LLMMinConfidence: atofDefault(env("SKYBRIDGE_LABELLER_LLM_MIN_CONFIDENCE", ""), 0.5),
+
+		PathLabelURL:         env("SKYBRIDGE_PATH_LABEL_URL", ""),
+		PathLabelToken:       env("SKYBRIDGE_PATH_LABEL_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		PathLabelPollSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_POLL_SECONDS", ""), 60),
+		PathLabelPushSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_PUSH_SECONDS", ""), 15),
+	}
+}
+
+func splitCSV(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	out := make([]string, 0, len(parts))
+	for _, p := range parts {
+		if p = strings.TrimSpace(p); p != "" {
+			out = append(out, p)
+		}
+	}
+	return out
+}
+
+func atofDefault(raw string, def float64) float64 {
+	if raw == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(raw, 64)
+	if err != nil {
+		return def
+	}
+	return f
 }
 
 func parseClients(raw string) []ClientListener {

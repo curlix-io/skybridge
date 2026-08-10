@@ -44,19 +44,22 @@ type seeder interface {
 
 // MaskRow implements Masker by replacing values whose column resolves to a confirmed
 // full_redact/partial_mask label, by path first and then by bare key name.
+//
+// A FreeText==false column is only ever considered when col.TypeKind is set (Gap B,
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md) — and even then, lookupToken only substitutes a
+// type-valid placeholder for a *confirmed* label's explicit redaction request, never for a probing
+// content-detector guess. FreeText==false with TypeKind unset behaves exactly as before this field
+// existed: skipped unconditionally, since an unlabelled/proposed-only typed column has no
+// type-valid placeholder to substitute anyway.
 func (p *PathOverlay) MaskRow(ctx context.Context, cols []Column, row [][]byte) ([][]byte, error) {
 	if p == nil || p.store == nil {
 		return row, nil
 	}
 	for i := range row {
-		// FreeText excludes typed non-text columns (date/numeric/uuid/...) the same way Remote does
-		// (see mask.Column.FreeText doc comment): any string token substituted into a wire slot the
-		// client will type-decode corrupts the response, whether the redaction came from a detector
-		// guess or, as here, an admin-confirmed field-rule label. Masking a labelled typed column
-		// (e.g. a "date_of_birth" timestamptz) would need a type-valid replacement value, not a
-		// "[redacted]" string — that's a separate, not-yet-built feature, not a relaxation of this
-		// guard.
-		if i >= len(cols) || row[i] == nil || !cols[i].Text || !cols[i].FreeText {
+		if i >= len(cols) || row[i] == nil || !cols[i].Text {
+			continue
+		}
+		if !cols[i].FreeText && cols[i].TypeKind == TypeKindUnspecified {
 			continue
 		}
 		originalLen := len(row[i])
@@ -100,7 +103,7 @@ func (p *PathOverlay) lookupToken(ctx context.Context, col Column, originalLen i
 	if l, ok, err := p.store.Lookup(ctx, col.ObjectID, path); err != nil {
 		return "", false, err
 	} else if ok && isConfirmed(l.Source) {
-		if tok, redact := profileToken(l.Profile); redact {
+		if tok, redact := profileTokenForType(l.Profile, col.FreeText, col.TypeKind); redact {
 			p.recordMaskedIfEnabled(l.Category, originalLen)
 			return tok, true, nil
 		}
@@ -118,7 +121,7 @@ func (p *PathOverlay) lookupToken(ctx context.Context, col Column, originalLen i
 	if !ok || !isConfirmed(l.Source) {
 		return "", false, nil
 	}
-	tok, redact := profileToken(l.Profile)
+	tok, redact := profileTokenForType(l.Profile, col.FreeText, col.TypeKind)
 	if redact {
 		p.recordMaskedIfEnabled(l.Category, originalLen)
 	}
@@ -138,20 +141,62 @@ func isConfirmed(s label.Source) bool {
 	return s == label.SourceManual || s == label.SourcePlatform
 }
 
-// profileToken maps a Label's Profile to a replacement token, per label's vendor-agnostic
-// three-way split (full_redact / partial_mask / do_not_mask). An empty or unknown
-// Profile is treated as full_redact, since Category alone ("this path is labelled") is already a
-// stronger signal than an unlabelled path — the safe default is to act on it, not to require a
-// Profile a caller may not always set.
-func profileToken(profile string) (string, bool) {
-	switch profile {
-	case "do_not_mask":
-		return "", false
-	case "partial_mask":
-		return "[masked]", true
-	default:
-		return "[redacted]", true
+// typeValidPlaceholder maps a TypeKind to a replacement value that parses under every driver's
+// decoder for that type, per docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B — substituting the
+// string "[redacted]" into a typed wire slot corrupts the client's type decoder rather than just
+// masking the value, so a confirmed label's redaction on a typed column needs a type-valid value
+// instead. Only consulted for FreeText==false columns with a non-zero TypeKind (see MaskRow); a
+// TypeKind this map has no entry for (a future addition to the enum without a placeholder yet)
+// falls back to profileTokenForType's own default of leaving the column unmasked — never a string
+// token that would corrupt it.
+//
+// TypeKindObjectID's entry is a placeholder for the redact/don't-redact *signal* only — a caller in
+// this map's own package (a hypothetical SQL binary-uuid column) would need a real substitute
+// value here, but Mongo's bsonMasker (internal/wire/mongo) discards this string entirely and
+// substitutes its own fixed-width, zero-valued 12-byte BSON encoding instead, since a BSON
+// ObjectID's wire representation is never a plain string this map's shape can express — see
+// mongo.maskScalar's doc comment for why.
+var typeValidPlaceholder = map[TypeKind]string{
+	TypeKindDate:     "0001-01-01",
+	TypeKindNumeric:  "0",
+	TypeKindBool:     "false",
+	TypeKindUUID:     "00000000-0000-0000-0000-000000000000",
+	TypeKindObjectID: "000000000000000000000000",
+}
+
+// profileTokenForType maps a Label's Profile to a replacement token, per label's vendor-agnostic
+// three-way split (full_redact / partial_mask / do_not_mask), accounting for the column's type
+// shape. For a free-text column (freeText==true), behavior is unchanged from before Gap B: an empty
+// or unknown Profile is treated as full_redact (Category alone — "this path is labelled" — is
+// already a stronger signal than an unlabelled path, so the safe default is to act on it), and
+// partial_mask always maps to "[masked]".
+//
+// For a typed, non-free-text column, a confirmed redaction request must use a type-valid
+// placeholder instead of a string token (see typeValidPlaceholder) — and partial_mask has no
+// defined meaning for a typed value yet (docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B
+// non-goals), so it's treated the same as full_redact here rather than silently doing nothing or
+// applying a string-shaped "[masked]" that would corrupt the column. A TypeKind with no
+// typeValidPlaceholder entry has no safe substitute value, so it's left unmasked rather than
+// guessing — the same fail-safe-toward-not-corrupting posture the original FreeText guard had.
+func profileTokenForType(profile string, freeText bool, kind TypeKind) (string, bool) {
+	if freeText {
+		switch profile {
+		case "do_not_mask":
+			return "", false
+		case "partial_mask":
+			return "[masked]", true
+		default:
+			return "[redacted]", true
+		}
 	}
+	if profile == "do_not_mask" {
+		return "", false
+	}
+	tok, ok := typeValidPlaceholder[kind]
+	if !ok {
+		return "", false
+	}
+	return tok, true
 }
 
 var _ Masker = (*PathOverlay)(nil)

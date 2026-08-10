@@ -4,6 +4,7 @@
 /skybridge-agent
 /skybridge-gateway
 /skybridge-edge
+/skybridge-labeller
 
 # Local Go build cache (kept in-tree for offline builds)
 /.gocache/

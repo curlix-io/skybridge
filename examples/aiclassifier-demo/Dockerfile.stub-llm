@@ -1,0 +1,6 @@
+# Stub LLM completion server for the aiclassifier demo (see stub_llm_server.py).
+FROM python:3.12-slim
+COPY stub_llm_server.py /app/stub_llm_server.py
+EXPOSE 8090
+USER nobody
+ENTRYPOINT ["python3", "/app/stub_llm_server.py"]

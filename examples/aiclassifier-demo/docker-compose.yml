@@ -1,0 +1,34 @@
+# Two-container demo of internal/pathlabel/aiclassifier's LLM-backed Classifier: a stub LLM
+# completion server, and a runner that drives the real Scanner/LLM code against fabricated column
+# samples and prints what gets proposed. See docs/AI_PATH_LABELLING_DESIGN.md for the design this
+# demos; swapping stub-llm for a real provider is a config change (LLMConfig.Endpoint/APIKey), not a
+# code change.
+#
+#   cd examples/aiclassifier-demo
+#   docker compose up --build --abort-on-container-exit
+#   docker compose down
+name: skybridge-aiclassifier-demo
+
+services:
+  stub-llm:
+    build:
+      context: .
+      dockerfile: Dockerfile.stub-llm
+    container_name: skybridge-aiclassifier-stub-llm
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 8090), timeout=2)"]
+      interval: 2s
+      timeout: 2s
+      start_period: 5s
+      retries: 10
+
+  runner:
+    build:
+      context: ../..
+      dockerfile: examples/aiclassifier-demo/runner/Dockerfile
+    container_name: skybridge-aiclassifier-runner
+    depends_on:
+      stub-llm:
+        condition: service_healthy
+    environment:
+      - STUB_LLM_ENDPOINT=http://stub-llm:8090

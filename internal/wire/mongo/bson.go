@@ -39,6 +39,53 @@ const (
 
 var errBadBSON = errors.New("malformed bson")
 
+// bsonTypeKind maps a subset of BSON scalar type bytes to mask.TypeKind, letting PathOverlay
+// substitute a type-valid placeholder for a *confirmed* label's redaction request on a non-string
+// field — see docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B. Deliberately a strict subset of the
+// scalar types valueLen recognizes: bsonRegex, bsonDBPointer, bsonJS/bsonCodeScope, bsonBinary,
+// bsonTimestamp, bsonNull/bsonUndefined/bsonMinKey/bsonMaxKey have no entry on purpose — they're
+// either never real user data (an internal replication Timestamp, a MinKey/MaxKey sentinel), have
+// no meaningful "redacted" placeholder (Binary's subtype-specific payload), or their fixed-width
+// zero value has no natural interpretation worth committing to. Only types present here are ever
+// routed through masking at all (see result()); everything else keeps today's behavior of passing
+// straight through, exactly as before Gap B's Mongo support existed.
+var bsonTypeKind = map[byte]mask.TypeKind{
+	bsonBool:     mask.TypeKindBool,
+	bsonInt32:    mask.TypeKindNumeric,
+	bsonInt64:    mask.TypeKindNumeric,
+	bsonDouble:   mask.TypeKindNumeric,
+	bsonDecimal:  mask.TypeKindNumeric,
+	bsonDatetime: mask.TypeKindDate,
+	bsonObjectID: mask.TypeKindObjectID,
+}
+
+// zeroValueBSON returns a fixed-width, all-zero BSON-encoded placeholder for typ — the value
+// substituted in place of a redacted scalar's original bytes. Zero-filled rather than
+// content-derived because, unlike Postgres/MySQL's text-protocol placeholders (a decimal digit
+// string a client re-parses), a BSON scalar's bytes ARE the value in its native binary encoding:
+// there is no separate "encode this placeholder" step, so the placeholder must already be a valid
+// instance of the type — an all-zero int32/int64/double/datetime is 0, a zeroed ObjectID is the
+// conventional "empty" sentinel client BSON libraries already special-case for a missing id, and
+// false is the zero-valued bool. Panics if typ isn't a key of bsonTypeKind — callers only ever
+// reach this after confirming a bsonTypeKind entry exists, so this is a programmer-error guard, not
+// a runtime condition callers need to check for.
+func zeroValueBSON(typ byte) []byte {
+	switch typ {
+	case bsonBool:
+		return []byte{0x00}
+	case bsonInt32:
+		return make([]byte, 4)
+	case bsonInt64, bsonDouble, bsonDatetime:
+		return make([]byte, 8)
+	case bsonDecimal:
+		return make([]byte, 16)
+	case bsonObjectID:
+		return make([]byte, 12)
+	default:
+		panic(fmt.Sprintf("mongo: zeroValueBSON called for unmapped type 0x%02x", typ))
+	}
+}
+
 // bsonMasker walks BSON documents and masks the string field values inside query result batches.
 // Masking reuses the row masker (overlay by field name + remote masker on content), one string at a time.
 // recorder, when non-nil, receives a rendered summary of each already-masked result document for
@@ -376,6 +423,9 @@ func (m *bsonMasker) result(doc []byte, path string) ([]byte, error) {
 		case bsonDoc, bsonArray:
 			return m.result(value, joinPath(path, name))
 		default:
+			if _, ok := bsonTypeKind[typ]; ok {
+				return m.maskScalar(name, joinPath(path, name), typ, value)
+			}
 			return value, nil
 		}
 	})
@@ -386,6 +436,30 @@ func joinPath(path, key string) string {
 		return key
 	}
 	return path + "." + key
+}
+
+// maskScalar runs a single non-string BSON scalar value (bool/int32/int64/double/decimal128/
+// datetime/objectId — see bsonTypeKind) through the masker with Text:true, FreeText:false, and the
+// mapped TypeKind, so mask.Remote and Overlay both skip it (FreeText gates them off, same as every
+// typed column in every engine) while PathOverlay's confirmed-label path still runs — see
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B.
+//
+// PathOverlay returns a plain-string placeholder token (its typeValidPlaceholder table is written
+// for SQL's text-protocol wire format), which is never a valid direct substitute for value's
+// fixed-width BSON binary encoding — so this method only uses PathOverlay's response as a redact/
+// don't-redact signal (did the bytes change at all?) and, on redact, substitutes zeroValueBSON(typ)
+// — a real, fixed-width, zero-valued instance of the field's own BSON type — rather than the
+// literal token bytes PathOverlay returned.
+func (m *bsonMasker) maskScalar(name, path string, typ byte, value []byte) ([]byte, error) {
+	cols := []mask.Column{{Name: name, Path: path, ObjectID: m.curObjectID, Text: true, FreeText: false, TypeKind: bsonTypeKind[typ]}}
+	out, err := m.masker.MaskRow(m.ctx, cols, [][]byte{append([]byte(nil), value...)})
+	if err != nil {
+		return value, err
+	}
+	if len(out) != 1 || out[0] == nil || bytes.Equal(out[0], value) {
+		return value, nil
+	}
+	return zeroValueBSON(typ), nil
 }
 
 // maskString runs a single BSON string value (int32 length + bytes + NUL) through the masker. A

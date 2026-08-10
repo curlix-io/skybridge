@@ -43,6 +43,7 @@ make agent             # build cmd/skybridge-agent only
 make gateway           # build cmd/skybridge-gateway only
 make edge              # build cmd/skybridge-edge only (default: no Query Studio extras)
 make edge-querystudio  # build cmd/skybridge-edge with Query Studio dispatch (-tags querystudio)
+make labeller          # build cmd/skybridge-labeller only (opt-in, not part of `make build`)
 make test              # go test ./...
 make test-querystudio  # go test -tags querystudio ./... (covers dbexec/dbquery/studiotransport)
 make race              # go test -race ./...
@@ -98,11 +99,23 @@ the network.
 cmd/skybridge-agent      egress agent: listener OR tunnel mode
 cmd/skybridge-gateway    relay gateway: agent endpoint + client listeners
 cmd/skybridge-edge       unified edge: call-home transport(s) + AWS/k8s tool exec + optional wire proxy
+cmd/skybridge-labeller   periodic AI-based path-label scan job (see docs/AI_PATH_LABELLING_DESIGN.md);
+                         opt-in, not part of `make build` — build/run it explicitly via `make labeller`
 internal/wire            wire engines: postgres, mysql, mongo, k8sapi — manual protocol parsing
-internal/mask            masking pipeline: remote (Presidio) masker + path overlay + column overlay
+internal/mask            masking pipeline: remote (Presidio) masker + path overlay + column overlay;
+                         Column.TypeKind lets PathOverlay redact a confirmed label on a typed
+                         (non-free-text) column with a type-valid placeholder instead of skipping
+                         it — see docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md
 internal/mask/metrics    masking-outcome metrics (counts only, never values) synced to the control plane
 internal/pathlabel       docpath (nested-document path walking) + label (path-scoped Store/Label types)
 internal/pathlabel/remotestore  label.Store backed by the control plane's pii-path-labels pull/push API
+internal/pathlabel/aiclassifier  AI-based path labeller: Classifier/Scanner interfaces + an
+                         LLM-API-backed implementation, proposing SourceProposed labels independent
+                         of live query traffic — see docs/AI_PATH_LABELLING_DESIGN.md
+internal/pathlabel/sqlsampler    database/sql-based aiclassifier.Sampler for Postgres/MySQL, used by
+                         cmd/skybridge-labeller
+internal/labeller        cmd/skybridge-labeller's run loop: validates config, wires
+                         aiclassifier.Scanner + sqlsampler.Sampler + remotestore.Store together
 internal/tunnel          egress multiplexed transport (agent <-> gateway)
 internal/gateway         agent registry + relay + optional control-plane session recording
 internal/edge            edge tool dispatch: envelope, policy, executor

@@ -60,6 +60,12 @@ func colDef(name string) []byte {
 
 // colDefTyped is colDef plus an explicit MySQL column wire type (see nonFreeTextColumnTypes).
 func colDefTyped(name string, colType byte) []byte {
+	return colDefAliased(name, name, colType)
+}
+
+// colDefAliased is colDefTyped but with name (the aliased display name) and orgName (the real,
+// unaliased column name) set independently — see TestColumnIdentityResolvesRealNameForAliasedColumn.
+func colDefAliased(name, orgName string, colType byte) []byte {
 	var p []byte
 	lenStr := func(s string) {
 		p = appendLenEncInt(p, uint64(len(s)))
@@ -69,8 +75,8 @@ func colDefTyped(name string, colType byte) []byte {
 	lenStr("test")                        // schema
 	lenStr("t")                           // table
 	lenStr("t")                           // org_table
-	lenStr(name)                          // name
-	lenStr(name)                          // org_name
+	lenStr(name)                          // name (aliased display name)
+	lenStr(orgName)                       // org_name (real, unaliased column name)
 	p = append(p, 0x0c)                   // length of fixed-length fields
 	p = append(p, 0x21, 0x00)             // charset
 	p = append(p, 0x00, 0x01, 0x00, 0x00) // column length
@@ -88,12 +94,26 @@ func TestColumnName(t *testing.T) {
 }
 
 func TestColumnIdentity(t *testing.T) {
-	name, schema, orgTable, freeText := columnIdentity(colDef("email"))
-	if name != "email" || schema != "test" || orgTable != "t" {
-		t.Fatalf("columnIdentity = (%q,%q,%q) want (email,test,t)", name, schema, orgTable)
+	name, schema, orgTable, orgName, freeText := columnIdentity(colDef("email"))
+	if name != "email" || schema != "test" || orgTable != "t" || orgName != "email" {
+		t.Fatalf("columnIdentity = (%q,%q,%q,%q) want (email,test,t,email)", name, schema, orgTable, orgName)
 	}
 	if !freeText {
 		t.Fatal("VAR_STRING column should be free-text eligible")
+	}
+}
+
+// TestColumnIdentityResolvesRealNameForAliasedColumn is the regression test for
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A: a query aliasing a column (e.g. "SELECT email AS
+// contact_info") must still let a path-scoped label confirmed on "email" match — orgName, not name,
+// is what a caller should key a PathOverlay lookup on.
+func TestColumnIdentityResolvesRealNameForAliasedColumn(t *testing.T) {
+	name, _, _, orgName, _ := columnIdentity(colDefAliased("contact_info", "email", 0xFD))
+	if name != "contact_info" {
+		t.Fatalf("name = %q, want the aliased display name %q", name, "contact_info")
+	}
+	if orgName != "email" {
+		t.Fatalf("orgName = %q, want the real column name %q", orgName, "email")
 	}
 }
 
@@ -117,7 +137,7 @@ func TestColumnIdentityExcludesTypedColumnsFromFreeText(t *testing.T) {
 		{"description", 0xfc, true}, // BLOB (opaque, but historically treated as scannable text)
 	}
 	for _, c := range cases {
-		_, _, _, freeText := columnIdentity(colDefTyped(c.name, c.colType))
+		_, _, _, _, freeText := columnIdentity(colDefTyped(c.name, c.colType))
 		if freeText != c.freeText {
 			t.Errorf("col %q type=0x%02x: freeText=%v, want %v", c.name, c.colType, freeText, c.freeText)
 		}

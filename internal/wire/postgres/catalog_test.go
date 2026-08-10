@@ -48,9 +48,11 @@ func TestParseCatalogDSN_MissingHost(t *testing.T) {
 }
 
 // fakeCatalogServer accepts one connection, completes a trust-auth handshake (mirroring
-// TestAuthenticateUpstreamTrust's pattern), then answers every simple Query with a fixed
-// relname/relnamespace row until the listener is closed.
-func fakeCatalogServer(t *testing.T, relname, schema string) (addr string, closeFn func()) {
+// TestAuthenticateUpstreamTrust's pattern), then answers every pg_class simple Query with a fixed
+// relname/relnamespace row, and every pg_attribute query with columnName, until the listener is
+// closed. columnName == "" makes the pg_attribute branch return zero rows (an unresolved column),
+// matching ResolveColumn's "no matching row -> unresolved, not an error" contract.
+func fakeCatalogServer(t *testing.T, relname, schema, columnName string) (addr string, closeFn func()) {
 	t.Helper()
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
@@ -62,13 +64,13 @@ func fakeCatalogServer(t *testing.T, relname, schema string) (addr string, close
 			if err != nil {
 				return
 			}
-			go serveFakeCatalogConn(conn, relname, schema)
+			go serveFakeCatalogConn(conn, relname, schema, columnName)
 		}
 	}()
 	return ln.Addr().String(), func() { _ = ln.Close() }
 }
 
-func serveFakeCatalogConn(conn net.Conn, relname, schema string) {
+func serveFakeCatalogConn(conn net.Conn, relname, schema, columnName string) {
 	defer conn.Close()
 	br := bufio.NewReader(conn)
 
@@ -97,7 +99,20 @@ func serveFakeCatalogConn(conn net.Conn, relname, schema string) {
 		if typ != msgQuery {
 			continue
 		}
-		_ = payload
+		if bytes.Contains(payload, []byte("pg_attribute")) {
+			if err := writeAttnameRowDescription(conn); err != nil {
+				return
+			}
+			if columnName != "" {
+				if err := writeAttnameDataRow(conn, columnName); err != nil {
+					return
+				}
+			}
+			if err := writeMsgRaw(conn, 'Z', []byte{'I'}); err != nil {
+				return
+			}
+			continue
+		}
 		if err := writeCatalogRowDescription(conn); err != nil {
 			return
 		}
@@ -108,6 +123,29 @@ func serveFakeCatalogConn(conn net.Conn, relname, schema string) {
 			return
 		}
 	}
+}
+
+func writeAttnameRowDescription(w net.Conn) error {
+	var buf bytes.Buffer
+	var u16 [2]byte
+	binary.BigEndian.PutUint16(u16[:], 1)
+	buf.Write(u16[:])
+	buf.WriteString("attname")
+	buf.WriteByte(0)
+	buf.Write(make([]byte, 18))
+	return writeMsgRaw(w, 'T', buf.Bytes())
+}
+
+func writeAttnameDataRow(w net.Conn, value string) error {
+	var buf bytes.Buffer
+	var u16 [2]byte
+	binary.BigEndian.PutUint16(u16[:], 1)
+	buf.Write(u16[:])
+	var u32 [4]byte
+	binary.BigEndian.PutUint32(u32[:], uint32(len(value)))
+	buf.Write(u32[:])
+	buf.WriteString(value)
+	return writeMsgRaw(w, 'D', buf.Bytes())
 }
 
 func writeAuthOK(w net.Conn) error {
@@ -155,7 +193,7 @@ func writeCatalogDataRow(w net.Conn, relname, schema string) error {
 }
 
 func TestCatalogResolver_ResolvesAndCaches(t *testing.T) {
-	addr, closeFn := fakeCatalogServer(t, "orders", "shop")
+	addr, closeFn := fakeCatalogServer(t, "orders", "shop", "")
 	defer closeFn()
 	host, port, splitErr := net.SplitHostPort(addr)
 	if splitErr != nil {
@@ -190,6 +228,68 @@ func TestCatalogResolver_UnreachableServerUnresolved(t *testing.T) {
 	r := NewCatalogResolver(CatalogCredential{Host: "127.0.0.1", Port: "1"})
 	_, _, ok := r.Resolve(context.Background(), "shop", 99)
 	if ok {
+		t.Fatal("expected an unreachable catalog server to resolve as unresolved, not ok")
+	}
+}
+
+// TestCatalogResolver_ResolveColumn is the regression test for
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A at the CatalogResolver level: a real, unaliased
+// column name must be resolvable via pg_attribute, independent of (and cached separately from) the
+// pg_class table-name resolution Resolve already provides.
+func TestCatalogResolver_ResolveColumn(t *testing.T) {
+	addr, closeFn := fakeCatalogServer(t, "orders", "shop", "email")
+	defer closeFn()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+
+	r := NewCatalogResolver(CatalogCredential{Host: host, Port: port, User: "u", Password: "p"})
+	name, ok := r.ResolveColumn(context.Background(), "shop", 12345, 2)
+	if !ok || name != "email" {
+		t.Fatalf("ResolveColumn = %q %v, want email true", name, ok)
+	}
+
+	// Second call should hit the cache — verified indirectly: closing the server doesn't break it.
+	closeFn()
+	name2, ok2 := r.ResolveColumn(context.Background(), "shop", 12345, 2)
+	if !ok2 || name2 != "email" {
+		t.Fatalf("cached ResolveColumn = %q %v, want email true", name2, ok2)
+	}
+}
+
+func TestCatalogResolver_ResolveColumn_NoMatchingRowUnresolved(t *testing.T) {
+	addr, closeFn := fakeCatalogServer(t, "orders", "shop", "") // "" -> pg_attribute returns zero rows
+	defer closeFn()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+
+	r := NewCatalogResolver(CatalogCredential{Host: host, Port: port, User: "u", Password: "p"})
+	name, ok := r.ResolveColumn(context.Background(), "shop", 12345, 2)
+	if ok || name != "" {
+		t.Fatalf("expected unresolved for a stale attnum with no matching pg_attribute row, got %q %v", name, ok)
+	}
+}
+
+func TestCatalogResolver_ResolveColumn_TableOIDZeroUnresolved(t *testing.T) {
+	r := NewCatalogResolver(CatalogCredential{Host: "127.0.0.1", Port: "1"})
+	if _, ok := r.ResolveColumn(context.Background(), "shop", 0, 1); ok {
+		t.Fatal("tableOID 0 (no backing table) must never resolve")
+	}
+}
+
+func TestCatalogResolver_ResolveColumn_AttnumZeroUnresolved(t *testing.T) {
+	r := NewCatalogResolver(CatalogCredential{Host: "127.0.0.1", Port: "1"})
+	if _, ok := r.ResolveColumn(context.Background(), "shop", 12345, 0); ok {
+		t.Fatal("attnum <= 0 (system column or unparseable) must never resolve")
+	}
+}
+
+func TestCatalogResolver_ResolveColumn_UnreachableServerUnresolved(t *testing.T) {
+	r := NewCatalogResolver(CatalogCredential{Host: "127.0.0.1", Port: "1"})
+	if _, ok := r.ResolveColumn(context.Background(), "shop", 99, 1); ok {
 		t.Fatal("expected an unreachable catalog server to resolve as unresolved, not ok")
 	}
 }

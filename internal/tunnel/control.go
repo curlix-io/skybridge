@@ -10,8 +10,8 @@ const (
 	KindRegister    = "register"     // agent -> gateway: announce identity (org-scoped; no target list)
 	KindRegisterAck = "register_ack" // gateway -> agent: accept/reject the registration
 	KindHeartbeat   = "heartbeat"    // both directions: liveness
-	// KindTranscript is agent -> gateway: a session-replay transcript flush (session replay design,
-	// hoop.dev parity). Chunks are already masked (the wire engine's Recorder only ever sees
+	// KindTranscript is agent -> gateway: a session-replay transcript flush (see the session replay
+	// design doc). Chunks are already masked (the wire engine's Recorder only ever sees
 	// already-masked output) — the gateway relays them to the control plane unmodified via
 	// Store.SessionTranscript, never inspecting content itself.
 	KindTranscript = "transcript"
@@ -82,7 +82,7 @@ type OpenMeta struct {
 	ActorEmail     string `json:"actor_email,omitempty"`
 
 	// SessionID is the control-plane session id the gateway already opened (via SessionStarted)
-	// before calling Open — session replay (hoop.dev parity) needs it so the agent, which builds
+	// before calling Open — session replay needs it so the agent, which builds
 	// the transcript from already-masked traffic, can tag chunks with the session they belong to
 	// when it flushes them back over the tunnel control channel (see internal/agent/agent.go's
 	// serveStream). Empty when session recording (or replay specifically) is not enabled — the

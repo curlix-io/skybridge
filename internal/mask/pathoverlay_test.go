@@ -345,4 +345,119 @@ func TestPathOverlay_BareKeyEmptyNameIsNoop(t *testing.T) {
 	}
 }
 
+// TestPathOverlay_RedactsTypedColumnWithConfirmedLabel is the regression test for
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B: a confirmed label's redaction request on a typed
+// (FreeText==false) column must substitute a type-valid placeholder, not be silently skipped —
+// before this fix a customer's confirmed "redact this date_of_birth column" decision was inert.
+func TestPathOverlay_RedactsTypedColumnWithConfirmedLabel(t *testing.T) {
+	store := label.NewMemStore()
+	ctx := context.Background()
+	_ = store.Put(ctx, label.Label{
+		ObjectID: "org1:postgres:users", FieldPath: "date_of_birth", Source: label.SourceManual, Profile: "full_redact",
+	})
+	p := NewPathOverlay(store)
+	c := []Column{{Name: "date_of_birth", ObjectID: "org1:postgres:users", Text: true, FreeText: false, TypeKind: TypeKindDate}}
+	out, err := p.MaskRow(ctx, c, [][]byte{[]byte("1990-05-14")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "0001-01-01" {
+		t.Fatalf("expected type-valid date placeholder, got %q", out[0])
+	}
+}
+
+func TestPathOverlay_RedactsNumericColumnWithConfirmedLabel(t *testing.T) {
+	store := label.NewMemStore()
+	ctx := context.Background()
+	_ = store.Put(ctx, label.Label{
+		ObjectID: "org1:postgres:users", FieldPath: "ssn_numeric", Source: label.SourceManual, Profile: "full_redact",
+	})
+	p := NewPathOverlay(store)
+	c := []Column{{Name: "ssn_numeric", ObjectID: "org1:postgres:users", Text: true, FreeText: false, TypeKind: TypeKindNumeric}}
+	out, err := p.MaskRow(ctx, c, [][]byte{[]byte("123456789")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "0" {
+		t.Fatalf("expected type-valid numeric placeholder, got %q", out[0])
+	}
+}
+
+// TestPathOverlay_TypedColumnWithoutTypeKindStillSkipped confirms the pre-Gap-B behavior is
+// unchanged for callers that only ever set FreeText (every existing wire-engine/dbquery call site
+// except the Postgres engine's typed columns, once Gap B's engine-side wiring lands): a typed
+// column with TypeKind left at its zero value must still be skipped entirely, never redacted with
+// a plain string token that would corrupt it.
+func TestPathOverlay_TypedColumnWithoutTypeKindStillSkipped(t *testing.T) {
+	store := label.NewMemStore()
+	ctx := context.Background()
+	_ = store.Put(ctx, label.Label{
+		ObjectID: "org1:postgres:users", FieldPath: "date_of_birth", Source: label.SourceManual, Profile: "full_redact",
+	})
+	p := NewPathOverlay(store)
+	c := []Column{{Name: "date_of_birth", ObjectID: "org1:postgres:users", Text: true, FreeText: false}} // TypeKind unset
+	out, err := p.MaskRow(ctx, c, [][]byte{[]byte("1990-05-14")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "1990-05-14" {
+		t.Fatalf("expected the typed column left untouched without a TypeKind, got %q", out[0])
+	}
+}
+
+// TestPathOverlay_TypedColumnUnknownKindLeftUnmasked covers a TypeKind with no
+// typeValidPlaceholder entry — must fail safe (leave unmasked), never fall back to a corrupting
+// string token.
+func TestPathOverlay_TypedColumnUnknownKindLeftUnmasked(t *testing.T) {
+	store := label.NewMemStore()
+	ctx := context.Background()
+	_ = store.Put(ctx, label.Label{
+		ObjectID: "org1:postgres:users", FieldPath: "some_col", Source: label.SourceManual, Profile: "full_redact",
+	})
+	p := NewPathOverlay(store)
+	c := []Column{{Name: "some_col", ObjectID: "org1:postgres:users", Text: true, FreeText: false, TypeKind: TypeKind(999)}}
+	out, err := p.MaskRow(ctx, c, [][]byte{[]byte("raw-value")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "raw-value" {
+		t.Fatalf("expected an unknown TypeKind to leave the value unmasked, got %q", out[0])
+	}
+}
+
+// TestPathOverlay_TypedColumnDoNotMask confirms do_not_mask still suppresses redaction for a typed
+// column, same as it does for free-text columns.
+func TestPathOverlay_TypedColumnDoNotMask(t *testing.T) {
+	store := label.NewMemStore()
+	ctx := context.Background()
+	_ = store.Put(ctx, label.Label{
+		ObjectID: "org1:postgres:users", FieldPath: "created_at", Source: label.SourceManual, Profile: "do_not_mask",
+	})
+	p := NewPathOverlay(store)
+	c := []Column{{Name: "created_at", ObjectID: "org1:postgres:users", Text: true, FreeText: false, TypeKind: TypeKindDate}}
+	out, err := p.MaskRow(ctx, c, [][]byte{[]byte("2024-01-01")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "2024-01-01" {
+		t.Fatalf("expected do_not_mask to leave the typed column untouched, got %q", out[0])
+	}
+}
+
+// TestPathOverlay_ContentDetectorsUnaffectedByTypeKind confirms mask.Remote (content detection) and
+// Overlay (the flat map) are untouched by Gap B — TypeKind only ever changes PathOverlay's
+// confirmed-label behavior. Regression-tested here via Overlay directly, since Overlay's own
+// MaskRow still consults only Text/FreeText, never TypeKind.
+func TestPathOverlay_ContentDetectorsUnaffectedByTypeKind(t *testing.T) {
+	o := NewOverlay(map[string]string{"date_of_birth": "[redacted]"})
+	c := []Column{{Name: "date_of_birth", Text: true, FreeText: false, TypeKind: TypeKindDate}}
+	out, err := o.MaskRow(context.Background(), c, [][]byte{[]byte("1990-05-14")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "1990-05-14" {
+		t.Fatalf("expected Overlay to still skip a non-free-text column regardless of TypeKind, got %q", out[0])
+	}
+}
+
 var _ Masker = (*PathOverlay)(nil)

@@ -8,7 +8,8 @@ import (
 )
 
 // EdgeKey is the decoded form of a SKYBRIDGE_KEY connection string — one copy-pasteable value
-// instead of six separate SKYBRIDGE_* env vars for the common case (mirrors hoop.dev's HOOP_KEY).
+// instead of six separate SKYBRIDGE_* env vars for the common case, a pattern other access proxies
+// use for their own equivalent single-value connection strings.
 //
 // Format: skybridge://<org_id>:<enrollment_token>@<gateway-host>[?edge_id=<id>&region=<aws-region>&ca=<base64-pem>]
 // The connector-gateway (7100) and enroll (7101) ports are fixed by convention and derived from

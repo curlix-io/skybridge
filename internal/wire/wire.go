@@ -21,8 +21,8 @@ type Engine interface {
 	Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder Recorder) error
 }
 
-// Recorder captures a session replay transcript (session replay design, hoop.dev parity) as the
-// engine's already-masked traffic passes through it. Implementations buffer in memory and ship
+// Recorder captures a session replay transcript, a pattern common to access proxies generally, as
+// the engine's already-masked traffic passes through it. Implementations buffer in memory and ship
 // the transcript to the control plane on session close — see internal/gateway/httpstore.go's
 // SessionTranscript. RecordInput receives raw client->server bytes (verbatim, before any protocol
 // parsing — replay displays these best-effort/opaque, same as the query the client actually

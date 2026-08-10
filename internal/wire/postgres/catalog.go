@@ -85,26 +85,35 @@ type catalogConn struct {
 	br   *bufio.Reader
 }
 
-// CatalogResolver resolves Postgres tableOIDs to (schema, table) names via a dedicated, agent-owned
-// connection per database — never the client's own connection (see the package-level design notes
-// in REDACTION.md for why). Safe for concurrent use across many client sessions/goroutines: each
-// distinct database gets its own catalogConn and cache, guarded by its own mutex, so one client's
-// query traffic never blocks resolution for another's.
+// columnKey identifies one (tableOID, attnum) pair for the column-name cache — see ResolveColumn.
+type columnKey struct {
+	tableOID uint32
+	attnum   int16
+}
+
+// CatalogResolver resolves Postgres tableOIDs to (schema, table) names, and (tableOID, attnum)
+// pairs to real column names, via a dedicated, agent-owned connection per database — never the
+// client's own connection (see the package-level design notes in REDACTION.md for why). Safe for
+// concurrent use across many client sessions/goroutines: each distinct database gets its own
+// catalogConn and cache, guarded by its own mutex, so one client's query traffic never blocks
+// resolution for another's.
 type CatalogResolver struct {
 	cred CatalogCredential
 
-	mu    sync.Mutex
-	conns map[string]*catalogConn         // keyed by database name
-	cache map[string]map[uint32]tableInfo // keyed by database name, then tableOID
+	mu       sync.Mutex
+	conns    map[string]*catalogConn         // keyed by database name
+	cache    map[string]map[uint32]tableInfo // keyed by database name, then tableOID
+	colCache map[string]map[columnKey]string // keyed by database name, then (tableOID, attnum)
 }
 
 // NewCatalogResolver returns a resolver that dials cred's host/port for each database it's asked
 // to resolve identity for, lazily and independently.
 func NewCatalogResolver(cred CatalogCredential) *CatalogResolver {
 	return &CatalogResolver{
-		cred:  cred,
-		conns: make(map[string]*catalogConn),
-		cache: make(map[string]map[uint32]tableInfo),
+		cred:     cred,
+		conns:    make(map[string]*catalogConn),
+		cache:    make(map[string]map[uint32]tableInfo),
+		colCache: make(map[string]map[columnKey]string),
 	}
 }
 
@@ -156,12 +165,87 @@ func (r *CatalogResolver) Resolve(ctx context.Context, database string, tableOID
 	return info.schema, info.table, info.table != ""
 }
 
+// ResolveColumn returns the real, unaliased column name for (tableOID, attnum) in database,
+// best-effort — same "any failure degrades to unresolved, never disrupts the client's session"
+// contract as Resolve. This is Gap A from docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md: RowDescription's
+// own column-name field is whatever the client's query put there (post-alias, e.g. "SELECT email AS
+// contact_info" reports "contact_info"), never the underlying pg_attribute.attname — a path-scoped
+// label confirmed on "email" would otherwise never match. attnum <= 0 (system columns like ctid, or
+// a value this parser couldn't extract) always skips resolution, mirroring Resolve's tableOID == 0
+// short-circuit.
+func (r *CatalogResolver) ResolveColumn(ctx context.Context, database string, tableOID uint32, attnum int16) (columnName string, ok bool) {
+	if tableOID == 0 || attnum <= 0 {
+		return "", false
+	}
+	key := columnKey{tableOID: tableOID, attnum: attnum}
+
+	r.mu.Lock()
+	if hit, exists := r.colCache[database][key]; exists {
+		r.mu.Unlock()
+		return hit, hit != ""
+	}
+	cc, exists := r.conns[database]
+	if !exists {
+		cc = &catalogConn{}
+		r.conns[database] = cc
+	}
+	r.mu.Unlock()
+
+	name, err := r.queryColumn(ctx, cc, database, tableOID, attnum)
+	if err != nil {
+		r.mu.Lock()
+		if r.conns[database] == cc {
+			delete(r.conns, database)
+		}
+		r.mu.Unlock()
+		return "", false
+	}
+
+	r.mu.Lock()
+	if r.colCache[database] == nil {
+		r.colCache[database] = make(map[columnKey]string)
+	}
+	r.colCache[database][key] = name
+	r.mu.Unlock()
+	return name, name != ""
+}
+
+// queryColumn runs the pg_attribute lookup for (tableOID, attnum) over cc, dialing/authenticating
+// cc first if needed — same connection-reuse and injection-safety posture as query (tableOID and
+// attnum are both parsed straight off the wire as integers, never client-supplied strings).
+func (r *CatalogResolver) queryColumn(ctx context.Context, cc *catalogConn, database string, tableOID uint32, attnum int16) (string, error) {
+	cc.mu.Lock()
+	defer cc.mu.Unlock()
+
+	if cc.conn == nil {
+		conn, br, err := dialCatalogConn(ctx, r.cred, database)
+		if err != nil {
+			return "", err
+		}
+		cc.conn = conn
+		cc.br = br
+	}
+
+	q := fmt.Sprintf(
+		"SELECT attname FROM pg_attribute WHERE attrelid = %d AND attnum = %d",
+		tableOID, attnum,
+	)
+	name, err := runSimpleQueryScalar(cc.conn, cc.br, q, "attname")
+	if err != nil {
+		_ = cc.conn.Close()
+		cc.conn = nil
+		cc.br = nil
+		return "", err
+	}
+	return name, nil
+}
+
 // query runs the pg_class/pg_namespace lookup for tableOID over cc, dialing and authenticating cc
 // first if it isn't already connected. tableOID is a uint32 parsed straight off the wire (never a
 // client-supplied string), so it's inlined directly into the simple-Query text with no injection
 // surface — see REDACTION.md's design notes for why this avoids needing the extended/parameterized
-// query protocol (Parse/Bind/Execute), matching the precedent set by comparable access proxies
-// (e.g. hoop.dev's schema-introspection queries, which also build simple-query text directly).
+// query protocol (Parse/Bind/Execute), matching the precedent set by comparable access proxies that
+// also build simple-query text directly for their own schema-introspection queries.
 func (r *CatalogResolver) query(ctx context.Context, cc *catalogConn, database string, tableOID uint32) (tableInfo, error) {
 	cc.mu.Lock()
 	defer cc.mu.Unlock()
@@ -257,6 +341,66 @@ func runSimpleQuery(w net.Conn, br *bufio.Reader, q string) (tableInfo, error) {
 			return info, nil
 		}
 	}
+}
+
+// runSimpleQueryScalar sends q as a simple Query message and returns the value of the named column
+// from the single-row reply — same protocol handling and error-on-any-failure contract as
+// runSimpleQuery, generalized to an arbitrary single scalar column instead of the fixed
+// relname/schema pair, so ResolveColumn's pg_attribute lookup doesn't need a second bespoke
+// row-decoding path. An empty string return with a nil error means the query legitimately returned
+// no matching row (e.g. a stale attnum after a DDL change) — callers treat that as "unresolved,"
+// not a query failure, exactly like Resolve treats an empty tableInfo.table.
+func runSimpleQueryScalar(w net.Conn, br *bufio.Reader, q, column string) (string, error) {
+	if err := writeFrontend(w, msgQuery, append([]byte(q), 0)); err != nil {
+		return "", err
+	}
+	var value string
+	var cols []string
+	for {
+		typ, payload, err := readBackendMessage(br)
+		if err != nil {
+			return "", err
+		}
+		switch typ {
+		case 'T': // RowDescription
+			cols = simpleRowDescriptionNames(payload)
+		case 'D': // DataRow
+			value = scalarFromDataRow(payload, cols, column)
+		case msgErrorResponse:
+			return "", fmt.Errorf("postgres: catalog query failed: %s", parseErrorResponse(payload))
+		case 'Z': // ReadyForQuery: end of this query's response
+			return value, nil
+		}
+	}
+}
+
+// scalarFromDataRow decodes a DataRow and returns the value of the named column, "" if absent/NULL
+// or the row is malformed — mirrors parseCatalogDataRow's field-walking logic for an arbitrary
+// single column instead of the fixed relname/relnamespace pair.
+func scalarFromDataRow(p []byte, cols []string, column string) string {
+	if len(p) < 2 {
+		return ""
+	}
+	n := int(binary.BigEndian.Uint16(p[0:2]))
+	off := 2
+	for i := 0; i < n; i++ {
+		if off+4 > len(p) {
+			return ""
+		}
+		flen := int32(binary.BigEndian.Uint32(p[off : off+4]))
+		off += 4
+		if flen < 0 {
+			continue // NULL
+		}
+		if off+int(flen) > len(p) {
+			return ""
+		}
+		if i < len(cols) && cols[i] == column {
+			return string(p[off : off+int(flen)])
+		}
+		off += int(flen)
+	}
+	return ""
 }
 
 // simpleRowDescriptionNames returns just the column names from a RowDescription payload — the

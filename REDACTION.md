@@ -139,8 +139,9 @@ below for how to change that.
   never treated as an error in either mode — this only fires on the masker itself failing. The
   rationale: a Presidio outage should never take your database offline.
 - `strict`: the same failures instead abort the row/connection, so unmasked content can never reach
-  the client even during an outage — mirrors [hoop.dev](https://hoop.dev)'s `DLP_MODE=strict`. Use
-  this when "silently pass through raw PII during an outage" is worse than "the query fails."
+  the client even during an outage — a posture other DLP-gated access proxies offer under their own
+  equivalent strict mode. Use this when "silently pass through raw PII during an outage" is worse
+  than "the query fails."
 
 `Remote` is a no-op (skipped entirely, zero overhead) when `SKYBRIDGE_MASK_ANALYZE_URL` /
 `SKYBRIDGE_MASK_ANONYMIZE_URL` aren't both set.
@@ -257,9 +258,9 @@ empty `org_table`). One `catalogConn` is opened lazily per database name and kep
 lifetime; each resolved `(schema, table)` is cached indefinitely per `(database, tableOID)`, since
 OIDs only change across a `DROP`/`CREATE`/`VACUUM FULL` cycle. The tableOID is a `uint32` parsed
 straight off the wire — never a client-supplied string — so it's inlined directly into simple-Query
-text with no injection surface, matching the precedent set by hoop.dev's own schema-introspection
-queries (also plain string-built SQL, relying on the same "these values aren't attacker-controlled"
-property rather than the extended/parameterized protocol). Any failure — dial, auth, query error,
+text with no injection surface, matching the precedent set by comparable access proxies' own
+schema-introspection queries (also plain string-built SQL, relying on the same "these values aren't
+attacker-controlled" property rather than the extended/parameterized protocol). Any failure — dial, auth, query error,
 connection reset — makes `Resolve` return unresolved and drops the connection so the *next* lookup
 redials, rather than surfacing an error to the client's own session: a catalog outage degrades to
 this feature's pre-existing behavior (empty `ObjectID`, fallthrough to layer 3), never disrupts a
@@ -276,8 +277,9 @@ for credential injection, so it reuses that instead of a second peek.
 `SKYBRIDGE_INJECT_CREDENTIALS=true` it's a per-session credential minted for that one client
 (`CONTRACT.md` §3), and even without injection, tying the catalog connection's lifetime to a client
 session that can end at any time is the wrong shape for a cache meant to persist across sessions.
-Following the precedent set by [hoop.dev](https://hoop.dev) — whose "connection" resource holds one
-shared, connection-level credential rather than each end-user's own login — `SKYBRIDGE_POSTGRES_CATALOG_DSN`
+Following the same pattern other access proxies use for their own connection-level credential —
+a single shared credential tied to the resource, not to each end-user's own login —
+`SKYBRIDGE_POSTGRES_CATALOG_DSN`
 configures a single dedicated, read-only credential (`postgres://user:pass@host:port`) independent
 of the client's session and of `SKYBRIDGE_DB_*`. It only ever needs `SELECT` on `pg_catalog`.
 Unset, this feature is off entirely — `internal/agent/clienttls.go`'s `buildPostgresCatalogResolver`
