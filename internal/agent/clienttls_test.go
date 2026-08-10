@@ -92,7 +92,7 @@ func TestEngineFactoryPlaintext(t *testing.T) {
 	}
 }
 
-func TestEngineFactoryWithClientTLSForPostgresAndMySQL(t *testing.T) {
+func TestEngineFactoryWithClientTLSForPostgresMySQLAndMongo(t *testing.T) {
 	tlsCfg := agentTestTLSConfig(t)
 	factory := engineFactory(tlsCfg, "", nil)
 	pg, err := factory("postgres")
@@ -109,7 +109,7 @@ func TestEngineFactoryWithClientTLSForPostgresAndMySQL(t *testing.T) {
 	if my.Name() != "mysql" {
 		t.Fatalf("expected a mysql engine, got %v", my)
 	}
-	// Mongo does not yet terminate client TLS, so it ignores clientTLS entirely.
+	// Mongo now terminates client TLS too (see internal/wire/mongo.NewWithClientTLS).
 	mo, err := factory("mongodb")
 	if err != nil {
 		t.Fatal(err)

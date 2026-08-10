@@ -230,7 +230,7 @@ func TestLogClientTLSModeNoopWhenConfigButNilTLS(t *testing.T) {
 
 func TestLogClientTLSModeReportsPerEngine(t *testing.T) {
 	tlsCfg := agentTestTLSConfig(t)
-	cases := map[string]string{"postgres": "ENABLED", "mysql": "ENABLED for MySQL", "mongodb": "does not"}
+	cases := map[string]string{"postgres": "ENABLED", "mysql": "ENABLED for MySQL", "mongodb": "ENABLED for MongoDB", "oracle": "does not"}
 	for name, want := range cases {
 		var buf bytes.Buffer
 		logClientTLSMode(config.Agent{ClientTLSSelfSigned: true}, tlsCfg, &fakeEngine{name: name}, log.New(&buf, "", 0))

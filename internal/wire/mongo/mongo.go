@@ -24,8 +24,10 @@ package mongo
 import (
 	"bufio"
 	"context"
+	"crypto/tls"
 	"encoding/binary"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"sync"
@@ -46,10 +48,21 @@ type Engine struct {
 	// orgID scopes mask.Column.ObjectID for path-/table-aware masking labels (see
 	// internal/pathlabel). Empty disables that scoping without otherwise affecting masking.
 	orgID string
+	// clientTLS, when non-nil, makes the proxy terminate client TLS immediately on accept (Mongo
+	// has no in-band STARTTLS like Postgres's SSLRequest — the handshake must happen before any
+	// wire bytes, mirroring how upstream TLS is already handled for Mongo in
+	// internal/agent/upstreamtls.go's startUpstreamTLS). Required for credential injection
+	// (ProxyInject, see clientauth.go) so the client's session-token password does not ride in
+	// cleartext.
+	clientTLS *tls.Config
 }
 
 // New returns a MongoDB engine.
 func New() *Engine { return &Engine{} }
+
+// NewWithClientTLS returns a MongoDB engine that terminates client TLS using cfg before the wire
+// protocol begins (see Engine.clientTLS). Mirrors postgres.NewWithClientTLS/mysql.NewWithClientTLS.
+func NewWithClientTLS(cfg *tls.Config) *Engine { return &Engine{clientTLS: cfg} }
 
 // WithOrgID returns a copy of the engine that scopes mask.Column.ObjectID to orgID for path-/
 // table-aware masking labels (see internal/pathlabel). Call with "" to leave scoping disabled.
@@ -64,6 +77,33 @@ func (*Engine) Name() string { return "mongodb" }
 
 // Proxy implements wire.Engine.
 func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder wire.Recorder) error {
+	client, err := e.terminateClientTLS(client)
+	if err != nil {
+		return err
+	}
+	return e.pump(ctx, client, upstream, masker, recorder)
+}
+
+// terminateClientTLS upgrades client to TLS using e.clientTLS when configured, else returns it
+// unchanged. Mongo has no in-band STARTTLS, so (unlike Postgres) there is no negotiation frame to
+// consume first — a TLS-terminating listener must always speak TLS immediately on accept.
+func (e *Engine) terminateClientTLS(client net.Conn) (net.Conn, error) {
+	if e.clientTLS == nil {
+		return client, nil
+	}
+	tconn := tls.Server(client, e.clientTLS)
+	if err := tconn.Handshake(); err != nil {
+		return nil, fmt.Errorf("mongo: client TLS handshake failed: %w", err)
+	}
+	return tconn, nil
+}
+
+// pump runs the two-goroutine forward/mask loop shared by Proxy and ProxyInject. Called once the
+// client connection (already TLS-terminated if configured) has finished any auth handling the
+// caller needed to do — for Proxy that's nothing (verbatim passthrough); for ProxyInject
+// (clientauth.go/auth.go) it's after the client's login has been captured and upstream auth has
+// succeeded.
+func (e *Engine) pump(ctx context.Context, client, upstream net.Conn, masker mask.Masker, recorder wire.Recorder) error {
 	if masker == nil {
 		masker = mask.Noop{}
 	}
