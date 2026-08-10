@@ -37,22 +37,25 @@ var errLegacyHandshakeUnsupported = errors.New("mongo: legacy OP_QUERY handshake
 var errPlainNotOffered = fmt.Errorf("mongo: client did not request %s (configure authMechanism=%s to present the session token)", saslMechanismPlain, saslMechanismPlain)
 
 // terminateClientAuth reads the client's hello and saslStart(PLAIN) commands, replies to hello
-// normally (so the driver proceeds to auth) and returns the extracted secret (the PLAIN
-// password, i.e. the opaque session token) and a startup map mirroring postgres/mysql's shape
-// (at least "user" and "database"/authSource). It does NOT tell the client login succeeded —
-// that happens only after the caller's upstream auth succeeds (see completeClientAuth below),
-// mirroring postgres's deferred sendClientAuthOK pattern.
-func terminateClientAuth(client *bufio.ReadWriter) (secret string, startup map[string]string, err error) {
+// normally (so the driver proceeds to auth), and returns the extracted secret (the PLAIN
+// password, i.e. the opaque session token), a startup map mirroring postgres/mysql's shape (at
+// least "user" and "database"/authSource), and the saslStart request's ID. It does NOT reply to
+// saslStart at all — the caller must call sendClientAuthOK (success) or sendClientAuthFailed
+// (failure) with that request ID only after upstream auth has actually been attempted, mirroring
+// postgres's deferred sendClientAuthOK pattern. Telling the client its login succeeded before
+// upstream auth is verified would be a real security bug (the client could then issue queries
+// against a connection injection was still supposed to gate), not just a style preference.
+func terminateClientAuth(client *bufio.ReadWriter) (secret string, startup map[string]string, saslRequestID int32, err error) {
 	helloMsg, err := readMessage(client.Reader)
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	if err := requireOpMsg(helloMsg); err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	helloDoc, ok := parseCommandDocGeneric(helloMsg)
 	if !ok {
-		return "", nil, errors.New("mongo: could not parse client hello/isMaster command")
+		return "", nil, 0, errors.New("mongo: could not parse client hello/isMaster command")
 	}
 	// hello's own $db is the auth database (commonly "admin"), independent of whatever database
 	// the client will eventually query — see package doc.
@@ -62,34 +65,34 @@ func terminateClientAuth(client *bufio.ReadWriter) (secret string, startup map[s
 	}
 	requestID := int32(binary.LittleEndian.Uint32(helloMsg[4:8]))
 	if _, err := client.Writer.Write(helloReply(requestID)); err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	if err := client.Writer.Flush(); err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 
 	saslMsg, err := readMessage(client.Reader)
 	if err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	if err := requireOpMsg(saslMsg); err != nil {
-		return "", nil, err
+		return "", nil, 0, err
 	}
 	saslDoc, ok := parseCommandDocGeneric(saslMsg)
 	if !ok {
-		return "", nil, errors.New("mongo: could not parse client saslStart command")
+		return "", nil, 0, errors.New("mongo: could not parse client saslStart command")
 	}
 	if _, hasSaslStart := saslDoc["saslStart"]; !hasSaslStart {
-		return "", nil, fmt.Errorf("mongo: expected saslStart, got a command with fields %v", fieldNames(saslDoc))
+		return "", nil, 0, fmt.Errorf("mongo: expected saslStart, got a command with fields %v", fieldNames(saslDoc))
 	}
 	mechanism := stringField(saslDoc, "mechanism")
 	if mechanism != saslMechanismPlain {
-		return "", nil, errPlainNotOffered
+		return "", nil, 0, errPlainNotOffered
 	}
 	payload := binaryField(saslDoc, "payload")
 	authzid, authcid, password, err := decodePlainPayload(payload)
 	if err != nil {
-		return "", nil, fmt.Errorf("mongo: bad PLAIN payload: %w", err)
+		return "", nil, 0, fmt.Errorf("mongo: bad PLAIN payload: %w", err)
 	}
 	_ = authzid // RFC 4616 authzid is accepted but unused, matching typical PLAIN server behavior.
 
@@ -97,20 +100,39 @@ func terminateClientAuth(client *bufio.ReadWriter) (secret string, startup map[s
 	if saslDB == "" {
 		saslDB = authDB
 	}
-	saslRequestID := int32(binary.LittleEndian.Uint32(saslMsg[4:8]))
+	saslRequestID = int32(binary.LittleEndian.Uint32(saslMsg[4:8]))
 	startup = map[string]string{"user": authcid, "database": saslDB}
-	return password, startup, saslCompleteReplyAndFlush(client, saslRequestID)
+	return password, startup, saslRequestID, nil
 }
 
-// saslCompleteReplyAndFlush sends the PLAIN mechanism's single-round-trip completion reply
-// ({ok:1, done:true, conversationId:1, payload:<empty>}) and flushes. PLAIN never needs a
-// saslContinue, unlike SCRAM — see package doc.
-func saslCompleteReplyAndFlush(client *bufio.ReadWriter, requestID int32) error {
+// sendClientAuthOK sends the PLAIN mechanism's single-round-trip completion reply ({ok:1,
+// done:true, conversationId:1, payload:<empty>}) — call only after upstream auth has succeeded.
+// PLAIN never needs a saslContinue, unlike SCRAM — see package doc.
+func sendClientAuthOK(client *bufio.ReadWriter, requestID int32) error {
 	if _, err := client.Writer.Write(saslCompleteReply(requestID)); err != nil {
 		return err
 	}
 	return client.Writer.Flush()
 }
+
+// sendClientAuthFailed replies to the client's saslStart with a clean authentication-failure
+// error (matching MongoDB's AuthenticationFailed shape) rather than silently closing the
+// connection, mirroring postgres's writeClientError on injection failure.
+func sendClientAuthFailed(client *bufio.ReadWriter, requestID int32) error {
+	reply := newDoc().
+		addDouble("ok", 0).
+		addInt32("code", authenticationFailedCode).
+		addString("codeName", "AuthenticationFailed").
+		addString("errmsg", "skybridge: access denied for this session").
+		bytes()
+	if _, err := client.Writer.Write(opMsgReplyMessage(reply, requestID)); err != nil {
+		return err
+	}
+	return client.Writer.Flush()
+}
+
+// authenticationFailedCode is MongoDB's standard error code for a failed auth attempt.
+const authenticationFailedCode = 18
 
 // requireOpMsg returns errLegacyHandshakeUnsupported for anything that isn't OP_MSG (in
 // particular, legacy OP_QUERY isMaster handshakes) — see package doc's scoping.

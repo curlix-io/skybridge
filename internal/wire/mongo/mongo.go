@@ -43,6 +43,9 @@ const (
 	maxMessageBytes     = 64 << 20 // generous cap (mongod default maxMessageSizeBytes is 48 MiB)
 )
 
+// Compile-time assertion that Engine satisfies wire.InjectingEngine (credential injection).
+var _ wire.InjectingEngine = (*Engine)(nil)
+
 // Engine is the MongoDB wire-proxy engine.
 type Engine struct {
 	// orgID scopes mask.Column.ObjectID for path-/table-aware masking labels (see
@@ -83,6 +86,60 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	}
 	return e.pump(ctx, client, upstream, masker, recorder)
 }
+
+// ProxyInject implements wire.InjectingEngine: credential handoff (mirrors postgres.Engine.
+// ProxyInject/mysql.Engine.ProxyInject). Rather than forwarding the client's auth verbatim, the
+// agent terminates the client's login locally (a session token presented via SASL PLAIN — see
+// clientauth.go's package doc for why PLAIN, and why the client must be configured with
+// authMechanism=PLAIN to offer it), resolves an upstream credential via resolve, and ORIGINATES
+// its own upstream auth (SCRAM-SHA-256, falling back to SCRAM-SHA-1 — see auth.go). The client
+// never holds a credential the database would accept directly; after upstream auth succeeds,
+// result rows are masked exactly as in the verbatim path.
+func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve wire.CredentialResolver, recorder wire.Recorder) error {
+	if resolve == nil {
+		return errors.New("mongo: credential injection requires a resolver")
+	}
+	client, err := e.terminateClientTLS(client)
+	if err != nil {
+		return err
+	}
+	clientRW := bufio.NewReadWriter(bufio.NewReader(client), bufio.NewWriter(client))
+	secret, startup, requestID, err := terminateClientAuth(clientRW)
+	if err != nil {
+		return err
+	}
+	cred, err := resolve(ctx, startup, secret)
+	if err != nil {
+		_ = sendClientAuthFailed(clientRW, requestID)
+		return err
+	}
+
+	upstreamRW := bufio.NewReadWriter(bufio.NewReader(upstream), bufio.NewWriter(upstream))
+	if err := authenticateUpstream(upstreamRW, cred); err != nil {
+		_ = sendClientAuthFailed(clientRW, requestID)
+		return err
+	}
+	if err := sendClientAuthOK(clientRW, requestID); err != nil {
+		return err
+	}
+
+	// clientRW.Reader/upstreamRW.Reader may hold bytes the wrapped bufio.Reader buffered ahead of
+	// what auth actually consumed (unlikely for the fixed-size auth messages here, but pump reads
+	// fresh bufio.Readers over the raw net.Conn otherwise) — wrap client/upstream so pump's own
+	// buffered reads start from exactly where auth left off, never re-reading or dropping bytes.
+	return e.pump(ctx, &bufReaderConn{Conn: client, r: clientRW.Reader}, &bufReaderConn{Conn: upstream, r: upstreamRW.Reader}, masker, recorder)
+}
+
+// bufReaderConn wraps a net.Conn so reads are satisfied from r first (which may hold bytes
+// already buffered ahead of what a caller consumed) before falling through to the underlying
+// connection — the same "don't drop already-buffered bytes" concern postgres/mysql's ProxyInject
+// handle by threading their own buffered reader through to the post-auth pump.
+type bufReaderConn struct {
+	net.Conn
+	r *bufio.Reader
+}
+
+func (c *bufReaderConn) Read(p []byte) (int, error) { return c.r.Read(p) }
 
 // terminateClientTLS upgrades client to TLS using e.clientTLS when configured, else returns it
 // unchanged. Mongo has no in-band STARTTLS, so (unlike Postgres) there is no negotiation frame to

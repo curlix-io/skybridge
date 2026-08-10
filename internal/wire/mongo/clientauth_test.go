@@ -61,7 +61,12 @@ func TestTerminateClientAuth_FullPlainHandshake(t *testing.T) {
 		err     error
 	}, 1)
 	go func() {
-		secret, startup, err := terminateClientAuth(serverRW)
+		secret, startup, requestID, err := terminateClientAuth(serverRW)
+		if err == nil {
+			// Simulates ProxyInject sending the deferred OK only after upstream auth would have
+			// succeeded (here, immediately, since this test only exercises terminateClientAuth).
+			err = sendClientAuthOK(serverRW, requestID)
+		}
 		result <- struct {
 			secret  string
 			startup map[string]string
@@ -129,7 +134,7 @@ func TestTerminateClientAuth_RejectsNonPlainMechanism(t *testing.T) {
 	serverRW := bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server))
 	errc := make(chan error, 1)
 	go func() {
-		_, _, err := terminateClientAuth(serverRW)
+		_, _, _, err := terminateClientAuth(serverRW)
 		errc <- err
 	}()
 
@@ -158,7 +163,7 @@ func TestTerminateClientAuth_RejectsLegacyOpQuery(t *testing.T) {
 	serverRW := bufio.NewReadWriter(bufio.NewReader(server), bufio.NewWriter(server))
 	errc := make(chan error, 1)
 	go func() {
-		_, _, err := terminateClientAuth(serverRW)
+		_, _, _, err := terminateClientAuth(serverRW)
 		errc <- err
 	}()
 
