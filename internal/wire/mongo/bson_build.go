@@ -192,6 +192,20 @@ func opMsgReplyMessage(body []byte, responseTo int32) []byte {
 	return msg
 }
 
+// opMsgRequestMessage builds a complete OP_MSG client request (single body-document section, no
+// checksum) with the given requestID — the production counterpart of mongo_test.go's identically
+// shaped opMsgRequest test helper, used by auth.go to originate upstream hello/saslStart/
+// saslContinue commands.
+func opMsgRequestMessage(body []byte, requestID int32) []byte {
+	msg := make([]byte, 20)
+	binary.LittleEndian.PutUint32(msg[4:8], uint32(requestID))
+	binary.LittleEndian.PutUint32(msg[12:16], opMsg)
+	msg = append(msg, 0) // section kind 0 (body)
+	msg = append(msg, body...)
+	binary.LittleEndian.PutUint32(msg[0:4], uint32(len(msg)))
+	return msg
+}
+
 // helloReply builds a minimal, self-consistent hello/isMaster response advertising a recent
 // maxWireVersion (so drivers proceed normally) — no saslSupportedMechs (see clientauth.go's
 // package doc: this proxy does not attempt to make a driver auto-discover PLAIN; the client must

@@ -32,9 +32,9 @@ const (
 // ClientConversation drives one SCRAM client exchange against an upstream server. Not safe for
 // concurrent use; a conversation is single-shot (one Step1/Step2/Step3 sequence per auth attempt).
 type ClientConversation struct {
-	mechanism   string
-	newHash     func() hash.Hash
-	authcName   string // value for the client-first-message "n=" field; "" for Postgres (username
+	mechanism string
+	newHash   func() hash.Hash
+	authcName string // value for the client-first-message "n=" field; "" for Postgres (username
 	// already known via the startup packet), the real username for Mongo (required by the spec).
 	password string
 
