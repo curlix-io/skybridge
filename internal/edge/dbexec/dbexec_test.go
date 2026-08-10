@@ -44,9 +44,29 @@ func TestDbExecMissingArgs(t *testing.T) {
 func TestRegistryHasDbQueryTools(t *testing.T) {
 	reg := edge.NewRegistry()
 	Register(reg, Options{})
-	for _, name := range []string{ToolDBQueryPostgres, ToolDBQueryMySQL, ToolDBQueryMongo} {
+	for _, name := range []string{ToolDBQueryPostgres, ToolDBQueryMySQL, ToolDBQueryMongo, ToolDBQuerySnowflake} {
 		if !reg.Has(name) {
 			t.Fatalf("missing %s", name)
 		}
+	}
+}
+
+func TestDbExecSnowflakeMissingTarget(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBQuerySnowflake,
+		Arguments: map[string]any{
+			"database":         "app",
+			"connection_scope": "111",
+			"statement":        "SELECT 1",
+			"read_only":        true,
+		},
+	})
+	if res["ok"] != false {
+		t.Fatalf("expected ok=false: %+v", res)
+	}
+	if res["tool"] != ToolDBQuerySnowflake {
+		t.Fatalf("expected tool=%s: %+v", ToolDBQuerySnowflake, res)
 	}
 }

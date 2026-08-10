@@ -14,9 +14,10 @@ import (
 )
 
 const (
-	ToolDBQueryPostgres = "db_query_postgres"
-	ToolDBQueryMySQL    = "db_query_mysql"
-	ToolDBQueryMongo    = "db_query_mongo"
+	ToolDBQueryPostgres  = "db_query_postgres"
+	ToolDBQueryMySQL     = "db_query_mysql"
+	ToolDBQueryMongo     = "db_query_mongo"
+	ToolDBQuerySnowflake = "db_query_snowflake"
 
 	// ToolDBExecuteWrite is a distinct write-capable tool, separate from the always-read-only
 	// db_query_* tools above (whose EnforceReadOnly:true in run() never changes). Whether a given
@@ -55,12 +56,14 @@ func New(opts Options) Executor {
 	return Executor{opts: opts}
 }
 
-// Register wires db_query_{postgres,mysql,mongo} and db_execute_write into the edge registry.
+// Register wires db_query_{postgres,mysql,mongo,snowflake} and db_execute_write into the edge
+// registry.
 func Register(reg *edge.Registry, opts Options) {
 	e := New(opts)
 	reg.Register(ToolDBQueryPostgres, e.runPostgres)
 	reg.Register(ToolDBQueryMySQL, e.runMySQL)
 	reg.Register(ToolDBQueryMongo, e.runMongo)
+	reg.Register(ToolDBQuerySnowflake, e.runSnowflake)
 	reg.Register(ToolDBExecuteWrite, e.runWrite)
 }
 
@@ -74,6 +77,10 @@ func (e Executor) runMySQL(ctx context.Context, args map[string]any) (edge.Resul
 
 func (e Executor) runMongo(ctx context.Context, args map[string]any) (edge.Result, error) {
 	return e.run(ctx, "mongo", args)
+}
+
+func (e Executor) runSnowflake(ctx context.Context, args map[string]any) (edge.Result, error) {
+	return e.run(ctx, "snowflake", args)
 }
 
 func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (edge.Result, error) {
