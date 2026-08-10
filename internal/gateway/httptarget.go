@@ -13,9 +13,15 @@ import (
 	"github.com/curlix-io/skybridge/internal/tunnel"
 )
 
-// TargetResolver resolves a target name to dial/attribution info for one client connection, live —
-// no caching. The gateway calls this on every ServeClient/Open, resolving addr/db_type per
-// connection instead of the agent announcing a static target list at registration.
+// TargetResolver resolves a target to dial/attribution info for one client connection, live — no
+// caching. The gateway calls this on every ServeClient/Open, resolving addr/db_type per connection
+// instead of the agent announcing a static target list at registration.
+//
+// target is the wire database protocol (postgres | mysql | mongodb | snowflake) — fixed by the
+// listener port at deploy time, so it's the routing key a ClientListener config can hold
+// indefinitely. Resolution picks whichever single enabled resource role of that db_type the org
+// has; renaming that role never invalidates the listener config (see
+// docs/design/skybridge-go-wire-proxy.md §4.3).
 type TargetResolver interface {
 	Resolve(ctx context.Context, orgID, target string) (tunnel.Target, error)
 }
@@ -72,7 +78,7 @@ type wireTargetsResponse struct {
 	Targets        []wireTargetOut `json:"targets"`
 }
 
-// Resolve implements TargetResolver by GETting wire-targets?organization_id=&target_name=<target>
+// Resolve implements TargetResolver by GETting wire-targets?organization_id=&db_type=<target>
 // and mapping the single-element response.
 func (h *HTTPTargetResolver) Resolve(ctx context.Context, orgID, target string) (tunnel.Target, error) {
 	orgID = strings.TrimSpace(orgID)
@@ -86,7 +92,7 @@ func (h *HTTPTargetResolver) Resolve(ctx context.Context, orgID, target string) 
 	}
 	q := u.Query()
 	q.Set("organization_id", orgID)
-	q.Set("target_name", target)
+	q.Set("db_type", target)
 	u.RawQuery = q.Encode()
 
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u.String(), nil)

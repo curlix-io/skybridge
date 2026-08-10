@@ -16,25 +16,25 @@ func TestHTTPTargetResolverResolves(t *testing.T) {
 			t.Fatalf("path=%s", r.URL.Path)
 		}
 		q := r.URL.Query()
-		if q.Get("organization_id") != "org-1" || q.Get("target_name") != "db" {
+		if q.Get("organization_id") != "org-1" || q.Get("db_type") != "postgres" {
 			t.Fatalf("query=%v", q)
 		}
 		w.WriteHeader(http.StatusOK)
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"organization_id": "org-1",
 			"targets": []map[string]any{
-				{"name": "db", "addr": "db.internal:5432", "db_type": "POSTGRES", "resource_role_id": "role-1"},
+				{"name": "CurlixPostgresCluster", "addr": "db.internal:5432", "db_type": "POSTGRES", "resource_role_id": "role-1"},
 			},
 		})
 	}))
 	defer srv.Close()
 
 	r := gateway.NewHTTPTargetResolver(srv.URL, "/wire-targets", "tok")
-	got, err := r.Resolve(context.Background(), "org-1", "db")
+	got, err := r.Resolve(context.Background(), "org-1", "postgres")
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Name != "db" || got.Addr != "db.internal:5432" || got.DBType != "postgres" || got.ResourceRoleID != "role-1" {
+	if got.Name != "CurlixPostgresCluster" || got.Addr != "db.internal:5432" || got.DBType != "postgres" || got.ResourceRoleID != "role-1" {
 		t.Fatalf("resolved target = %+v", got)
 	}
 }
