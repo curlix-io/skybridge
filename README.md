@@ -420,11 +420,11 @@ go run ./cmd/skybridge-agent
 ```
 
 Your control plane mints the session token however it likes (e.g. a `proxy-session` endpoint that
-returns a short-lived token for a given role/connection); the user then, in pgAdmin/psql/DBeaver,
-points the client at the **Skybridge listener** (not the database), uses any username, and pastes
-the session token **as the password**. Injection covers **Postgres** and **MySQL**; Mongo falls back
-to verbatim auth passthrough (logged at startup). See `CredentialExchangeURL`'s request/response
-shape in `CONTRACT.md` §3 to implement the control-plane side.
+returns a short-lived token for a given role/connection); the user then, in pgAdmin/psql/DBeaver/
+mongosh, points the client at the **Skybridge listener** (not the database), uses any username, and
+pastes the session token **as the password**. Injection covers **Postgres**, **MySQL**, and
+**Mongo**. See `CredentialExchangeURL`'s request/response shape in `CONTRACT.md` §3 to implement
+the control-plane side.
 
 **MySQL specifics.** MySQL's default auth is challenge-response, so the token cannot be recovered from
 it. The agent therefore terminates client TLS and switches the client to the **`mysql_clear_password`**
@@ -434,6 +434,17 @@ the equivalent checkbox in GUI tools). Upstream, the agent answers `mysql_native
 `caching_sha2_password`; the latter's first-connection "full authentication" sends the password over
 the wire, so it **requires upstream TLS** (`SKYBRIDGE_UPSTREAM_TLS`) — RSA-key full auth is not
 supported.
+
+**Mongo specifics.** Unlike Postgres/MySQL, a MongoDB driver will not auto-discover an
+agent-forced mechanism — real MongoDB servers never advertise `PLAIN` via `hello`'s
+`saslSupportedMechs`, so **the client must be explicitly configured with `authMechanism=PLAIN`**
+(e.g. `mongodb://user:<token>@host:port/?authMechanism=PLAIN`) to present the session token; there
+is no server-side trick to force this the way MySQL's `AuthSwitchRequest` does. The agent
+terminates client TLS (Mongo has no in-band STARTTLS, so the TLS handshake happens immediately on
+connect, before `hello`) and answers the client's `saslStart(PLAIN)` directly — no `saslContinue`
+round trip, unlike SCRAM. Upstream, the agent originates a fresh SCRAM-SHA-256 conversation,
+falling back to SCRAM-SHA-1 only if the upstream reports `MechanismUnavailable` for this user
+(MongoDB <4.0, or a user provisioned with SHA-1-only credentials).
 
 **Encrypt the client link (so the token isn't sent in cleartext).** The session token rides in the
 client's password, so terminate client TLS at the agent: provide a cert/key (or, for dev, a
@@ -572,6 +583,8 @@ cmd/skybridge-agent     egress agent: listener OR tunnel mode
 cmd/skybridge-gateway   relay gateway: agent endpoint + client listeners
 cmd/skybridge-edge      unified edge: call-home transport + AWS reads + optional wire proxy
 internal/wire           wire engines: postgres, mysql, mongo
+internal/wire/scram     protocol-agnostic SCRAM-SHA-1/SHA-256 client-conversation math, shared by
+                        postgres and mongo's credential-injection upstream-auth origination
 internal/mask           masking pipeline: remote (Presidio) masker + path overlay + column overlay
 internal/pathlabel      docpath (nested-document path walking) + label (path-scoped Store/Label types)
 internal/tunnel         egress multiplexed transport

@@ -81,16 +81,16 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	return tls.X509KeyPair(certPEM, keyPEM)
 }
 
-// engineFactory returns an engine selector that builds the Postgres and MySQL engines with client-TLS
-// termination when clientTLS is non-nil (needed for credential injection, where the client sends a
-// session token). Mongo does not yet terminate client TLS. orgID scopes mask.Column.ObjectID for
-// path-/table-aware masking labels (see internal/pathlabel); MySQL resolves it from its
-// column-definition packets and Mongo resolves it by correlating each find/aggregate/getMore
-// request's collection with its reply (see internal/wire/mongo package doc). Postgres resolves it
-// too, but only when pgCatalog is non-nil (SKYBRIDGE_POSTGRES_CATALOG_DSN configured — see
-// buildPostgresCatalogResolver and REDACTION.md's "Postgres table-identity resolution" design
-// notes); pgCatalog is shared across every Postgres connection this agent serves so its per-database
-// OID cache persists for the agent's lifetime, not just one session.
+// engineFactory returns an engine selector that builds the Postgres, MySQL and Mongo engines with
+// client-TLS termination when clientTLS is non-nil (needed for credential injection, where the
+// client sends a session token). orgID scopes mask.Column.ObjectID for path-/table-aware masking
+// labels (see internal/pathlabel); MySQL resolves it from its column-definition packets and Mongo
+// resolves it by correlating each find/aggregate/getMore request's collection with its reply (see
+// internal/wire/mongo package doc). Postgres resolves it too, but only when pgCatalog is non-nil
+// (SKYBRIDGE_POSTGRES_CATALOG_DSN configured — see buildPostgresCatalogResolver and REDACTION.md's
+// "Postgres table-identity resolution" design notes); pgCatalog is shared across every Postgres
+// connection this agent serves so its per-database OID cache persists for the agent's lifetime,
+// not just one session.
 func engineFactory(clientTLS *tls.Config, orgID string, pgCatalog *postgres.CatalogResolver) func(string) (wire.Engine, error) {
 	return func(dbType string) (wire.Engine, error) {
 		switch dbType {
@@ -111,6 +111,9 @@ func engineFactory(clientTLS *tls.Config, orgID string, pgCatalog *postgres.Cata
 			}
 			return mysql.New().WithOrgID(orgID), nil
 		case "mongodb", "mongo":
+			if clientTLS != nil {
+				return mongo.NewWithClientTLS(clientTLS).WithOrgID(orgID), nil
+			}
 			return mongo.New().WithOrgID(orgID), nil
 		default:
 			return nil, fmt.Errorf("unsupported db type %q (want postgres|mysql|mongodb)", dbType)

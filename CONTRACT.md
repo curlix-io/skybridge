@@ -180,10 +180,13 @@ authentication error shown to the native client (e.g. a Postgres `ErrorResponse`
   down on session end / by the sweep, exactly like the in-app execute path.
 - Whether the exchange is enforced is a control-plane policy decision; the token is short-lived and
   may be exchanged multiple times within its window (native clients open several pooled connections).
-- Engines that do not implement injection (currently Mongo) ignore this contract and forward the
-  client's own auth verbatim. Postgres and MySQL implement it. MySQL additionally requires client TLS
-  and the client using the `mysql_clear_password` plugin (its default auth is challenge-response, so
-  the token cannot otherwise be recovered).
+- Postgres, MySQL, and Mongo all implement injection. MySQL additionally requires client TLS and
+  the client using the `mysql_clear_password` plugin (its default auth is challenge-response, so
+  the token cannot otherwise be recovered). Mongo requires the client to be configured with
+  `authMechanism=PLAIN` (real MongoDB servers never advertise `PLAIN` via `hello`, so a driver
+  will not discover it on its own) and requires client TLS (Mongo has no in-band STARTTLS — the
+  handshake happens immediately on connect); upstream, the agent originates SCRAM-SHA-256, falling
+  back to SCRAM-SHA-1 only on a `MechanismUnavailable` response for this user.
 - The minted credential is presented to the database over whatever upstream transport the agent
   negotiates. When the broker returns an `rds_iam` token (or the database otherwise requires
   encryption), the agent must run with upstream TLS (`SKYBRIDGE_UPSTREAM_TLS`); the IAM token is only

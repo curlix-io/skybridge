@@ -361,6 +361,9 @@ func logClientTLSMode(cfg config.Agent, clientTLS *tls.Config, engine wire.Engin
 	case "mysql":
 		logger.Printf("skybridge-agent: client TLS termination ENABLED for MySQL (connect with TLS; for credential " +
 			"injection the client must also enable the mysql_clear_password plugin).")
+	case "mongodb":
+		logger.Printf("skybridge-agent: client TLS termination ENABLED for MongoDB (Mongo has no in-band STARTTLS, " +
+			"so clients must speak TLS immediately on connect — e.g. mongosh --tls).")
 	default:
 		logger.Printf("skybridge-agent: WARNING: client TLS is configured but the %q engine does not "+
 			"terminate client TLS yet; the client link stays plaintext.", engine.Name())
