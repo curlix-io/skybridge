@@ -502,9 +502,10 @@ func (g Gateway) WireMtlsConfigured() bool {
 	return len(g.WireMtlsCABundlePEM) > 0
 }
 
-// ClientListener binds a local listen address to an org's registered target name. OrgID selects
-// which org's agent tunnel serves this listener (one agent process per org); Target is resolved
-// live per connection via the gateway's TargetResolver.
+// ClientListener binds a local listen address to an org's wire database protocol. OrgID selects
+// which org's agent tunnel serves this listener (one agent process per org); Target is the
+// listener's fixed db_type (postgres | mysql | mongodb | snowflake — matches the listener's own
+// port, never renamed) and is resolved live per connection via the gateway's TargetResolver.
 type ClientListener struct {
 	Addr   string `json:"addr"`
 	OrgID  string `json:"org_id"`
