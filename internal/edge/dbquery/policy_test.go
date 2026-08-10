@@ -72,6 +72,15 @@ func TestEnforceReadOnlySQLBlocksCommentAndCTEBypass(t *testing.T) {
 	}
 }
 
+// TestEnforceReadOnlySQLAllowsEscapedQuoteInLiteral covers stripSQLNoise's doubled single-quote
+// (”) escape handling inside a string literal — without it, the literal's closing quote would be
+// misdetected mid-string and the keyword scan could run over raw (unstripped) SQL text.
+func TestEnforceReadOnlySQLAllowsEscapedQuoteInLiteral(t *testing.T) {
+	if err := enforceReadOnlySQL(`SELECT * FROM t WHERE note = 'it''s fine, no DELETE here'`); err != nil {
+		t.Fatalf("expected escaped-quote literal to be allowed, got %v", err)
+	}
+}
+
 func TestEnforceReadOnlySQLAllowsLiteralsContainingKeywords(t *testing.T) {
 	for _, q := range []string{
 		"SELECT * FROM tickets WHERE note = 'please delete this ticket'",

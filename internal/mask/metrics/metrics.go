@@ -256,6 +256,15 @@ func (r *Recorder) restore(drained map[bucketKey]*bucketCounts) {
 			if len(r.pending) >= maxPendingBuckets {
 				key = bucketKey{connectionKey: key.connectionKey, entityType: otherEntityType, source: key.source}
 				existing, ok = r.pending[key]
+				if !ok {
+					// Same safety net as bump(): even the OTHER bucket doesn't exist yet and pending is
+					// already at cap — evict an arbitrary existing bucket rather than let a sustained
+					// backend outage grow pending past maxPendingBuckets across repeated failed flushes.
+					for evictKey := range r.pending {
+						delete(r.pending, evictKey)
+						break
+					}
+				}
 			}
 		}
 		if !ok {

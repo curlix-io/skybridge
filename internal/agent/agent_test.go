@@ -3,6 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
+	"io"
 	"log"
 	"net"
 	"testing"
@@ -200,6 +201,17 @@ func TestLogCredentialModeEnabledSilentWarningWithClientTLS(t *testing.T) {
 	}
 }
 
+func TestLogCredentialModeDefaultsNilLogger(t *testing.T) {
+	// A nil logger must fall back to log.Default() rather than panic, even down the warning path.
+	logCredentialMode(config.Agent{InjectCredentials: true}, &fakeEngine{name: "postgres"}, nil, nil)
+}
+
+func TestLogClientTLSModeDefaultsNilLogger(t *testing.T) {
+	tlsCfg := agentTestTLSConfig(t)
+	// A nil logger must fall back to log.Default() rather than panic.
+	logClientTLSMode(config.Agent{ClientTLSSelfSigned: true}, tlsCfg, &fakeEngine{name: "postgres"}, nil)
+}
+
 func TestLogClientTLSModeNoopWhenNotConfigured(t *testing.T) {
 	var buf bytes.Buffer
 	logClientTLSMode(config.Agent{}, nil, &fakeEngine{name: "postgres"}, log.New(&buf, "", 0))
@@ -239,6 +251,50 @@ func TestRunTunnelRequiresGatewayAddr(t *testing.T) {
 	err := RunTunnel(context.Background(), config.Agent{}, Deps{}, nil)
 	if err == nil {
 		t.Fatal("expected an error when SKYBRIDGE_GATEWAY is unset")
+	}
+}
+
+func TestBuildMaskerWithPathLabelSyncNoopWhenNothingConfigured(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	m, detector, store := BuildMaskerWithPathLabelSync(ctx, config.Agent{}, log.New(io.Discard, "", 0))
+	if _, ok := m.(mask.Noop); !ok {
+		t.Fatalf("expected mask.Noop, got %T", m)
+	}
+	if detector != nil {
+		t.Fatalf("expected nil detector, got %v", detector)
+	}
+	if store != nil {
+		t.Fatalf("expected nil store, got %v", store)
+	}
+}
+
+func TestBuildMaskerWithPathLabelSyncReturnsDetectorWhenRemoteEnabled(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := config.Agent{MaskAnalyzeURL: "http://a", MaskAnonymizeURL: "http://b"}
+	m, detector, store := BuildMaskerWithPathLabelSync(ctx, cfg, log.New(io.Discard, "", 0))
+	if m == nil {
+		t.Fatal("expected a non-nil masker")
+	}
+	if detector == nil || !detector.Enabled() {
+		t.Fatalf("expected an enabled detector when Presidio is configured, got %v", detector)
+	}
+	if store != nil {
+		t.Fatalf("expected nil store without SKYBRIDGE_PATH_LABEL_URL, got %v", store)
+	}
+}
+
+func TestBuildMaskerWithPathLabelSyncStartsPathLabelStore(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	cfg := config.Agent{PathLabelURL: "http://127.0.0.1:0/path-labels"}
+	m, _, store := BuildMaskerWithPathLabelSync(ctx, cfg, log.New(io.Discard, "", 0))
+	if m == nil {
+		t.Fatal("expected a non-nil masker")
+	}
+	if store == nil {
+		t.Fatal("expected a non-nil path-label store when SKYBRIDGE_PATH_LABEL_URL is set")
 	}
 }
 

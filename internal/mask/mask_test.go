@@ -2,6 +2,7 @@ package mask
 
 import (
 	"context"
+	"errors"
 	"testing"
 )
 
@@ -89,6 +90,49 @@ func TestOverlayReplaceHotSwap(t *testing.T) {
 	out, _ = o.MaskRow(context.Background(), cols("email"), [][]byte{[]byte("a@b.com")})
 	if string(out[0]) != "a@b.com" {
 		t.Fatal("empty overlay must not change values after swap")
+	}
+}
+
+// errMasker always fails MaskRow, to exercise Chain.MaskRow's error-short-circuit branch.
+type errMasker struct{ err error }
+
+func (e errMasker) MaskRow(_ context.Context, _ []Column, row [][]byte) ([][]byte, error) {
+	return row, e.err
+}
+
+func TestChainShortCircuitsOnError(t *testing.T) {
+	boom := errors.New("boom")
+	first := errMasker{err: boom}
+	second := NewOverlay(map[string]string{"a": "should-not-run"})
+	chain := NewChain(first, second)
+	row := [][]byte{[]byte("x")}
+	out, err := chain.MaskRow(context.Background(), cols("a"), row)
+	if !errors.Is(err, boom) {
+		t.Fatalf("expected chain to surface the first masker's error, got %v", err)
+	}
+	if string(out[0]) != "x" {
+		t.Fatalf("expected row from the failing masker to be returned unchanged, got %q", out[0])
+	}
+}
+
+func TestOverlayNormalizeRulesSkipsBlankKeys(t *testing.T) {
+	o := NewOverlay(map[string]string{"  ": "ignored", "Email": "[redacted]"})
+	row := [][]byte{[]byte("a@b.com")}
+	out, _ := o.MaskRow(context.Background(), cols("email"), row)
+	if string(out[0]) != "[redacted]" {
+		t.Fatalf("expected blank-key rule to be dropped and real rule to still apply, got %q", out[0])
+	}
+}
+
+func TestOverlayCurrentNilPointerFallsBackToNil(t *testing.T) {
+	// current()'s nil-pointer fallback is only reachable if the atomic.Pointer was never stored —
+	// NewOverlay always stores one, so use a zero-value Overlay to exercise the fallback directly.
+	var o Overlay
+	if got := o.current(); got != nil {
+		t.Fatalf("expected nil fallback from an unset Overlay, got %v", got)
+	}
+	if o.Enabled() {
+		t.Fatal("expected an unset Overlay to report Enabled() false")
 	}
 }
 

@@ -588,6 +588,113 @@ func TestRemoteMaskRowRecordsAnalyzedOnlyWhenNoSpansDetected(t *testing.T) {
 	}
 }
 
+func TestRemoteDetectDisabledIsNoop(t *testing.T) {
+	r := NewRemote(RemoteConfig{}) // no URLs configured
+	category, confidence, ok := r.Detect(context.Background(), "alice@example.com")
+	if ok || category != "" || confidence != 0 {
+		t.Fatalf("expected Detect to no-op when disabled, got category=%q confidence=%v ok=%v", category, confidence, ok)
+	}
+}
+
+func TestRemoteDetectSkipsShortText(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+	}))
+	defer srv.Close()
+	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL, MinLen: 10})
+	_, _, ok := r.Detect(context.Background(), "short")
+	if ok {
+		t.Fatal("expected Detect to report false for text shorter than MinLen")
+	}
+	if called {
+		t.Fatal("expected analyze to never be called for text shorter than MinLen")
+	}
+}
+
+func TestRemoteDetectReturnsHighestConfidenceSpan(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]detectedSpan{
+			{EntityType: "PHONE_NUMBER", Start: 0, End: 5, Score: 0.4},
+			{EntityType: "EMAIL_ADDRESS", Start: 6, End: 20, Score: 0.9},
+			{EntityType: "US_SSN", Start: 21, End: 30, Score: 0.6},
+		})
+	}))
+	defer srv.Close()
+	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL})
+	category, confidence, ok := r.Detect(context.Background(), "some sufficiently long text value")
+	if !ok {
+		t.Fatal("expected Detect to report ok=true when spans are found")
+	}
+	if category != "EMAIL_ADDRESS" || confidence != 0.9 {
+		t.Fatalf("expected highest-confidence span EMAIL_ADDRESS/0.9, got %q/%v", category, confidence)
+	}
+}
+
+func TestRemoteDetectReturnsFalseWhenNothingFound(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+	}))
+	defer srv.Close()
+	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL})
+	_, _, ok := r.Detect(context.Background(), "some sufficiently long text value")
+	if ok {
+		t.Fatal("expected Detect to report ok=false when analyze finds nothing")
+	}
+}
+
+func TestRemoteDetectReturnsFalseOnTransportError(t *testing.T) {
+	r := NewRemote(RemoteConfig{AnalyzeURL: "http://127.0.0.1:0", AnonymizeURL: "http://127.0.0.1:0"})
+	category, confidence, ok := r.Detect(context.Background(), "some sufficiently long text value")
+	// Detect is best-effort: a transport failure and a clean miss are both ok=false,
+	// indistinguishable to the caller (see Detect's doc comment) — this must never surface an error.
+	if ok || category != "" || confidence != 0 {
+		t.Fatalf("expected Detect to fail closed on transport error, got category=%q confidence=%v ok=%v", category, confidence, ok)
+	}
+}
+
+func TestRemoteCurrentStateFallsBackWhenNil(t *testing.T) {
+	// currentState()'s nil-pointer fallback branch is only reachable if the atomic.Pointer was never
+	// stored — NewRemote always stores one, so exercise the fallback via a zero-value Remote (state
+	// atomic.Pointer left unset) to prove it never panics and returns usable defaults.
+	var r Remote
+	st := r.currentState()
+	if st == nil {
+		t.Fatal("expected a non-nil fallback state")
+	}
+	if len(st.entities) == 0 {
+		t.Fatal("expected fallback state to carry defaultEntities")
+	}
+	if st.scoreThreshold != noScoreThreshold {
+		t.Fatalf("expected fallback scoreThreshold to be unset, got %v", st.scoreThreshold)
+	}
+}
+
+func TestRemotePostJSONFailsOnUnmarshalableBody(t *testing.T) {
+	r := NewRemote(RemoteConfig{AnalyzeURL: "http://unused", AnonymizeURL: "http://unused"})
+	var out any
+	// A channel value can never be json.Marshal'd — exercises postJSON's json.Marshal error path.
+	ok := r.postJSON(context.Background(), "http://unused", map[string]any{"bad": make(chan int)}, &out)
+	if ok {
+		t.Fatal("expected postJSON to report false when the request body cannot be marshaled")
+	}
+}
+
+func TestRemotePostJSONFailsOnMalformedResponseBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte("not valid json"))
+	}))
+	defer srv.Close()
+	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL})
+	var out []detectedSpan
+	ok := r.postJSON(context.Background(), srv.URL, map[string]any{"text": "x"}, &out)
+	if ok {
+		t.Fatal("expected postJSON to report false when the response body is malformed JSON")
+	}
+}
+
 func TestRemoteMaskRowNilMetricsIsNoop(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewEncoder(w).Encode([]detectedSpan{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}})

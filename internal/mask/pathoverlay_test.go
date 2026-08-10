@@ -2,6 +2,7 @@ package mask
 
 import (
 	"context"
+	"errors"
 	"testing"
 
 	"github.com/curlix-io/skybridge/internal/pathlabel/label"
@@ -230,6 +231,117 @@ func TestPathOverlay_NilMetricsIsNoop(t *testing.T) {
 	}
 	if string(out[0]) != "[redacted]" {
 		t.Fatalf("expected redaction to still work with nil metrics, got %q", out[0])
+	}
+}
+
+func TestPathOverlay_PartialMaskProfile(t *testing.T) {
+	store := label.NewMemStore()
+	ctx := context.Background()
+	_ = store.Put(ctx, label.Label{
+		ObjectID: "org1:postgres:orders", FieldPath: "phone", Source: label.SourceManual, Profile: "partial_mask",
+		Category: "phone_fields",
+	})
+	p := NewPathOverlay(store)
+	c := []Column{{Name: "phone", ObjectID: "org1:postgres:orders", Text: true, FreeText: true}}
+	out, err := p.MaskRow(ctx, c, [][]byte{[]byte("555-1234")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "[masked]" {
+		t.Fatalf("expected partial_mask token, got %q", out[0])
+	}
+}
+
+func TestPathOverlay_SkipsNonTextAndNilAndOutOfRangeColumns(t *testing.T) {
+	store := label.NewMemStore()
+	ctx := context.Background()
+	_ = store.Put(ctx, label.Label{
+		ObjectID: "org1:postgres:orders", FieldPath: "email", Source: label.SourceManual, Profile: "full_redact",
+	})
+	p := NewPathOverlay(store)
+	// Row has 3 values: a binary column, a nil value, and a value with no corresponding column
+	// (index out of range) — none should be looked up or altered.
+	c := []Column{
+		{Name: "email", ObjectID: "org1:postgres:orders", Text: false, FreeText: true}, // binary
+		{Name: "email", ObjectID: "org1:postgres:orders", Text: true, FreeText: true},  // paired with nil value
+	}
+	row := [][]byte{[]byte("jane@example.com"), nil, []byte("extra-no-column")}
+	out, err := p.MaskRow(ctx, c, row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "jane@example.com" {
+		t.Fatalf("expected binary column untouched, got %q", out[0])
+	}
+	if out[1] != nil {
+		t.Fatal("expected nil value to stay nil")
+	}
+	if string(out[2]) != "extra-no-column" {
+		t.Fatalf("expected out-of-range value untouched, got %q", out[2])
+	}
+}
+
+// errLookupStore always fails Lookup, to exercise PathOverlay.MaskRow/lookupToken's error
+// propagation paths (both the path-scoped and bare-key lookup calls).
+type errLookupStore struct{}
+
+func (errLookupStore) Lookup(context.Context, string, string) (label.Label, bool, error) {
+	return label.Label{}, false, errLookupTestErr
+}
+func (errLookupStore) Put(context.Context, label.Label) error { return nil }
+func (errLookupStore) ListBySource(context.Context, string, label.Source) ([]label.Label, error) {
+	return nil, nil
+}
+
+var errLookupTestErr = errors.New("lookup boom")
+
+func TestPathOverlay_PropagatesPathLookupError(t *testing.T) {
+	p := NewPathOverlay(errLookupStore{})
+	c := []Column{{Name: "email", ObjectID: "org1:postgres:orders", Text: true, FreeText: true}}
+	_, err := p.MaskRow(context.Background(), c, [][]byte{[]byte("jane@example.com")})
+	if !errors.Is(err, errLookupTestErr) {
+		t.Fatalf("expected lookup error to propagate, got %v", err)
+	}
+}
+
+// bareKeyErrStore succeeds on the path-scoped Lookup (returns a miss, not an error) but fails on
+// the bare-key fallback Lookup — exercises lookupToken's second error-propagation branch, which
+// the always-failing errLookupStore above can't reach (it fails before the bare-key call).
+type bareKeyErrStore struct{}
+
+func (bareKeyErrStore) Lookup(_ context.Context, _, fieldPath string) (label.Label, bool, error) {
+	if fieldPath == "email" {
+		return label.Label{}, false, errLookupTestErr
+	}
+	return label.Label{}, false, nil
+}
+func (bareKeyErrStore) Put(context.Context, label.Label) error { return nil }
+func (bareKeyErrStore) ListBySource(context.Context, string, label.Source) ([]label.Label, error) {
+	return nil, nil
+}
+
+func TestPathOverlay_PropagatesBareKeyLookupError(t *testing.T) {
+	p := NewPathOverlay(bareKeyErrStore{})
+	// Path differs from bare key name so the first Lookup (by Path) misses cleanly, and the second
+	// Lookup (by bare key "email") is the one that errors.
+	c := []Column{{Name: "Email", Path: "profile.contact.path", ObjectID: "org1:postgres:orders", Text: true, FreeText: true}}
+	_, err := p.MaskRow(context.Background(), c, [][]byte{[]byte("jane@example.com")})
+	if !errors.Is(err, errLookupTestErr) {
+		t.Fatalf("expected bare-key lookup error to propagate, got %v", err)
+	}
+}
+
+func TestPathOverlay_BareKeyEmptyNameIsNoop(t *testing.T) {
+	store := label.NewMemStore()
+	p := NewPathOverlay(store)
+	// No Path, and Name is blank/whitespace-only, so the bare-key fallback key is empty too.
+	c := []Column{{Name: "   ", ObjectID: "org1:postgres:orders", Text: true, FreeText: true}}
+	out, err := p.MaskRow(context.Background(), c, [][]byte{[]byte("jane@example.com")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "jane@example.com" {
+		t.Fatalf("expected value untouched when bare key is empty, got %q", out[0])
 	}
 }
 

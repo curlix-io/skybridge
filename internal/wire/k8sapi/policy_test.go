@@ -73,6 +73,29 @@ func TestClassifyWriteMethods(t *testing.T) {
 	}
 }
 
+func TestLastSubresourceEmptyPath(t *testing.T) {
+	if got := lastSubresource("/"); got != "" {
+		t.Errorf("expected empty subresource for root path, got %q", got)
+	}
+	if got := lastSubresource(""); got != "" {
+		t.Errorf("expected empty subresource for empty path, got %q", got)
+	}
+}
+
+func TestParseResourceAndNameUnrecognizedPrefix(t *testing.T) {
+	resource, name := parseResourceAndName("/healthz")
+	if resource != "" || name != "" {
+		t.Errorf("expected empty resource/name for unrecognized path prefix, got resource=%q name=%q", resource, name)
+	}
+}
+
+func TestParseResourceAndNameCoreNoNamespace(t *testing.T) {
+	resource, name := parseResourceAndName("/api/v1/nodes/my-node")
+	if resource != "nodes" || name != "my-node" {
+		t.Errorf("expected resource=nodes name=my-node, got resource=%q name=%q", resource, name)
+	}
+}
+
 func TestIsUpgradeRequest(t *testing.T) {
 	h := http.Header{}
 	if IsUpgradeRequest(h) {

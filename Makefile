@@ -13,7 +13,7 @@ LDFLAGS  ?= -s -w
 BUF      ?= buf
 GOTAGS   ?=
 
-.PHONY: all build agent gateway edge edge-querystudio gen test test-querystudio race race-querystudio vet vet-querystudio fmt lint tidy clean
+.PHONY: all build agent gateway edge edge-querystudio gen test test-querystudio race race-querystudio vet vet-querystudio fmt lint tidy clean verify verify-querystudio
 
 all: build
 
@@ -71,3 +71,9 @@ tidy:
 
 clean:
 	rm -rf $(BINDIR) dist
+
+# Mirrors the default CI leg: lint, vet, then the race-enabled test suite.
+verify: lint vet race
+
+# Mirrors the querystudio CI leg: lint, vet, then the race-enabled test suite, with the tag on.
+verify-querystudio: lint vet-querystudio race-querystudio

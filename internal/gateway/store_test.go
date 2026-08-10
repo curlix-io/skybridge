@@ -22,6 +22,9 @@ func TestNoopStore(t *testing.T) {
 	if err := s.SessionEnded(context.Background(), "x", gateway.SessionResult{}); err != nil {
 		t.Fatalf("noop end = %v", err)
 	}
+	if err := s.SessionTranscript(context.Background(), "x", gateway.TranscriptChunks{}); err != nil {
+		t.Fatalf("noop transcript = %v", err)
+	}
 }
 
 func TestHTTPStoreReportsLifecycle(t *testing.T) {
@@ -89,6 +92,51 @@ func TestHTTPStoreReportsLifecycle(t *testing.T) {
 	}
 }
 
+func TestHTTPStoreSessionTranscript(t *testing.T) {
+	var mu sync.Mutex
+	var gotPath string
+	var gotBody gateway.TranscriptChunks
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		mu.Lock()
+		defer mu.Unlock()
+		gotPath = r.URL.Path
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer srv.Close()
+
+	store := gateway.NewHTTPStore(srv.URL, "", "")
+	err := store.SessionTranscript(context.Background(), "sess-1", gateway.TranscriptChunks{
+		OrgID: "org1", Truncated: true,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mu.Lock()
+	defer mu.Unlock()
+	if gotPath != gateway.DefaultSessionPath+"/sess-1/transcript" {
+		t.Fatalf("path = %q", gotPath)
+	}
+	if gotBody.OrgID != "org1" || !gotBody.Truncated {
+		t.Fatalf("body = %+v", gotBody)
+	}
+}
+
+func TestHTTPStoreSessionTranscriptEmptyIDSkips(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+	}))
+	defer srv.Close()
+	store := gateway.NewHTTPStore(srv.URL, "", "")
+	if err := store.SessionTranscript(context.Background(), "", gateway.TranscriptChunks{}); err != nil {
+		t.Fatal(err)
+	}
+	if called {
+		t.Fatal("expected an empty session id to skip the control-plane call")
+	}
+}
+
 func TestHTTPStoreEndedNoIDSkips(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -101,6 +149,26 @@ func TestHTTPStoreEndedNoIDSkips(t *testing.T) {
 	}
 	if called {
 		t.Fatal("close with empty id should not hit the control plane")
+	}
+}
+
+func TestHTTPStoreTransportError(t *testing.T) {
+	store := gateway.NewHTTPStore("http://127.0.0.1:1", "", "") // nothing listening: connect fails
+	if _, err := store.SessionStarted(context.Background(), gateway.SessionRecord{}); err == nil {
+		t.Fatal("expected a transport-level error")
+	}
+}
+
+func TestHTTPStoreDecodeErrorOnMalformedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, `not json`)
+	}))
+	defer srv.Close()
+
+	store := gateway.NewHTTPStore(srv.URL, "", "")
+	if _, err := store.SessionStarted(context.Background(), gateway.SessionRecord{}); err == nil {
+		t.Fatal("expected a decode error for a malformed response body")
 	}
 }
 

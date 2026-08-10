@@ -6,6 +6,8 @@ import (
 	"context"
 	"encoding/binary"
 	"errors"
+	"io"
+	"net"
 	"strings"
 	"testing"
 
@@ -302,6 +304,387 @@ func TestPipeBackendAbortsOnMaskerFailure(t *testing.T) {
 	if bytes.Contains(client.Bytes(), []byte("alice@x.com")) {
 		t.Fatal("unmasked email must never reach the client when the masker fails in strict mode")
 	}
+}
+
+// failWriter fails once n bytes have been written across all calls — used to exercise the write-
+// error branches of writeMessage/writeClientError/writeFrontend without a real broken pipe.
+type failWriter struct{ n int }
+
+func (w *failWriter) Write(p []byte) (int, error) {
+	if w.n <= 0 {
+		return 0, errors.New("failWriter: write failed")
+	}
+	if len(p) > w.n {
+		n := w.n
+		w.n = 0
+		return n, errors.New("failWriter: short write")
+	}
+	w.n -= len(p)
+	return len(p), nil
+}
+
+// TestNew_DeclinesSSLByDefault verifies New()'s zero-value shape: no client TLS, no orgID scoping,
+// no catalog resolver — the safe no-op configuration this package has always defaulted to.
+func TestNew_DeclinesSSLByDefault(t *testing.T) {
+	e := New()
+	if e.clientTLS != nil {
+		t.Fatal("New() must not configure client TLS")
+	}
+	if e.Name() != "postgres" {
+		t.Fatalf("Name() = %q, want postgres", e.Name())
+	}
+	if e.objectIDFor("db") != nil {
+		t.Fatal("an engine with no orgID/catalog resolver must resolve no ObjectIDs")
+	}
+}
+
+// TestWithOrgID_CopiesRatherThanMutates confirms WithOrgID returns an independent copy, so a shared
+// base *Engine (e.g. one built once at startup) isn't mutated by a later per-connection call.
+func TestWithOrgID_CopiesRatherThanMutates(t *testing.T) {
+	base := New()
+	scoped := base.WithOrgID("acme")
+	if base.orgID != "" {
+		t.Fatal("WithOrgID must not mutate the receiver")
+	}
+	if scoped.orgID != "acme" {
+		t.Fatalf("scoped.orgID = %q, want acme", scoped.orgID)
+	}
+}
+
+// TestWithCatalogResolver_CopiesRatherThanMutates mirrors TestWithOrgID_CopiesRatherThanMutates for
+// the catalog-resolver setter.
+func TestWithCatalogResolver_CopiesRatherThanMutates(t *testing.T) {
+	base := New()
+	resolver := NewCatalogResolver(CatalogCredential{Host: "127.0.0.1", Port: "1"})
+	scoped := base.WithCatalogResolver(resolver)
+	if base.catalog != nil {
+		t.Fatal("WithCatalogResolver must not mutate the receiver")
+	}
+	if scoped.catalog != resolver {
+		t.Fatal("scoped engine should carry the given resolver")
+	}
+}
+
+// TestWriteClientError builds a FATAL ErrorResponse and confirms it round-trips through the same
+// message framing the rest of the package uses to read backend messages.
+func TestWriteClientError(t *testing.T) {
+	var buf bytes.Buffer
+	if err := writeClientError(&buf, "28000", "skybridge: access denied for this session"); err != nil {
+		t.Fatalf("writeClientError: %v", err)
+	}
+	br := bufio.NewReader(&buf)
+	typ, payload, err := readBackendMessage(br)
+	if err != nil {
+		t.Fatalf("readBackendMessage: %v", err)
+	}
+	if typ != msgErrorResponse {
+		t.Fatalf("typ = %q, want ErrorResponse", string(rune(typ)))
+	}
+	got := parseErrorResponse(payload)
+	if got != "skybridge: access denied for this session" {
+		t.Fatalf("message = %q", got)
+	}
+}
+
+// TestWriteClientError_WriteFailurePropagates exercises the write-error return path.
+func TestWriteClientError_WriteFailurePropagates(t *testing.T) {
+	w := &failWriter{n: 0}
+	if err := writeClientError(w, "28000", "denied"); err == nil {
+		t.Fatal("expected an error when the underlying writer fails")
+	}
+}
+
+// TestObjectIDFor_UnconfiguredCombinations exercises every "not fully configured" branch of
+// objectIDFor: each must return nil (no resolver), matching the documented "unresolved ObjectID,
+// skip straight to the overlay layer" fallback — never an error, never a lookup attempt.
+func TestObjectIDFor_UnconfiguredCombinations(t *testing.T) {
+	resolver := NewCatalogResolver(CatalogCredential{Host: "127.0.0.1", Port: "1"})
+	cases := []struct {
+		name string
+		e    *Engine
+		db   string
+	}{
+		{"no orgID, no catalog", New(), "shop"},
+		{"orgID only", New().WithOrgID("acme"), "shop"},
+		{"catalog only", New().WithCatalogResolver(resolver), "shop"},
+		{"orgID+catalog but empty database", New().WithOrgID("acme").WithCatalogResolver(resolver), ""},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := tc.e.objectIDFor(tc.db); got != nil {
+				t.Fatalf("objectIDFor(%q) = non-nil, want nil (unconfigured)", tc.db)
+			}
+		})
+	}
+}
+
+// TestObjectIDFor_ResolvesScopedObjectID is the fully-configured happy path: orgID + catalog
+// resolver + non-empty database must produce "orgID:postgres:schema:table" for a resolvable OID and
+// "" for an unresolvable one (catalog miss), matching REDACTION.md's table-identity resolution.
+func TestObjectIDFor_ResolvesScopedObjectID(t *testing.T) {
+	addr, closeFn := fakeCatalogServer(t, "orders", "shop")
+	defer closeFn()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+	e := New().WithOrgID("acme").WithCatalogResolver(NewCatalogResolver(CatalogCredential{Host: host, Port: port, User: "u", Password: "p"}))
+
+	fn := e.objectIDFor("shop")
+	if fn == nil {
+		t.Fatal("expected a resolver function once orgID/catalog/database are all set")
+	}
+	if got := fn(context.Background(), 12345); got != "acme:postgres:shop:orders" {
+		t.Fatalf("objectID = %q, want acme:postgres:shop:orders", got)
+	}
+	// tableOID 0 has no backing table: resolveObjectID is never even called for it by
+	// parseRowDescription, but objectIDFor's own function must still degrade gracefully.
+	if got := fn(context.Background(), 0); got != "" {
+		t.Fatalf("tableOID 0 should resolve to empty ObjectID, got %q", got)
+	}
+}
+
+// TestEngineProxy_VerbatimForwardsAndMasks drives Engine.Proxy end to end over net.Pipe: the client
+// sends a plaintext StartupMessage, it is forwarded verbatim to "upstream" (never rewritten), and the
+// upstream's result row comes back to the client with the configured masker applied.
+func TestEngineProxy_VerbatimForwardsAndMasks(t *testing.T) {
+	clientEnd, agentClient := net.Pipe()
+	agentUpstream, upstreamEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer agentUpstream.Close()
+	deadline(t, clientEnd, agentClient, agentUpstream, upstreamEnd)
+
+	engine := New()
+	proxyErr := make(chan error, 1)
+	go func() {
+		proxyErr <- engine.Proxy(context.Background(), agentClient, agentUpstream,
+			columnMasker{redact: map[string]bool{"email": true}}, wire.NoopRecorder{})
+	}()
+
+	// Client -> proxy -> upstream: verify the StartupMessage crosses byte-for-byte unmodified.
+	startup := startupMessage(map[string]string{"user": "alice", "database": "appdb"})
+	upErr := make(chan error, 1)
+	go func() {
+		got := make([]byte, len(startup))
+		if _, err := io.ReadFull(upstreamEnd, got); err != nil {
+			upErr <- err
+			return
+		}
+		if !bytes.Equal(got, startup) {
+			upErr <- errors.New("startup message was not forwarded verbatim")
+			return
+		}
+		writeMsg(t, upstreamEnd, 'T', rowDescriptionPayload("id", "email"))
+		writeMsg(t, upstreamEnd, 'D', dataRowPayload([]byte("1"), []byte("alice@example.com")))
+		writeMsg(t, upstreamEnd, 'Z', []byte{'I'})
+		upErr <- nil
+	}()
+
+	if _, err := clientEnd.Write(startup); err != nil {
+		t.Fatalf("client write startup: %v", err)
+	}
+
+	cr := bufio.NewReader(clientEnd)
+	var sawMasked, sawPlaintext bool
+	for i := 0; i < 5; i++ {
+		typ, payload, err := readBackendMessage(cr)
+		if err != nil {
+			break
+		}
+		if typ == 'D' {
+			if strings.Contains(string(payload), "***") {
+				sawMasked = true
+			}
+			if strings.Contains(string(payload), "alice@example.com") {
+				sawPlaintext = true
+			}
+		}
+		if typ == 'Z' {
+			break
+		}
+	}
+	if err := <-upErr; err != nil {
+		t.Fatalf("upstream harness: %v", err)
+	}
+	if !sawMasked {
+		t.Fatal("expected the email column masked in the verbatim proxy path")
+	}
+	if sawPlaintext {
+		t.Fatal("plaintext email leaked through the verbatim proxy path")
+	}
+	_ = clientEnd.Close()
+	_ = upstreamEnd.Close()
+	<-proxyErr
+}
+
+// TestPipeBackendReader_ShortHeaderLength feeds a message header whose declared length is less than
+// the 4-byte minimum (which must itself include the length field) — a malformed frame that carries
+// no reliable way to know how many payload bytes to skip. Per the fallthrough-never-corrupt
+// contract, a wire engine forwards what it *can* parse unmasked; here it cannot even determine frame
+// boundaries, so aborting the connection (rather than guessing how many bytes to skip and
+// desynchronizing the stream) is the correct, safe behavior.
+func TestPipeBackendReader_ShortHeaderLength(t *testing.T) {
+	server := new(bytes.Buffer)
+	server.WriteByte('D')
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], 2) // < 4: malformed, cannot possibly include itself
+	server.Write(l[:])
+
+	client := new(bytes.Buffer)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil)
+	if !errors.Is(err, errProtocol) {
+		t.Fatalf("expected errProtocol for an undersized message length, got %v", err)
+	}
+}
+
+// TestPipeBackendReader_FlushesOnBufferDrain exercises the "flush whenever the read buffer is
+// drained" branch (as opposed to only flushing at ReadyForQuery), by feeding a single non-'Z' message
+// that leaves br.Buffered() == 0.
+func TestPipeBackendReader_FlushesOnBufferDrain(t *testing.T) {
+	server := new(bytes.Buffer)
+	writeMsg(t, server, 'C', []byte("SELECT 1"))
+	client := new(bytes.Buffer)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil)
+	if err == nil || !errors.Is(err, io.EOF) {
+		t.Fatalf("expected EOF at stream end, got %v", err)
+	}
+	if !bytes.Contains(client.Bytes(), []byte("SELECT 1")) {
+		t.Fatal("expected the CommandComplete payload to have been flushed to the client")
+	}
+}
+
+// TestParseRowDescription_EmptyPayload covers the len(p) < 2 guard: an implausibly short
+// RowDescription payload is treated as "no columns" rather than panicking on the field-count read.
+func TestParseRowDescription_EmptyPayload(t *testing.T) {
+	if cols := parseRowDescription(context.Background(), []byte{0}, nil); cols != nil {
+		t.Fatalf("expected nil for an undersized RowDescription payload, got %+v", cols)
+	}
+}
+
+// TestParseRowDescription_TruncatedTrailerStopsWithoutCorrupting feeds a RowDescription payload that
+// claims more columns than it actually has bytes for. Per fallthrough-never-corrupt, the parser must
+// stop and return the columns it could parse rather than reading past the buffer or fabricating data.
+func TestParseRowDescription_TruncatedTrailerStopsWithoutCorrupting(t *testing.T) {
+	buf := new(bytes.Buffer)
+	var u16 [2]byte
+	binary.BigEndian.PutUint16(u16[:], 2) // claims 2 columns
+	buf.Write(u16[:])
+	buf.WriteString("id")
+	buf.WriteByte(0)
+	buf.Write(make([]byte, 10)) // far short of the 18-byte fixed trailer for column 1
+
+	cols := parseRowDescription(context.Background(), buf.Bytes(), nil)
+	if len(cols) != 0 {
+		t.Fatalf("expected zero fully-parsed columns for a truncated trailer, got %d", len(cols))
+	}
+}
+
+// TestParseRowDescription_MissingNameTerminator covers indexZero returning -1 (no NUL terminator
+// found for a column name) — the parser must stop cleanly rather than run off the end of the slice.
+func TestParseRowDescription_MissingNameTerminator(t *testing.T) {
+	buf := new(bytes.Buffer)
+	var u16 [2]byte
+	binary.BigEndian.PutUint16(u16[:], 1)
+	buf.Write(u16[:])
+	buf.WriteString("unterminated") // no trailing NUL byte at all
+
+	cols := parseRowDescription(context.Background(), buf.Bytes(), nil)
+	if len(cols) != 0 {
+		t.Fatalf("expected no columns when the name has no terminator, got %+v", cols)
+	}
+}
+
+// TestMaskDataRow_TruncatedFieldLengthHeader covers the off+4 > len(p) guard (a DataRow payload that
+// promises another field but is cut off before its 4-byte length prefix) — must error rather than
+// read out of bounds.
+func TestMaskDataRow_TruncatedFieldLengthHeader(t *testing.T) {
+	buf := new(bytes.Buffer)
+	var u16 [2]byte
+	binary.BigEndian.PutUint16(u16[:], 1)
+	buf.Write(u16[:])
+	buf.Write([]byte{0, 0}) // only 2 of the 4 length bytes present
+
+	_, _, err := maskDataRow(context.Background(), buf.Bytes(), nil, mask.Noop{})
+	if !errors.Is(err, errProtocol) {
+		t.Fatalf("expected errProtocol, got %v", err)
+	}
+}
+
+// TestMaskDataRow_TruncatedFieldValue covers the off+int(flen) > len(p) guard: a field claims to be
+// longer than the bytes actually remaining in the payload.
+func TestMaskDataRow_TruncatedFieldValue(t *testing.T) {
+	buf := new(bytes.Buffer)
+	var u16 [2]byte
+	binary.BigEndian.PutUint16(u16[:], 1)
+	buf.Write(u16[:])
+	var flen [4]byte
+	binary.BigEndian.PutUint32(flen[:], 100) // claims 100 bytes
+	buf.Write(flen[:])
+	buf.WriteString("short") // far fewer than 100 bytes actually present
+
+	_, _, err := maskDataRow(context.Background(), buf.Bytes(), nil, mask.Noop{})
+	if !errors.Is(err, errProtocol) {
+		t.Fatalf("expected errProtocol, got %v", err)
+	}
+}
+
+// badLengthMasker returns a row with a different field count than it was given, simulating a masker
+// bug/drift — maskDataRow must reject this rather than re-encode a corrupted row.
+type badLengthMasker struct{}
+
+func (badLengthMasker) MaskRow(_ context.Context, cols []mask.Column, row [][]byte) ([][]byte, error) {
+	return row[:len(row)-1], nil
+}
+
+func TestMaskDataRow_MaskerReturnsWrongFieldCount(t *testing.T) {
+	cols := parseRowDescription(context.Background(), rowDescriptionPayload("id", "email"), nil)
+	payload := dataRowPayload([]byte("1"), []byte("a@b.com"))
+	_, _, err := maskDataRow(context.Background(), payload, cols, badLengthMasker{})
+	if !errors.Is(err, errProtocol) {
+		t.Fatalf("expected errProtocol when the masker changes the field count, got %v", err)
+	}
+}
+
+// TestWriteMessage_WriteFailurePropagates exercises both write-error branches of writeMessage: the
+// header write and the payload write.
+func TestWriteMessage_WriteFailurePropagates(t *testing.T) {
+	if err := writeMessage(&failWriter{n: 0}, 'D', []byte("x")); err == nil {
+		t.Fatal("expected an error when the header write fails")
+	}
+	if err := writeMessage(&failWriter{n: 5}, 'D', []byte("xyz")); err == nil {
+		t.Fatal("expected an error when the payload write fails")
+	}
+}
+
+// TestRenderRow_EmptyValues covers the len(values) == 0 short-circuit.
+func TestRenderRow_EmptyValues(t *testing.T) {
+	if got := renderRow(nil, nil); got != "" {
+		t.Fatalf("renderRow(nil, nil) = %q, want empty", got)
+	}
+}
+
+// TestRenderRow_FallsBackToPositionalName covers the "cols shorter than values" / empty-name
+// fallback (colN) used on protocol drift, mirroring maskDataRow's "unknown column" handling.
+func TestRenderRow_FallsBackToPositionalName(t *testing.T) {
+	got := renderRow(nil, [][]byte{[]byte("7"), nil})
+	if got != "col0=7, col1=NULL" {
+		t.Fatalf("renderRow = %q", got)
+	}
+}
+
+// TestNegotiateStartup_ClientDisconnectsDuringNegotiation covers negotiateStartup's read-error
+// return path: if the client closes mid-negotiation frame, negotiateStartup must surface the error
+// rather than block or panic.
+func TestNegotiateStartup_ClientDisconnectsDuringNegotiation(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+	deadline(t, clientEnd, serverEnd)
+	_ = clientEnd.Close() // closes before any bytes are sent
+
+	_, _, err := negotiateStartup(serverEnd, nil)
+	if err == nil {
+		t.Fatal("expected an error when the client disconnects before sending a startup frame")
+	}
+	_ = serverEnd.Close()
 }
 
 func readFull(r *bufio.Reader, b []byte) (int, error) {

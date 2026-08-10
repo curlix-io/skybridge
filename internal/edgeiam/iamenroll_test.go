@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 )
 
@@ -78,5 +79,131 @@ func TestEnrollTokenViaIAM_MergesExtraFields(t *testing.T) {
 	}
 	if captured["studio_agent_id"] != "studio-a" {
 		t.Errorf("expected studio_agent_id to be merged into request body, got %v", captured)
+	}
+}
+
+func TestEnrollTokenViaIAM_LoadAWSConfigError(t *testing.T) {
+	// A profile that doesn't exist in the (real or absent) shared config file makes
+	// awsconfig.LoadDefaultConfig fail deterministically, exercising the "load AWS config" error
+	// path without needing network access.
+	t.Setenv("AWS_ACCESS_KEY_ID", "")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "")
+	t.Setenv("AWS_PROFILE", "definitely-not-a-real-profile-xyz")
+	t.Setenv("AWS_SDK_LOAD_CONFIG", "1")
+	dir := t.TempDir()
+	t.Setenv("AWS_CONFIG_FILE", dir+"/config")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", dir+"/credentials")
+
+	_, err := EnrollTokenViaIAM(context.Background(), IamEnrollConfig{
+		BaseURL: "https://example.invalid",
+		Path:    "/enroll",
+	})
+	if err == nil {
+		t.Fatal("expected an error when the AWS config/profile cannot be loaded")
+	}
+}
+
+func TestEnrollTokenViaIAM_PresignErrorWithoutRegion(t *testing.T) {
+	// Static credentials with no region configured anywhere make PresignGetCallerIdentity fail
+	// while never making a real network call — presigning is purely local computation that still
+	// needs a region to build the STS endpoint.
+	t.Setenv("AWS_ACCESS_KEY_ID", "test-access-key-id")
+	t.Setenv("AWS_SECRET_ACCESS_KEY", "test-secret-access-key")
+	t.Setenv("AWS_REGION", "")
+	t.Setenv("AWS_DEFAULT_REGION", "")
+	t.Setenv("AWS_PROFILE", "")
+	t.Setenv("AWS_SDK_LOAD_CONFIG", "")
+	dir := t.TempDir()
+	t.Setenv("AWS_CONFIG_FILE", dir+"/config")
+	t.Setenv("AWS_SHARED_CREDENTIALS_FILE", dir+"/credentials")
+
+	_, err := EnrollTokenViaIAM(context.Background(), IamEnrollConfig{
+		BaseURL: "https://example.invalid",
+		Path:    "/enroll",
+	})
+	if err == nil {
+		t.Fatal("expected a presign error when no region is configured")
+	}
+}
+
+func TestEnrollTokenViaIAM_HTTPDoErrorOnUnreachableServer(t *testing.T) {
+	setStaticAWSCreds(t)
+	// Port 0 dialed directly never succeeds; using an httptest server then closing it immediately
+	// gives a stable "connection refused" target without relying on a specific unused port number.
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {}))
+	srv.Close()
+
+	_, err := EnrollTokenViaIAM(context.Background(), IamEnrollConfig{
+		BaseURL: srv.URL,
+		Path:    "/enroll",
+	})
+	if err == nil {
+		t.Fatal("expected an error when the control plane is unreachable")
+	}
+}
+
+func TestEnrollTokenViaIAM_NonSuccessStatusUsesJSONDetail(t *testing.T) {
+	setStaticAWSCreds(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(`{"detail":"tenant not found"}`))
+	}))
+	defer srv.Close()
+
+	_, err := EnrollTokenViaIAM(context.Background(), IamEnrollConfig{
+		BaseURL:  srv.URL,
+		Path:     "/enroll",
+		TenantID: "org-1",
+		AgentID:  "agent-a",
+	})
+	if err == nil {
+		t.Fatal("expected an error on non-2xx response")
+	}
+	if !strings.Contains(err.Error(), "tenant not found") {
+		t.Fatalf("expected error to include JSON detail, got %v", err)
+	}
+}
+
+func TestEnrollTokenViaIAM_NonSuccessStatusFallsBackToRawBody(t *testing.T) {
+	setStaticAWSCreds(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusInternalServerError)
+		_, _ = w.Write([]byte("internal server error, not json"))
+	}))
+	defer srv.Close()
+
+	_, err := EnrollTokenViaIAM(context.Background(), IamEnrollConfig{
+		BaseURL:  srv.URL,
+		Path:     "/enroll",
+		TenantID: "org-1",
+		AgentID:  "agent-a",
+	})
+	if err == nil {
+		t.Fatal("expected an error on non-2xx response")
+	}
+	if !strings.Contains(err.Error(), "internal server error, not json") {
+		t.Fatalf("expected error to fall back to raw body, got %v", err)
+	}
+}
+
+func TestEnrollTokenViaIAM_EmptyTokenInResponse(t *testing.T) {
+	setStaticAWSCreds(t)
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{}`))
+	}))
+	defer srv.Close()
+
+	_, err := EnrollTokenViaIAM(context.Background(), IamEnrollConfig{
+		BaseURL:  srv.URL,
+		Path:     "/enroll",
+		TenantID: "org-1",
+		AgentID:  "agent-a",
+	})
+	if err == nil {
+		t.Fatal("expected an error when response has neither enroll_token nor enrollment_token")
+	}
+	if !strings.Contains(err.Error(), "empty token") {
+		t.Fatalf("expected empty-token error, got %v", err)
 	}
 }

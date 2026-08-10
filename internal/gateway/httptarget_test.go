@@ -90,6 +90,26 @@ func TestHTTPTargetResolverRejectsMissingArgs(t *testing.T) {
 	}
 }
 
+func TestHTTPTargetResolverTransportError(t *testing.T) {
+	r := gateway.NewHTTPTargetResolver("http://127.0.0.1:1", "", "tok") // nothing listening
+	if _, err := r.Resolve(context.Background(), "org-1", "db"); err == nil {
+		t.Fatal("expected a transport-level error")
+	}
+}
+
+func TestHTTPTargetResolverDecodeError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	r := gateway.NewHTTPTargetResolver(srv.URL, "", "tok")
+	if _, err := r.Resolve(context.Background(), "org-1", "db"); err == nil {
+		t.Fatal("expected a decode error for a malformed response body")
+	}
+}
+
 func TestNoopTargetResolverFailsClosed(t *testing.T) {
 	if _, err := (gateway.NoopTargetResolver{}).Resolve(context.Background(), "org-1", "db"); err != gateway.ErrTargetNotFound {
 		t.Fatalf("want ErrTargetNotFound, got %v", err)

@@ -42,6 +42,32 @@ func TestMaskSecretJSONNonJSONPassthrough(t *testing.T) {
 	}
 }
 
+func TestMaskSecretJSONEmptyPassthrough(t *testing.T) {
+	raw := []byte("   ")
+	if got := maskSecretJSON(raw); string(got) != string(raw) {
+		t.Fatalf("expected empty/whitespace passthrough unchanged, got %q", got)
+	}
+}
+
+func TestMaskSecretJSONMalformedJSONPassthrough(t *testing.T) {
+	// Starts with '{' so it passes the cheap prefix check, but isn't valid JSON — must fall
+	// through unchanged rather than corrupt it (fallthrough-never-corrupt contract).
+	raw := []byte("{not valid json")
+	if got := maskSecretJSON(raw); string(got) != string(raw) {
+		t.Fatalf("expected malformed JSON passthrough unchanged, got %q", got)
+	}
+}
+
+func TestMaskSecretFieldsScalarPassthrough(t *testing.T) {
+	// maskSecretFields' default branch handles scalar JSON values (string/number/bool/nil)
+	// encountered while walking a document — must return them unchanged.
+	for _, v := range []any{"plain string", 42.0, true, nil} {
+		if got := maskSecretFields(v); got != v {
+			t.Fatalf("expected scalar %v passthrough unchanged, got %v", v, got)
+		}
+	}
+}
+
 func TestMaskSecretJSONListOfSecrets(t *testing.T) {
 	raw, _ := json.Marshal(map[string]any{
 		"kind": "List",

@@ -59,6 +59,33 @@ func TestHTTPWireAdmitterRejectsMissingOrgID(t *testing.T) {
 	}
 }
 
+func TestHTTPWireAdmitterRejectsMissingClientIP(t *testing.T) {
+	a := gateway.NewHTTPWireAdmitter("http://127.0.0.1:0", "", "tok")
+	if err := a.Admit(context.Background(), "org-1", "", "db"); err == nil {
+		t.Fatal("expected error for missing client IP")
+	}
+}
+
+func TestHTTPWireAdmitterTransportError(t *testing.T) {
+	a := gateway.NewHTTPWireAdmitter("http://127.0.0.1:1", "", "tok") // nothing listening: connect fails
+	if err := a.Admit(context.Background(), "org-1", "203.0.113.9:1", "db"); err == nil {
+		t.Fatal("expected a transport-level error")
+	}
+}
+
+func TestHTTPWireAdmitterDeniedNoBody(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusForbidden) // no body at all: falls back to the raw (empty) body text
+	}))
+	defer srv.Close()
+
+	a := gateway.NewHTTPWireAdmitter(srv.URL, "", "tok")
+	err := a.Admit(context.Background(), "org-1", "198.51.100.1", "db")
+	if err == nil {
+		t.Fatal("expected error")
+	}
+}
+
 func TestHostFromTCPAddr(t *testing.T) {
 	t.Parallel()
 	cases := map[string]string{

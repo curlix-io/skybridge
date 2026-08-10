@@ -138,10 +138,16 @@ func TestSplitTwoJSONArgsMissingSecond(t *testing.T) {
 	}
 }
 
+// TestExecuteRejectsEnforceReadOnlyAndWriteTogether locks in the mutual-exclusivity invariant
+// documented on Options.Write: a caller that sets both EnforceReadOnly and Write must be rejected
+// outright, before any dbType dispatch or dial, for every supported db_type — not just one — since
+// which flag would otherwise "win" depends on Execute's internal check ordering.
 func TestExecuteRejectsEnforceReadOnlyAndWriteTogether(t *testing.T) {
-	_, err := Execute(context.Background(), Target{Host: "h"}, "postgres", "db", "SELECT 1", Options{EnforceReadOnly: true, Write: true})
-	if err == nil {
-		t.Fatal("expected an error when EnforceReadOnly and Write are both set")
+	for _, dbType := range []string{"postgres", "mysql", "mongo", "snowflake"} {
+		_, err := Execute(context.Background(), Target{Host: "h"}, dbType, "db", "SELECT 1", Options{EnforceReadOnly: true, Write: true})
+		if err == nil {
+			t.Fatalf("dbType %q: expected an error when EnforceReadOnly and Write are both set", dbType)
+		}
 	}
 }
 

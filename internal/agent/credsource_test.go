@@ -96,6 +96,31 @@ func TestHTTPCredentialResolverRejectsBadToken(t *testing.T) {
 	}
 }
 
+func TestHostFromTCPAddr(t *testing.T) {
+	cases := map[string]string{
+		"203.0.113.9:15432":   "203.0.113.9",
+		"[::1]:15432":         "::1",
+		"":                    "",
+		"no-port-no-brackets": "no-port-no-brackets",
+	}
+	for addr, want := range cases {
+		if got := hostFromTCPAddr(addr); got != want {
+			t.Errorf("hostFromTCPAddr(%q) = %q, want %q", addr, got, want)
+		}
+	}
+}
+
+func TestContextWithWireClientIPEmptyAddrIsNoop(t *testing.T) {
+	ctx := context.Background()
+	got := ContextWithWireClientIP(ctx, "")
+	if got != ctx {
+		t.Fatal("expected the context to be returned unchanged for an empty address")
+	}
+	if ip := wireClientIPFromContext(got); ip != "" {
+		t.Fatalf("expected no client IP set, got %q", ip)
+	}
+}
+
 func TestHTTPCredentialResolverEmptyToken(t *testing.T) {
 	resolve := NewHTTPCredentialResolver(config.Agent{
 		InjectCredentials:     true,
@@ -103,5 +128,45 @@ func TestHTTPCredentialResolverEmptyToken(t *testing.T) {
 	})
 	if _, err := resolve(context.Background(), map[string]string{}, "   "); err == nil {
 		t.Fatal("expected error for an empty session token")
+	}
+}
+
+func TestHTTPCredentialResolverBadJSONResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte("not json"))
+	}))
+	defer srv.Close()
+
+	resolve := NewHTTPCredentialResolver(config.Agent{
+		InjectCredentials:     true,
+		CredentialExchangeURL: srv.URL,
+	})
+	if _, err := resolve(context.Background(), map[string]string{}, "tok"); err == nil || !strings.Contains(err.Error(), "bad response") {
+		t.Fatalf("expected a bad-response error, got %v", err)
+	}
+}
+
+func TestHTTPCredentialResolverNoUsernameInResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(exchangeResponse{})
+	}))
+	defer srv.Close()
+
+	resolve := NewHTTPCredentialResolver(config.Agent{
+		InjectCredentials:     true,
+		CredentialExchangeURL: srv.URL,
+	})
+	if _, err := resolve(context.Background(), map[string]string{}, "tok"); err == nil || !strings.Contains(err.Error(), "no username") {
+		t.Fatalf("expected a no-username error, got %v", err)
+	}
+}
+
+func TestHTTPCredentialResolverDialFailure(t *testing.T) {
+	resolve := NewHTTPCredentialResolver(config.Agent{
+		InjectCredentials:     true,
+		CredentialExchangeURL: "http://127.0.0.1:1",
+	})
+	if _, err := resolve(context.Background(), map[string]string{}, "tok"); err == nil || !strings.Contains(err.Error(), "credential exchange:") {
+		t.Fatalf("expected a transport-level error, got %v", err)
 	}
 }
