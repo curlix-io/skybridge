@@ -121,19 +121,25 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	return err
 }
 
-// objectIDFor returns a function that resolves mask.Column.ObjectID for a tableOID within
-// database, or nil when this engine has no orgID/catalog resolver configured — pipeBackend/
-// pipeBackendReader treat a nil resolver the same as an unresolved lookup (empty ObjectID).
+// objectIDFor returns a function that resolves mask.Column.ObjectID and the real, unaliased column
+// name for a (tableOID, attnum) pair within database, or nil when this engine has no orgID/catalog
+// resolver configured — pipeBackend/pipeBackendReader treat a nil resolver the same as an
+// unresolved lookup (empty ObjectID, columnName falling back to the wire's own name). Resolving the
+// column name closes docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A: RowDescription's own name
+// field reflects any client-side alias ("SELECT email AS contact_info"), not the real column, so a
+// path-scoped label confirmed on "email" would otherwise never match an aliased query.
 func (e *Engine) objectIDFor(database string) objectIDResolver {
 	if e.orgID == "" || e.catalog == nil || database == "" {
 		return nil
 	}
-	return func(ctx context.Context, tableOID uint32) string {
+	return func(ctx context.Context, tableOID uint32, attnum int16) (objID, columnName string) {
 		schema, table, ok := e.catalog.Resolve(ctx, database, tableOID)
 		if !ok {
-			return ""
+			return "", ""
 		}
-		return e.orgID + ":postgres:" + schema + ":" + table
+		objID = e.orgID + ":postgres:" + schema + ":" + table
+		columnName, _ = e.catalog.ResolveColumn(ctx, database, tableOID, attnum)
+		return objID, columnName
 	}
 }
 
@@ -300,10 +306,11 @@ func negotiateStartup(client net.Conn, clientTLS *tls.Config) (net.Conn, *bufio.
 	}
 }
 
-// objectIDResolver resolves mask.Column.ObjectID for a RowDescription column's tableOID — see
-// Engine.objectIDFor. nil means "not configured," which parseRowDescription treats identically to
-// tableOID == 0 (no backing table): ObjectID stays "".
-type objectIDResolver func(ctx context.Context, tableOID uint32) string
+// objectIDResolver resolves mask.Column.ObjectID and the real, unaliased column name for a
+// RowDescription column's (tableOID, attnum) — see Engine.objectIDFor. nil means "not configured,"
+// which parseRowDescription treats identically to tableOID == 0 (no backing table): ObjectID stays
+// "" and Path falls back to the wire's own (possibly aliased) column name.
+type objectIDResolver func(ctx context.Context, tableOID uint32, attnum int16) (objID, columnName string)
 
 // pipeBackend reads typed backend messages from server, masks DataRows, and writes to client.
 func pipeBackend(ctx context.Context, server io.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder, resolveObjectID objectIDResolver) error {
@@ -408,9 +415,39 @@ var nonFreeTextTypeOIDs = map[uint32]bool{
 	3802: true, // jsonb
 }
 
+// postgresTypeKind maps a subset of nonFreeTextTypeOIDs to mask.TypeKind, letting PathOverlay
+// substitute a type-valid placeholder for a *confirmed* label's redaction request on these columns
+// instead of unconditionally skipping them — see docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B.
+// Deliberately a strict subset of nonFreeTextTypeOIDs, not a 1:1 mapping: 19 (name) and 114/3802
+// (json/jsonb) have no entry here on purpose — 19 is Postgres's internal catalog-identifier type
+// (never real user data, so redacting it is never the right behavior regardless of any label), and
+// json/jsonb are structured-but-inspectable, closer in spirit to free text than to a fixed-format
+// scalar (mask.Remote already inspects JSON-shaped text columns — see REDACTION.md's "JSON blob"
+// example — this map doesn't change that). Every OID present here MUST have a corresponding entry
+// in mask's typeValidPlaceholder, or PathOverlay's fail-safe-unknown-kind fallback silently leaves
+// the column unmasked despite a confirmed label requesting redaction.
+var postgresTypeKind = map[uint32]mask.TypeKind{
+	16:   mask.TypeKindBool,
+	20:   mask.TypeKindNumeric,
+	21:   mask.TypeKindNumeric,
+	23:   mask.TypeKindNumeric,
+	26:   mask.TypeKindNumeric,
+	700:  mask.TypeKindNumeric,
+	701:  mask.TypeKindNumeric,
+	1082: mask.TypeKindDate,
+	1083: mask.TypeKindDate,
+	1114: mask.TypeKindDate,
+	1184: mask.TypeKindDate,
+	1186: mask.TypeKindDate,
+	1266: mask.TypeKindDate,
+	1700: mask.TypeKindNumeric,
+	2950: mask.TypeKindUUID,
+}
+
 // parseRowDescription extracts column names, text/binary format, free-text eligibility, and — when
-// resolveObjectID is non-nil — path-scoped-label identity (see Engine.objectIDFor) from a 'T'
-// message payload. tableOID == 0 (no backing table, e.g. a computed/derived column) always skips
+// resolveObjectID is non-nil — path-scoped-label identity plus the real, unaliased column name (see
+// Engine.objectIDFor and docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A) from a 'T' message
+// payload. tableOID == 0 (no backing table, e.g. a computed/derived column) always skips
 // resolution, the same way mysql's state.objectID treats an empty org_table.
 func parseRowDescription(ctx context.Context, p []byte, resolveObjectID objectIDResolver) []mask.Column {
 	if len(p) < 2 {
@@ -431,19 +468,26 @@ func parseRowDescription(ctx context.Context, p []byte, resolveObjectID objectID
 			break
 		}
 		tableOID := binary.BigEndian.Uint32(p[off : off+4])
+		colAttr := int16(binary.BigEndian.Uint16(p[off+4 : off+6]))
 		typeOID := binary.BigEndian.Uint32(p[off+6 : off+10])
 		formatCode := binary.BigEndian.Uint16(p[off+16 : off+18])
 		off += 18
 		var objID string
+		path := name // falls back to the wire's own (possibly aliased) name when unresolved
 		if resolveObjectID != nil && tableOID != 0 {
-			objID = resolveObjectID(ctx, tableOID)
+			var realName string
+			objID, realName = resolveObjectID(ctx, tableOID, colAttr)
+			if realName != "" {
+				path = realName
+			}
 		}
 		cols = append(cols, mask.Column{
 			Name:     name,
-			Path:     name,
+			Path:     path,
 			ObjectID: objID,
 			Text:     formatCode == 0,
 			FreeText: !nonFreeTextTypeOIDs[typeOID],
+			TypeKind: postgresTypeKind[typeOID],
 		})
 	}
 	return cols

@@ -5,9 +5,9 @@
 #   SKYBRIDGE_UPSTREAM=db.internal:5432 docker compose up -d
 #   psql "postgres://user:pass@localhost:15432/appdb"
 #
-# PII masking is on by default via Microsoft Presidio (analyzer + anonymizer, below), matching
-# https://hoop.dev/docs/setup/deployment/presidio. The agent calls Presidio's "analyze"/"anonymize"
-# HTTP endpoints over the compose network; any other service exposing that same shape also works —
+# PII masking is on by default via Microsoft Presidio (analyzer + anonymizer, below). The agent
+# calls Presidio's "analyze"/"anonymize" HTTP endpoints over the compose network; any other service
+# exposing that same shape also works —
 # override SKYBRIDGE_MASK_ANALYZE_URL / SKYBRIDGE_MASK_ANONYMIZE_URL to point elsewhere, or set both
 # to empty to run as a governed passthrough with no content masking.
 name: skybridge
@@ -54,8 +54,7 @@ services:
       - SKYBRIDGE_MASK_RECOGNIZERS_FILE=${SKYBRIDGE_MASK_RECOGNIZERS_FILE:-}
       # best-effort (default) forwards a value unmasked if Presidio errors/is unreachable, so an
       # outage never blocks legitimate queries. strict aborts the row/connection instead — use this
-      # for compliance-sensitive deployments where unmasked content must never reach the client
-      # (mirrors hoop.dev's DLP_MODE).
+      # for compliance-sensitive deployments where unmasked content must never reach the client.
       - SKYBRIDGE_MASK_MODE=${SKYBRIDGE_MASK_MODE:-best-effort}
       # Column overlay (off by default): JSON map of column name -> replacement token.
       - SKYBRIDGE_PII_OVERLAY=${SKYBRIDGE_PII_OVERLAY:-}
@@ -71,10 +70,9 @@ services:
   #
   # The official image's entrypoint only reads WORKERS/PORT (`gunicorn -w $WORKERS -b 0.0.0.0:$PORT
   # app:create_app()`) — threads/preload_app/timeout need a mounted Gunicorn config, so the command
-  # is overridden to load one. Values mirror hoop.dev's documented Helm chart defaults
-  # (https://hoop.dev/docs/setup/deployment/presidio): workers=2 needs preload_app=True or each
-  # worker loads its own ~750MB spaCy model copy at startup instead of sharing the master's via
-  # copy-on-write. cpu/memory limits below match that guide's `requests`/`limits` for this component.
+  # is overridden to load one. workers=2 needs preload_app=True or each worker loads its own ~750MB
+  # spaCy model copy at startup instead of sharing the master's via copy-on-write. cpu/memory limits
+  # below are sized for that same worker count.
   presidio-analyzer:
     image: mcr.microsoft.com/presidio-analyzer:${PRESIDIO_VERSION:-latest}
     container_name: skybridge-presidio-analyzer
@@ -94,7 +92,7 @@ services:
 
   # Presidio Anonymizer: string substitution on the analyzer's detected spans (POST /anonymize). No
   # ML model, negligible resource cost — same Gunicorn-config-override rationale as the analyzer
-  # above; values again mirror hoop.dev's documented defaults.
+  # above.
   presidio-anonymizer:
     image: mcr.microsoft.com/presidio-anonymizer:${PRESIDIO_VERSION:-latest}
     container_name: skybridge-presidio-anonymizer

@@ -13,7 +13,7 @@ LDFLAGS  ?= -s -w
 BUF      ?= buf
 GOTAGS   ?=
 
-.PHONY: all build agent gateway edge edge-querystudio gen test test-querystudio race race-querystudio vet vet-querystudio fmt lint tidy clean verify verify-querystudio
+.PHONY: all build agent gateway edge edge-querystudio labeller gen test test-querystudio race race-querystudio vet vet-querystudio fmt lint tidy clean verify verify-querystudio
 
 all: build
 
@@ -27,6 +27,12 @@ gateway:
 
 edge:
 	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -tags "$(GOTAGS)" -ldflags="$(LDFLAGS)" -o $(BINDIR)/skybridge-edge ./cmd/skybridge-edge
+
+# skybridge-labeller: the periodic AI-based path-label scan job (docs/AI_PATH_LABELLING_DESIGN.md).
+# Not part of the default `build` target — it's a separate, opt-in job most deployments don't run,
+# same reasoning as edge-querystudio being its own target rather than folded into `edge`.
+labeller:
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -tags "$(GOTAGS)" -ldflags="$(LDFLAGS)" -o $(BINDIR)/skybridge-labeller ./cmd/skybridge-labeller
 
 # Same as `edge`, but with Query Studio dispatch compiled in.
 edge-querystudio:

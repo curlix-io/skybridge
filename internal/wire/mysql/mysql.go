@@ -403,10 +403,10 @@ func (s *state) handleOneResultSet(ctx context.Context, sb *bufio.Reader, bw *bu
 			}
 			return false, true, forwardRest(sb, bw)
 		}
-		name, schema, orgTable, freeText := columnIdentity(cpayload)
+		name, schema, orgTable, orgName, freeText := columnIdentity(cpayload)
 		cols = append(
 			cols,
-			mask.Column{Name: name, Path: name, ObjectID: s.objectID(schema, orgTable), Text: true, FreeText: freeText},
+			mask.Column{Name: name, Path: orgName, ObjectID: s.objectID(schema, orgTable), Text: true, FreeText: freeText},
 		)
 		if err := writePacket(bw, cseq, cpayload); err != nil {
 			return false, false, err
@@ -547,7 +547,7 @@ func lenEncStrSpan(p []byte, off int) (int, bool) {
 
 // columnName extracts the column name (5th lenenc string) from a PROTOCOL_41 column-definition packet.
 func columnName(p []byte) string {
-	name, _, _, _ := columnIdentity(p)
+	name, _, _, _, _ := columnIdentity(p)
 	return name
 }
 
@@ -576,14 +576,19 @@ var nonFreeTextColumnTypes = map[byte]bool{
 }
 
 // columnIdentity extracts the column name, schema, org_table (the real, unaliased table name —
-// distinct from the possibly-aliased "table" field), and free-text eligibility from a
-// PROTOCOL_41 column-definition packet. Field order: catalog(0), schema(1), table(2, aliased),
-// org_table(3, real name), name(4, aliased), org_name(5, real column name), then a fixed-size tail
-// (length_of_fixed_fields lenenc, charset(2), column_length(4), type(1), flags(2), decimals(1),
-// filler(2)) that carries the column's true wire type. Returns freeText=true (fail toward
-// scanning) when the type byte can't be located, matching the pre-existing behavior for columns
-// this parser can't fully decode.
-func columnIdentity(p []byte) (name, schema, orgTable string, freeText bool) {
+// distinct from the possibly-aliased "table" field), org_name (the real, unaliased column name —
+// distinct from the possibly-aliased "name" field; see docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's
+// Gap A for why this matters: a query aliasing a column, e.g. "SELECT email AS contact_info", must
+// still resolve a path-scoped label keyed on "email", not the display name "contact_info"), and
+// free-text eligibility from a PROTOCOL_41 column-definition packet. Field order: catalog(0),
+// schema(1), table(2, aliased), org_table(3, real name), name(4, aliased), org_name(5, real column
+// name), then a fixed-size tail (length_of_fixed_fields lenenc, charset(2), column_length(4),
+// type(1), flags(2), decimals(1), filler(2)) that carries the column's true wire type. Returns
+// freeText=true (fail toward scanning) when the type byte can't be located, matching the
+// pre-existing behavior for columns this parser can't fully decode. orgName falls back to name
+// (the aliased display name) whenever it can't be decoded, so a caller keying a lookup on orgName
+// degrades to today's alias-sensitive behavior rather than an empty lookup key.
+func columnIdentity(p []byte) (name, schema, orgTable, orgName string, freeText bool) {
 	freeText = true
 	off := 0
 	spans := make([]int, 0, 4)
@@ -591,7 +596,7 @@ func columnIdentity(p []byte) (name, schema, orgTable string, freeText bool) {
 		start := off
 		span, ok := lenEncStrSpan(p, off)
 		if !ok {
-			return "", "", "", freeText
+			return "", "", "", "", freeText
 		}
 		spans = append(spans, start)
 		off += span
@@ -601,33 +606,37 @@ func columnIdentity(p []byte) (name, schema, orgTable string, freeText bool) {
 
 	l, n, ok := readLenEncInt(p, off)
 	if !ok {
-		return "", "", "", freeText
+		return "", "", "", "", freeText
 	}
 	off += n
 	if off+int(l) > len(p) {
-		return "", "", "", freeText
+		return "", "", "", "", freeText
 	}
 	name = string(p[off : off+int(l)])
 	off += int(l)
+	orgName = name
 
-	// org_name (6th lenenc string) — skip, not needed here.
+	orgNameStart := off
 	orgNameSpan, ok := lenEncStrSpan(p, off)
 	if !ok {
-		return name, schema, orgTable, freeText
+		return name, schema, orgTable, orgName, freeText
+	}
+	if s := lenEncStr(p, orgNameStart); s != "" {
+		orgName = s
 	}
 	off += orgNameSpan
 
 	// length_of_fixed_fields (lenenc, always 0x0c per protocol) then charset(2) column_length(4).
 	_, n, ok = readLenEncInt(p, off)
 	if !ok {
-		return name, schema, orgTable, freeText
+		return name, schema, orgTable, orgName, freeText
 	}
 	off += n + 2 + 4
 	if off >= len(p) {
-		return name, schema, orgTable, freeText
+		return name, schema, orgTable, orgName, freeText
 	}
 	freeText = !nonFreeTextColumnTypes[p[off]]
-	return name, schema, orgTable, freeText
+	return name, schema, orgTable, orgName, freeText
 }
 
 // lenEncStr decodes the lenenc string starting at off, returning "" on any parse failure.

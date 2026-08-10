@@ -1,0 +1,76 @@
+# End-to-end proof of docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B Mongo fix: a real MongoDB, a
+# real skybridge-agent (mongo mode) wired to a confirmed path-scoped label via
+# SKYBRIDGE_PATH_LABEL_URL, and a runner that queries through the agent and asserts the BSON
+# datetime field "dob" comes back redacted to the zero-valued epoch — not left raw (pre-fix
+# behavior) and not corrupted.
+#
+#   cd examples/mongo-typekind-demo
+#   docker compose up --build --abort-on-container-exit
+#   docker compose down
+name: skybridge-mongo-typekind-demo
+
+services:
+  mongo:
+    image: mongo:7.0
+    container_name: skybridge-mongo-typekind-mongo
+    healthcheck:
+      test: ["CMD", "mongosh", "--quiet", "--eval", "db.runCommand({ping:1})"]
+      interval: 2s
+      timeout: 3s
+      start_period: 10s
+      retries: 20
+
+  seed:
+    image: mongo:7.0
+    depends_on:
+      mongo:
+        condition: service_healthy
+    volumes:
+      - ./seed.mongo.js:/seed.mongo.js:ro
+    entrypoint: ["mongosh", "--quiet", "--host", "mongo", "/seed.mongo.js"]
+
+  stub-control-plane:
+    build:
+      context: .
+      dockerfile: Dockerfile.stub-control-plane
+    container_name: skybridge-mongo-typekind-cp
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 8091), timeout=2)"]
+      interval: 2s
+      timeout: 2s
+      start_period: 5s
+      retries: 10
+
+  agent:
+    build:
+      context: ../..
+      dockerfile: examples/mongo-typekind-demo/Dockerfile.agent
+    container_name: skybridge-mongo-typekind-agent
+    depends_on:
+      mongo:
+        condition: service_healthy
+      stub-control-plane:
+        condition: service_healthy
+      seed:
+        condition: service_completed_successfully
+    environment:
+      - SKYBRIDGE_DB_TYPE=mongodb
+      - SKYBRIDGE_UPSTREAM=mongo:27017
+      - SKYBRIDGE_LISTEN=:27020
+      - SKYBRIDGE_ORG_ID=org1
+      - SKYBRIDGE_PATH_LABEL_URL=http://stub-control-plane:8091/pii-path-labels
+      - SKYBRIDGE_PATH_LABEL_POLL_SECONDS=15
+      - SKYBRIDGE_PATH_LABEL_PUSH_SECONDS=5
+    # No healthcheck here: the agent image is distroless (no shell/python3/curl to probe with).
+    # The runner retries its own connection instead — see runner/main.go's mustConnect.
+
+  runner:
+    build:
+      context: ../..
+      dockerfile: examples/mongo-typekind-demo/runner/Dockerfile
+    container_name: skybridge-mongo-typekind-runner
+    depends_on:
+      agent:
+        condition: service_started
+    environment:
+      - AGENT_MONGO_URI=mongodb://agent:27020

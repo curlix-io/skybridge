@@ -103,8 +103,8 @@ psql "postgres://user:pass@localhost:15432/appdb"
 The column overlay above only matches by column *name*. To also catch PII-shaped values wherever
 they appear — free-text notes, JSON blobs, unlisted columns — layer on the `Remote` masker, a thin
 client for any Presidio-compatible `analyze`/`anonymize` service. The bundled Docker Compose setup
-brings up Microsoft Presidio's analyzer + anonymizer alongside the agent, per
-[hoop.dev's Presidio deployment guide](https://hoop.dev/docs/setup/deployment/presidio):
+brings up Microsoft Presidio's analyzer + anonymizer alongside the agent, using the same
+Gunicorn worker/preload configuration Presidio's own deployment docs recommend:
 
 ```sh
 cd deploy
@@ -117,6 +117,58 @@ compose file's env vars. Set `SKYBRIDGE_MASK_ANALYZE_URL`/`SKYBRIDGE_MASK_ANONYM
 disable content masking (governed passthrough), or point them at a different `analyze`/`anonymize`
 service. Running with plain `go run` (no compose) has no mask URLs by default — set them explicitly
 to reach a Presidio instance you run yourself.
+
+### Test data for Postgres, MySQL, and MongoDB
+
+[`examples/demo/`](./examples/demo/) ships the same small, fabricated customer dataset — name,
+email, SSN, a free-text note, a JSON blob — seeded identically into Postgres
+([`seed.sql`](./examples/demo/seed.sql)), MySQL
+([`seed.mysql.sql`](./examples/demo/seed.mysql.sql)), and MongoDB
+([`seed.mongo.js`](./examples/demo/seed.mongo.js)), so the same before/after redaction can be shown
+across all three database types (`./examples/demo/run-demo.sh up` loads all three and starts an
+agent trio; see [Redaction in action](#redaction-in-action-sql-rows-json-bson-and-free-text) above
+for the exact rows). It's intentionally tiny (a handful of rows) — enough to demo, not to load-test.
+
+For a larger, still-synthetic PII test corpus to seed yourself, consider
+[`ai4privacy/pii-masking-200k`](https://huggingface.co/datasets/ai4privacy/pii-masking-200k) on
+Hugging Face — machine-generated (no real personal data), labeled by PII type, and independent of
+Skybridge. Verify its current license/schema on the dataset page before using it; there's no
+built-in loader for it in this repo, so you'd write a small script to convert its rows into
+`INSERT`/`insertMany` statements for whichever database you're testing against.
+
+### Docker-based end-to-end demos
+
+Two standalone Docker Compose setups exercise real code paths against real containers — each is
+self-contained (its own `docker-compose.yml`, no shared state with the demos above):
+
+**AI path-labelling, with vs. without** ([`examples/aiclassifier-demo/`](./examples/aiclassifier-demo/)) —
+runs the real `internal/pathlabel/aiclassifier` `Scanner`/`LLM` code against a stub LLM server,
+printing a side-by-side of what gets proposed today (content-only detection, gated on live query
+traffic) vs. with the AI classifier (column name + samples, independent of traffic). See
+[Roadmap: AI-based path labelling](#roadmap-ai-based-path-labelling-proposed) above for the design
+this demos.
+
+```sh
+cd examples/aiclassifier-demo
+docker compose up --build --abort-on-container-exit
+docker compose down
+```
+
+**Typed-column (BSON) redaction against a real MongoDB** ([`examples/mongo-typekind-demo/`](./examples/mongo-typekind-demo/)) —
+runs a real `skybridge-agent` (mongo mode) in front of a real MongoDB, wired to a stub control-plane
+server serving one confirmed `manual` label on a BSON datetime field, and a runner that queries
+through the agent and asserts the typed field comes back redacted to a type-valid placeholder
+rather than left raw or corrupted (`mask.Column.TypeKind`, see [How masking
+works](#how-masking-works) below). The confirmed label takes effect on the agent's next path-label
+poll tick (~15s), not instantly, so the runner retries until it observes the redaction — don't pass
+`--abort-on-container-exit` here, since the one-shot seed container exits successfully as soon as
+it's done and would otherwise stop the whole stack prematurely.
+
+```sh
+cd examples/mongo-typekind-demo
+docker compose up --build      # watch the `runner` container's logs for PASS/FAIL
+docker compose down
+```
 
 ## How masking works
 
@@ -251,6 +303,70 @@ one-shot exec path and all three wire proxies today, Postgres's requiring
 Only `profile.email` is redacted — `order.total` and `profile.name` carry no label, so they fall
 through every layer untouched, exactly as the fallthrough-on-miss contract guarantees.
 
+### Roadmap: AI-based path labelling (proposed)
+
+Today, a `PathOverlay` label only exists if a human sets it, or if Presidio's content detector
+happens to fire on a sampled leaf value during live query traffic (`internal/edge/dbquery/mask.go`'s
+`proposeLeaf`). A proposed AI classifier (see
+[`docs/AI_PATH_LABELLING_DESIGN.md`](./docs/AI_PATH_LABELLING_DESIGN.md)) would run as a separate,
+periodic scan — independent of query traffic — that proposes labels using both column *name* and
+sampled *values*, so coverage no longer depends on someone having queried a table first:
+
+```
+ ┌───────────────────────────────────────────────────────────────────────┐
+ │                    Periodic classification scan (offline)             │
+ │                                                                        │
+ │   read-only catalog          ┌──────────────┐                        │
+ │   credential (per DB) ─────► │  sample rows │                        │
+ │                               │ per ObjectID │                        │
+ │                               └──────┬───────┘                        │
+ │                                      │ column name + N sampled values │
+ │                                      ▼                                │
+ │                          ┌───────────────────────┐                   │
+ │                          │  Classifier interface  │                   │
+ │                          │ ┌───────────────────┐ │                   │
+ │                          │ │ A) LLM API-backed  │ │  pluggable,       │
+ │                          │ │    (name+samples   │ │  same output      │
+ │                          │ │    → category)     │ │  either way        │
+ │                          │ ├───────────────────┤ │                   │
+ │                          │ │ B) self-hosted NER │ │                   │
+ │                          │ │ (fine-tuned NER)   │ │                   │
+ │                          │ └───────────────────┘ │                   │
+ │                          └───────────┬───────────┘                   │
+ │                                      │ {category, profile, confidence}│
+ └──────────────────────────────────────┼────────────────────────────────┘
+                                        ▼
+                     label.Store.Put(..., Source: SourceProposed)
+                                        │
+                                        ▼
+                     ┌──────────────────────────────────────┐
+                     │   remotestore.Store (control plane)   │
+                     │   pii-path-labels/propose             │
+                     └───────────────────┬────────────────────┘
+                                         │ steward reviews & confirms
+                                         ▼
+                     Source flips: proposed ──► manual/platform
+                                         │
+                                         ▼            (only confirmed labels redact live)
+ ┌───────────────────────────────────────────────────────────────────────┐
+ │                     Live wire-proxy masking chain                     │
+ │        Remote → PathOverlay (confirmed labels only) → Overlay         │
+ └───────────────────────────────────────────────────────────────────────┘
+```
+
+Key properties carried over from the existing design, unchanged by this addition:
+
+- The classifier only ever writes `Source: SourceProposed` — nothing it proposes redacts live until
+  a steward confirms it, exactly like today's Presidio-driven `proposeLeaf` proposals.
+- It runs **offline**, never on the query hot path — an LLM/NER call is too slow/costly to sit in
+  front of a live database session.
+- Backend (LLM API vs. a self-hosted fine-tuned NER model) is a deployment choice behind one
+  interface, not a fork in the masking chain.
+
+See the design doc for the full rationale, vendor/OSS landscape survey, and how this also lays the
+groundwork for a streaming/CDC masking extension (a schema-registry-keyed `ObjectID` instead of a
+live wire-protocol one).
+
 ## Configure
 
 Set these as environment variables (full list in `internal/config/config.go`):
@@ -270,7 +386,7 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_MASK_LANGUAGE` | `en` | language passed to the analyzer |
 | `SKYBRIDGE_MASK_ENTITIES` | — (low-cost regex set: `EMAIL_ADDRESS,PHONE_NUMBER,CREDIT_CARD,US_SSN,IP_ADDRESS,IBAN_CODE,CRYPTO`) | comma-separated Presidio entity types to detect; NER-backed types (`PERSON`, `LOCATION`, `ORGANIZATION`, `NRP`) are opt-in — they run full spaCy inference per value and are prone to false positives on ordinary business data |
 | `SKYBRIDGE_MASK_ANONYMIZERS` | — (blanket `{"DEFAULT":{"type":"replace","new_value":"[redacted]"}}`) | JSON Presidio "anonymizers" object, one strategy per entity type — e.g. partial-mask an SSN instead of a flat replace |
-| `SKYBRIDGE_MASK_MODE` | `best-effort` | `best-effort` forwards a value unmasked if the remote masker errors/is unreachable (a masker outage never blocks a query); `strict` aborts the row/connection instead so unmasked content never reaches the client (mirrors hoop.dev's `DLP_MODE`) |
+| `SKYBRIDGE_MASK_MODE` | `best-effort` | `best-effort` forwards a value unmasked if the remote masker errors/is unreachable (a masker outage never blocks a query); `strict` aborts the row/connection instead so unmasked content never reaches the client |
 | `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present an opaque session token, not a DB password) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /your-control-plane/proxy-exchange`) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN` | `SKYBRIDGE_TOKEN` | bearer for the exchange call |

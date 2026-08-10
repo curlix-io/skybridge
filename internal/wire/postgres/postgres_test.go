@@ -23,8 +23,19 @@ func rowDescriptionPayload(names ...string) []byte {
 }
 
 // rowDescriptionPayloadTyped is rowDescriptionPayload plus an explicit Postgres type OID per
-// column, for exercising nonFreeTextTypeOIDs handling (e.g. 1184 = timestamptz).
+// column, for exercising nonFreeTextTypeOIDs handling (e.g. 1184 = timestamptz). tableOID/colAttr
+// are left zero (no backing table) — use rowDescriptionPayloadFull for tests that need them set.
 func rowDescriptionPayloadTyped(names []string, oids []uint32) []byte {
+	tableOIDs := make([]uint32, len(names))
+	colAttrs := make([]int16, len(names))
+	return rowDescriptionPayloadFull(names, tableOIDs, colAttrs, oids)
+}
+
+// rowDescriptionPayloadFull builds a RowDescription payload with an explicit tableOID/colAttr/
+// typeOID per column — for tests exercising objectID/column-name resolution
+// (docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A), where rowDescriptionPayloadTyped's always-zero
+// tableOID/colAttr would never invoke the resolver.
+func rowDescriptionPayloadFull(names []string, tableOIDs []uint32, colAttrs []int16, typeOIDs []uint32) []byte {
 	buf := new(bytes.Buffer)
 	var u16 [2]byte
 	binary.BigEndian.PutUint16(u16[:], uint16(len(names)))
@@ -32,9 +43,14 @@ func rowDescriptionPayloadTyped(names []string, oids []uint32) []byte {
 	for i, n := range names {
 		buf.WriteString(n)
 		buf.WriteByte(0)
-		buf.Write(make([]byte, 6)) // tableOID(4) colAttr(2)
+		var tableOIDBytes [4]byte
+		binary.BigEndian.PutUint32(tableOIDBytes[:], tableOIDs[i])
+		buf.Write(tableOIDBytes[:])
+		var colAttrBytes [2]byte
+		binary.BigEndian.PutUint16(colAttrBytes[:], uint16(colAttrs[i]))
+		buf.Write(colAttrBytes[:])
 		var oidBytes [4]byte
-		binary.BigEndian.PutUint32(oidBytes[:], oids[i])
+		binary.BigEndian.PutUint32(oidBytes[:], typeOIDs[i])
 		buf.Write(oidBytes[:])
 		buf.Write(make([]byte, 6)) // typeSize(2) typeMod(4)
 		buf.Write([]byte{0, 0})    // formatCode 0 = text
@@ -75,6 +91,64 @@ func TestParseRowDescription(t *testing.T) {
 	}
 }
 
+// TestParseRowDescription_ResolvesRealColumnNameForAliasedColumn is the regression test for
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A: RowDescription's own column-name field reflects
+// any client-side alias ("SELECT email AS contact_info"), so parseRowDescription's resolver must be
+// called with the column's colAttr and its result used for Path, not the wire's own aliased name.
+func TestParseRowDescription_ResolvesRealColumnNameForAliasedColumn(t *testing.T) {
+	names := []string{"contact_info"}
+	tableOIDs := []uint32{12345}
+	colAttrs := []int16{2}
+	typeOIDs := []uint32{0}
+
+	var gotTableOID uint32
+	var gotAttnum int16
+	resolver := objectIDResolver(func(_ context.Context, tableOID uint32, attnum int16) (string, string) {
+		gotTableOID, gotAttnum = tableOID, attnum
+		return "acme:postgres:public:users", "email"
+	})
+
+	cols := parseRowDescription(context.Background(), rowDescriptionPayloadFull(names, tableOIDs, colAttrs, typeOIDs), resolver)
+	if len(cols) != 1 {
+		t.Fatalf("want 1 col, got %d", len(cols))
+	}
+	if gotTableOID != 12345 || gotAttnum != 2 {
+		t.Fatalf("resolver called with tableOID=%d attnum=%d, want 12345 2", gotTableOID, gotAttnum)
+	}
+	if cols[0].Name != "contact_info" {
+		t.Fatalf("Name = %q, want the aliased display name %q", cols[0].Name, "contact_info")
+	}
+	if cols[0].Path != "email" {
+		t.Fatalf("Path = %q, want the real column name %q (a path-scoped label lookup keys on Path)", cols[0].Path, "email")
+	}
+	if cols[0].ObjectID != "acme:postgres:public:users" {
+		t.Fatalf("ObjectID = %q, want acme:postgres:public:users", cols[0].ObjectID)
+	}
+}
+
+// TestParseRowDescription_FallsBackToWireNameWhenResolverReturnsNoRealName covers a resolver that
+// resolves ObjectID but can't resolve the real column name (e.g. a stale attnum after a DDL change)
+// — Path must fall back to the wire's own name rather than going empty, matching Resolve's existing
+// "any failure degrades to today's behavior" posture.
+func TestParseRowDescription_FallsBackToWireNameWhenResolverReturnsNoRealName(t *testing.T) {
+	names := []string{"contact_info"}
+	tableOIDs := []uint32{12345}
+	colAttrs := []int16{2}
+	typeOIDs := []uint32{0}
+
+	resolver := objectIDResolver(func(_ context.Context, _ uint32, _ int16) (string, string) {
+		return "acme:postgres:public:users", "" // ObjectID resolved, column name unresolved
+	})
+
+	cols := parseRowDescription(context.Background(), rowDescriptionPayloadFull(names, tableOIDs, colAttrs, typeOIDs), resolver)
+	if len(cols) != 1 {
+		t.Fatalf("want 1 col, got %d", len(cols))
+	}
+	if cols[0].Path != "contact_info" {
+		t.Fatalf("Path = %q, want the wire's own name %q as a fallback", cols[0].Path, "contact_info")
+	}
+}
+
 // TestParseRowDescriptionExcludesTypedColumnsFromFreeText is the regression test for the actual
 // production bug this typeOID plumbing fixes: Presidio's DATE_TIME recognizer confidently flags an
 // ordinary timestamptz value (e.g. "2024-07-05 00:13:50.654762+00:00") as PII and redacts it, but a
@@ -98,6 +172,34 @@ func TestParseRowDescriptionExcludesTypedColumnsFromFreeText(t *testing.T) {
 	for _, c := range cols {
 		if c.FreeText != want[c.Name] {
 			t.Errorf("col %q: FreeText=%v, want %v", c.Name, c.FreeText, want[c.Name])
+		}
+	}
+}
+
+// TestParseRowDescription_SetsTypeKindForConfirmedLabelPlaceholders is the regression test for
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B at the wire-engine level: a typed column must
+// carry a mask.TypeKind PathOverlay can use to pick a type-valid placeholder for a confirmed
+// label's redaction request — 19 ("name", Postgres's catalog-identifier type) and 25 (text)
+// deliberately get TypeKindUnspecified (the zero value), matching postgresTypeKind's doc comment.
+func TestParseRowDescription_SetsTypeKindForConfirmedLabelPlaceholders(t *testing.T) {
+	names := []string{"id", "created_at", "note", "amount", "is_active", "token", "relname"}
+	oids := []uint32{23, 1184, 25, 1700, 16, 2950, 19} // int4, timestamptz, text, numeric, bool, uuid, name
+	cols := parseRowDescription(context.Background(), rowDescriptionPayloadTyped(names, oids), nil)
+	if len(cols) != 7 {
+		t.Fatalf("want 7 cols, got %d", len(cols))
+	}
+	want := map[string]mask.TypeKind{
+		"id":         mask.TypeKindNumeric,
+		"created_at": mask.TypeKindDate,
+		"note":       mask.TypeKindUnspecified,
+		"amount":     mask.TypeKindNumeric,
+		"is_active":  mask.TypeKindBool,
+		"token":      mask.TypeKindUUID,
+		"relname":    mask.TypeKindUnspecified,
+	}
+	for _, c := range cols {
+		if c.TypeKind != want[c.Name] {
+			t.Errorf("col %q: TypeKind=%v, want %v", c.Name, c.TypeKind, want[c.Name])
 		}
 	}
 }
@@ -419,10 +521,12 @@ func TestObjectIDFor_UnconfiguredCombinations(t *testing.T) {
 }
 
 // TestObjectIDFor_ResolvesScopedObjectID is the fully-configured happy path: orgID + catalog
-// resolver + non-empty database must produce "orgID:postgres:schema:table" for a resolvable OID and
-// "" for an unresolvable one (catalog miss), matching REDACTION.md's table-identity resolution.
+// resolver + non-empty database must produce "orgID:postgres:schema:table" for a resolvable OID
+// (plus the real column name via pg_attribute) and "" for an unresolvable one (catalog miss),
+// matching REDACTION.md's table-identity resolution and
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A.
 func TestObjectIDFor_ResolvesScopedObjectID(t *testing.T) {
-	addr, closeFn := fakeCatalogServer(t, "orders", "shop")
+	addr, closeFn := fakeCatalogServer(t, "orders", "shop", "email")
 	defer closeFn()
 	host, port, err := net.SplitHostPort(addr)
 	if err != nil {
@@ -434,13 +538,17 @@ func TestObjectIDFor_ResolvesScopedObjectID(t *testing.T) {
 	if fn == nil {
 		t.Fatal("expected a resolver function once orgID/catalog/database are all set")
 	}
-	if got := fn(context.Background(), 12345); got != "acme:postgres:shop:orders" {
-		t.Fatalf("objectID = %q, want acme:postgres:shop:orders", got)
+	objID, columnName := fn(context.Background(), 12345, 2)
+	if objID != "acme:postgres:shop:orders" {
+		t.Fatalf("objectID = %q, want acme:postgres:shop:orders", objID)
+	}
+	if columnName != "email" {
+		t.Fatalf("columnName = %q, want email", columnName)
 	}
 	// tableOID 0 has no backing table: resolveObjectID is never even called for it by
 	// parseRowDescription, but objectIDFor's own function must still degrade gracefully.
-	if got := fn(context.Background(), 0); got != "" {
-		t.Fatalf("tableOID 0 should resolve to empty ObjectID, got %q", got)
+	if objID, _ := fn(context.Background(), 0, 2); objID != "" {
+		t.Fatalf("tableOID 0 should resolve to empty ObjectID, got %q", objID)
 	}
 }
 

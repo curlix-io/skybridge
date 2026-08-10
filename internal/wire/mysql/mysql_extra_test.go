@@ -274,6 +274,54 @@ func TestServerToClient_ColumnCountParseFailureForwardsRaw(t *testing.T) {
 	}
 }
 
+// capturingMasker records the mask.Column slice it was called with, for asserting what identity a
+// caller actually resolved (as opposed to what MaskRow does with it).
+type capturingMasker struct {
+	captured []mask.Column
+}
+
+func (m *capturingMasker) MaskRow(_ context.Context, cols []mask.Column, row [][]byte) ([][]byte, error) {
+	m.captured = append([]mask.Column(nil), cols...)
+	return row, nil
+}
+
+// TestServerToClient_ResolvesRealColumnNameForAliasedColumn is the regression test for
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A at the wire-engine level (see mysql_test.go's
+// TestColumnIdentityResolvesRealNameForAliasedColumn for the columnIdentity-level unit test): a
+// result set for "SELECT email AS contact_info FROM users" must still set mask.Column.Path to the
+// real column name "email" (org_name), not the aliased display name "contact_info" (name) —
+// otherwise a path-scoped label confirmed on "email" can never match this row.
+func TestServerToClient_ResolvesRealColumnNameForAliasedColumn(t *testing.T) {
+	s := &state{caps: 0, queries: make(chan struct{}, 1), orgID: "org1"}
+	s.queries <- struct{}{}
+
+	var stream bytes.Buffer
+	stream.Write(pkt(1, []byte{0x01}))
+	stream.Write(pkt(2, colDefAliased("contact_info", "email", 0xFD)))
+	stream.Write(pkt(3, eofPacket()))
+	stream.Write(pkt(4, textRow("alice@example.com")))
+	stream.Write(pkt(5, eofPacket()))
+
+	masker := &capturingMasker{}
+	var out bytes.Buffer
+	sb := bufio.NewReader(&stream)
+	_ = s.serverToClient(context.Background(), sb, &out, masker, wire.NoopRecorder{})
+
+	if len(masker.captured) != 1 {
+		t.Fatalf("expected exactly 1 captured column, got %d", len(masker.captured))
+	}
+	col := masker.captured[0]
+	if col.Name != "contact_info" {
+		t.Fatalf("Name = %q, want the aliased display name %q", col.Name, "contact_info")
+	}
+	if col.Path != "email" {
+		t.Fatalf("Path = %q, want the real column name %q (a path-scoped label lookup keys on Path)", col.Path, "email")
+	}
+	if col.ObjectID != "org1:mysql:test:t" {
+		t.Fatalf("ObjectID = %q, want org1:mysql:test:t", col.ObjectID)
+	}
+}
+
 func TestServerToClient_FullColumnDefFallsBackToRawForward(t *testing.T) {
 	s := &state{caps: 0, queries: make(chan struct{}, 1)}
 	s.queries <- struct{}{}
@@ -405,9 +453,9 @@ func TestLenEncStr_Truncated(t *testing.T) {
 // ---- columnIdentity additional truncation branches ----
 
 func TestColumnIdentity_TruncatedCatalogSpan(t *testing.T) {
-	name, schema, orgTable, freeText := columnIdentity([]byte{0xFC, 0x01})
-	if name != "" || schema != "" || orgTable != "" || !freeText {
-		t.Fatalf("expected empty identity + freeText=true fallback, got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity([]byte{0xFC, 0x01})
+	if name != "" || schema != "" || orgTable != "" || orgName != "" || !freeText {
+		t.Fatalf("expected empty identity + freeText=true fallback, got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -422,9 +470,9 @@ func TestColumnIdentity_TruncatedAfterOrgTableBeforeNameLen(t *testing.T) {
 	lenStr("t")
 	lenStr("t")
 	// truncate here: no name-length lenenc int follows
-	name, schema, orgTable, freeText := columnIdentity(p)
-	if name != "" || !freeText {
-		t.Fatalf("expected empty name + freeText=true fallback, got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "" || orgName != "" || !freeText {
+		t.Fatalf("expected empty name + freeText=true fallback, got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -439,9 +487,9 @@ func TestColumnIdentity_TruncatedNameBody(t *testing.T) {
 	lenStr("t")
 	lenStr("t")
 	p = appendLenEncInt(p, 100) // name length claims 100 bytes, none follow
-	name, schema, orgTable, freeText := columnIdentity(p)
-	if name != "" || !freeText {
-		t.Fatalf("expected empty name + freeText=true fallback, got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "" || orgName != "" || !freeText {
+		t.Fatalf("expected empty name + freeText=true fallback, got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -457,9 +505,9 @@ func TestColumnIdentity_MissingOrgNameSpanReturnsFreeText(t *testing.T) {
 	lenStr("t")
 	lenStr("email")
 	// no org_name follows
-	name, schema, orgTable, freeText := columnIdentity(p)
-	if name != "email" || schema != "test" || orgTable != "t" || !freeText {
-		t.Fatalf("got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "email" || schema != "test" || orgTable != "t" || orgName != "email" || !freeText {
+		t.Fatalf("got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -476,9 +524,9 @@ func TestColumnIdentity_MissingFixedFieldsLenReturnsFreeText(t *testing.T) {
 	lenStr("email")
 	lenStr("email")
 	// no length_of_fixed_fields lenenc follows
-	name, schema, orgTable, freeText := columnIdentity(p)
-	if name != "email" || !freeText {
-		t.Fatalf("got (%q,%q,%q,%v)", name, schema, orgTable, freeText)
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "email" || orgName != "email" || !freeText {
+		t.Fatalf("got (%q,%q,%q,%q,%v)", name, schema, orgTable, orgName, freeText)
 	}
 }
 
@@ -498,7 +546,7 @@ func TestColumnIdentity_TypeByteMissingReturnsFreeText(t *testing.T) {
 	p = append(p, 0x21, 0x00)
 	p = append(p, 0x00, 0x01, 0x00, 0x00)
 	// stop right before the type byte
-	name, _, _, freeText := columnIdentity(p)
+	name, _, _, _, freeText := columnIdentity(p)
 	if name != "email" || !freeText {
 		t.Fatalf("expected freeText=true when type byte is missing, got name=%q freeText=%v", name, freeText)
 	}

@@ -624,7 +624,7 @@ func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, c
 		}
 	}
 	defer upstream.Close()
-	// Session replay (hoop.dev parity): the gateway already opened a control-plane session and
+	// Session replay: the gateway already opened a control-plane session and
 	// put its id on OpenMeta (see gateway.go's ServeClient) — build a recorder tagged with it so
 	// the wire engine's already-masked traffic gets captured, then flush once the session ends.
 	// SessionReplayEnabled gates this independently of session recording itself (a deployment can
