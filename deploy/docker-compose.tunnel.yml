@@ -172,3 +172,48 @@ services:
       # since this smoke test has no real Connector Gateway listening on :8010 for edge protocol —
       # only skybridge-gateway's agent registration protocol. Set SKYBRIDGE_EDGE_INSECURE=true and
       # point SKYBRIDGE_EDGE_GATEWAY at a real Connector Gateway to exercise AWS/k8s dispatch too.
+
+  # skybridge-labeller: opt-in (docker compose -f docker-compose.tunnel.yml --profile labeller up),
+  # pointed at this same stack's real Postgres (the "postgres" service above), so ListTables'
+  # information_schema crawl and internal/labeller's scan-scheduling (MaxObjectsPerScan/
+  # RescanIntervalSeconds) run against genuine catalog data — see ../docs/AI_PATH_LABELLING_DESIGN.md
+  # and ../TUNNEL_TESTING.md for what this proves vs. what it doesn't. SKYBRIDGE_LABELLER_LLM_ENDPOINT
+  # has no working default here (no real LLM API in this smoke test) — Classify calls against the
+  # placeholder below fail closed (best-effort: logged, never fatal, per aiclassifier.Classifier's
+  # contract), so this proves discovery+scheduling, not real classification, unless you override it
+  # with a real endpoint/key.
+  labeller:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        SKYBRIDGE_CMD: skybridge-labeller
+    container_name: skybridge-tunnel-labeller
+    restart: unless-stopped
+    profiles:
+      - labeller
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - SKYBRIDGE_ORG_ID=org-labeller
+      - SKYBRIDGE_TOKEN=${SKYBRIDGE_TOKEN:-local-tunnel-test-token}
+      - SKYBRIDGE_LABELLER_DB_TYPE=postgres
+      - SKYBRIDGE_LABELLER_DSN=postgres://user:pass@postgres:5432/appdb
+      - SKYBRIDGE_LABELLER_DATABASE=appdb
+      # Tables left unset on purpose — exercises dynamic discovery (sqlsampler.ListTables) rather
+      # than an operator-maintained list.
+      - SKYBRIDGE_LABELLER_TABLES=${SKYBRIDGE_LABELLER_TABLES:-}
+      - SKYBRIDGE_LABELLER_LLM_ENDPOINT=${SKYBRIDGE_LABELLER_LLM_ENDPOINT:-http://localhost:0/no-llm-configured}
+      - SKYBRIDGE_LABELLER_LLM_API_KEY=${SKYBRIDGE_LABELLER_LLM_API_KEY:-}
+      - SKYBRIDGE_LABELLER_LLM_CATEGORIES=${SKYBRIDGE_LABELLER_LLM_CATEGORIES:-email_fields,phone_fields}
+      - SKYBRIDGE_LABELLER_MAX_OBJECTS_PER_SCAN=${SKYBRIDGE_LABELLER_MAX_OBJECTS_PER_SCAN:-50}
+      - SKYBRIDGE_LABELLER_RESCAN_INTERVAL_SECONDS=${SKYBRIDGE_LABELLER_RESCAN_INTERVAL_SECONDS:-86400}
+      - SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS=${SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS:-300}
+      # labeller.go's validate() requires a non-empty PathLabelURL (this job only ever proposes
+      # through it), but stub-control-plane doesn't implement the pii-path-labels routes — every
+      # pull/push against it 404s, which remotestore.Store treats as a best-effort sync failure
+      # (logged, retried next interval, never fatal — same contract as a real outage). That's
+      # enough to let the container start and prove discovery+scheduling; point this at a real
+      # control-plane pii-path-labels URL to see proposals actually land somewhere.
+      - SKYBRIDGE_PATH_LABEL_URL=${SKYBRIDGE_PATH_LABEL_URL:-http://stub-control-plane:8091/api/v1/pii-path-labels}
