@@ -2,6 +2,8 @@ package main
 
 import (
 	"context"
+	"flag"
+	"fmt"
 	"log/slog"
 	"os"
 	"os/signal"
@@ -21,7 +23,51 @@ import (
 	"github.com/curlix-io/skybridge/internal/mask"
 )
 
+// edgeHelpText covers the SKYBRIDGE_* env vars most customers need. It is intentionally a
+// curated subset, not the exhaustive list — see internal/config/config.go's Edge struct and
+// README.md#the-edge-role for AWS/k8s tool exec, Studio dispatch, and the co-located wire proxy's
+// full option set (same vars as `skybridge agent`, since WireProxy reuses config.LoadAgent()).
+const edgeHelpText = `skybridge edge — unified edge: call-home to a Connector Gateway, local AWS/k8s
+tool exec, optional Query Studio dispatch, and an optional co-located DB wire proxy.
+
+All configuration is via SKYBRIDGE_* environment variables (no other flags). Common ones:
+
+  Quick start
+    SKYBRIDGE_KEY               one DSN replacing the vars below (curlix://org:token@host?...)
+
+  Call-home
+    SKYBRIDGE_EDGE_GATEWAY      Connector Gateway host:port (e.g. <nlb-dns>:7100)
+    SKYBRIDGE_ORG_ID            tenant id
+    SKYBRIDGE_EDGE_ID           stable instance id (default "skybridge-edge")
+    SKYBRIDGE_ENROLL_GATEWAY    enrollment host:port (typically <nlb-dns>:7101)
+    SKYBRIDGE_ENROLLMENT_TOKEN  one-time token, first run only
+    SKYBRIDGE_CA_BUNDLE_PEM     SaaS CA public cert (mTLS)
+
+  AWS / Kubernetes tool exec
+    SKYBRIDGE_AWS_REGION        region for local AWS reads
+    SKYBRIDGE_K8S_KUBECONFIG    kubeconfig path (external-connector mode; opt-in)
+
+  Query Studio dispatch (second outbound stream, :7200/:7201)
+    SKYBRIDGE_STUDIO_GATEWAY         Studio Gateway host:port
+    SKYBRIDGE_STUDIO_ENROLL_GATEWAY  Studio enrollment host:port
+
+  Co-located DB wire proxy (same process, same SKYBRIDGE_* vars as "skybridge agent" --help)
+    SKYBRIDGE_UPSTREAM          upstream database host:port — set this to also run the wire proxy
+
+Exhaustive list: internal/config/config.go (Edge struct), README.md#the-edge-role.
+`
+
 func runEdge(args []string) {
+	fs := flag.NewFlagSet("edge", flag.ExitOnError)
+	help := false
+	fs.BoolVar(&help, "help", false, "print SKYBRIDGE_* configuration options and exit")
+	fs.BoolVar(&help, "h", false, "alias for -help")
+	fs.Parse(args)
+	if help {
+		fmt.Print(edgeHelpText)
+		return
+	}
+
 	cfg := config.LoadEdge()
 	config.NormalizeEdge(&cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
