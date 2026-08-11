@@ -132,6 +132,14 @@ below for how to change that.
   positives on ordinary business data (a product name that looks like a person's name, a city name
   that's also a common word) — they're opt-in only, via `SKYBRIDGE_MASK_ENTITIES`.
 
+**Suppressing known-safe false positives — `SKYBRIDGE_MASK_ALLOW_LIST`:** a recurring false
+positive (a support line's own phone number, a fixture SSN in a staging environment) doesn't have
+to cost you the whole entity type or a hand-written custom recognizer. `SKYBRIDGE_MASK_ALLOW_LIST`
+is a comma-separated list of literal values or, with `SKYBRIDGE_MASK_ALLOW_LIST_MATCH=regex`, regex
+patterns that Presidio's `/analyze` is told to never report as a detection in the first place —
+Presidio's own `allow_list`/`allow_list_match` request fields, passed through verbatim. Unset
+(default), no allow-list is sent, matching Presidio's own default of none.
+
 **Failure handling — `SKYBRIDGE_MASK_MODE`:**
 
 - `best-effort` (default): a transport error, non-200 response, or malformed response all fall

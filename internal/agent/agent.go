@@ -140,6 +140,8 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 		Entities:         cfg.MaskEntities,
 		Anonymizers:      cfg.MaskAnonymizers,
 		AdHocRecognizers: cfg.MaskAdHocRecognizers,
+		AllowList:        cfg.MaskAllowList,
+		AllowListMatch:   mask.AllowListMatch(cfg.MaskAllowListMatch),
 		Strict:           cfg.MaskStrict(),
 		Metrics:          metricsRecorder,
 		ConnectionKey:    connectionKey,

@@ -216,6 +216,42 @@ func TestLoadAgentMaskAnonymizersInvalidJSONReturnsNil(t *testing.T) {
 	}
 }
 
+func TestLoadAgentParsesMaskAllowListCSVPreservingCase(t *testing.T) {
+	t.Setenv("SKYBRIDGE_MASK_ALLOW_LIST", " support@example.com ,555-0100,,Some-Value")
+	a := LoadAgent()
+	want := []string{"support@example.com", "555-0100", "Some-Value"}
+	if len(a.MaskAllowList) != len(want) {
+		t.Fatalf("unexpected allow list: %v", a.MaskAllowList)
+	}
+	for i, e := range want {
+		if a.MaskAllowList[i] != e {
+			t.Fatalf("unexpected allow list: %v", a.MaskAllowList)
+		}
+	}
+}
+
+func TestLoadAgentMaskAllowListEmptyReturnsNil(t *testing.T) {
+	a := LoadAgent()
+	if a.MaskAllowList != nil {
+		t.Fatalf("expected nil allow list by default, got %v", a.MaskAllowList)
+	}
+}
+
+func TestLoadAgentMaskAllowListMatchDefaultsToExact(t *testing.T) {
+	a := LoadAgent()
+	if a.MaskAllowListMatch != "exact" {
+		t.Fatalf("expected default allow list match %q, got %q", "exact", a.MaskAllowListMatch)
+	}
+}
+
+func TestLoadAgentMaskAllowListMatchHonorsRegex(t *testing.T) {
+	t.Setenv("SKYBRIDGE_MASK_ALLOW_LIST_MATCH", "regex")
+	a := LoadAgent()
+	if a.MaskAllowListMatch != "regex" {
+		t.Fatalf("expected allow list match %q, got %q", "regex", a.MaskAllowListMatch)
+	}
+}
+
 func TestLoadAgentMaskModeDefaultsToBestEffort(t *testing.T) {
 	a := LoadAgent()
 	if a.MaskMode != ModeBestEffort {

@@ -175,5 +175,16 @@ contract or any layer ordering — both are additive.
    "show last 4 digits of an SSN/card to a support agent" case that currently requires going through
    Presidio at all just to get partial masking on a *known* column.
 
-Both are backlog items, not committed work — raised here for prioritization, not implemented as
-part of this doc.
+3. **Allow-list support (`allow_list`/`allow_list_match`) in the `Remote` layer — done.**
+   `mask.RemoteConfig` now carries `AllowList`/`AllowListMatch` (`SKYBRIDGE_MASK_ALLOW_LIST` /
+   `SKYBRIDGE_MASK_ALLOW_LIST_MATCH`), passed straight through to `analyzeBatch`'s request body when
+   non-empty — a pure passthrough addition, no new masking logic, no wire-engine changes. Static
+   config only (no control-plane dynamic-source poller for it, unlike `MaskEntities`/
+   `MaskAdHocRecognizers`) — that's a separate addition if a customer ever needs the allow-list
+   itself hot-swappable. `regex_flags` (Presidio's Python `re`-module bitmask) was deliberately left
+   unexposed: it only matters for `allow_list_match=regex`, and Presidio's own default flags are a
+   reasonable fit for the literal-value/simple-pattern cases this feature targets — can be added
+   later as a raw passthrough int if someone actually needs to override it.
+
+All three are backlog items, not committed work — raised here for prioritization, not implemented
+as part of this doc.

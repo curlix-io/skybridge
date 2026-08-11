@@ -29,6 +29,8 @@ type MetricsRecorder interface {
 // stock analyzer server accepts "text" as a JSON array and returns one span list per input in the
 // same order — see analyzeBatch), then calls "anonymize" once per column that actually had a
 // detection (Presidio's anonymizer has no batch input, so that half stays one call per hit).
+// RemoteConfig.AllowList lets an operator suppress specific known-safe values/patterns from ever
+// being reported as a detection in the first place.
 //
 // It is best-effort: a detection miss or transport error never fails the session; the value is
 // forwarded unchanged. The masker is a no-op when the analyze/anonymize URLs are empty.
@@ -38,6 +40,11 @@ type Remote struct {
 	language     string
 	minLen       int
 	anonymizers  map[string]any
+	// allowList/allowListMatch are Presidio's /analyze "allow_list"/"allow_list_match" — construction-
+	// time only, like anonymizers, since there's no control-plane dynamic-source equivalent for this
+	// yet (unlike entities/recognizers/threshold, which live in remoteState for hot-swapping).
+	allowList      []string
+	allowListMatch AllowListMatch
 	// metrics records analyzed/masked outcome counts (pure metadata, never values) for the Data
 	// Classification dashboard. Nil is a safe no-op — see MetricsRecorder's doc comment.
 	metrics MetricsRecorder
@@ -72,6 +79,19 @@ type remoteState struct {
 // was chosen.
 const noScoreThreshold float64 = -1
 
+// AllowListMatch selects how RemoteConfig.AllowList entries are interpreted by Presidio's
+// /analyze "allow_list_match" — see RemoteConfig.AllowListMatch.
+type AllowListMatch string
+
+const (
+	// AllowListMatchExact suppresses a detection only when it exactly matches an AllowList entry.
+	// Presidio's own default.
+	AllowListMatchExact AllowListMatch = "exact"
+	// AllowListMatchRegex treats every AllowList entry as a regex pattern; a detection matching any
+	// of them is suppressed.
+	AllowListMatchRegex AllowListMatch = "regex"
+)
+
 // ErrMaskerUnavailable is returned by MaskRow (strict mode only) when the remote analyze/anonymize
 // service could not be reached or returned an unusable response for a value that needed masking.
 var ErrMaskerUnavailable = errors.New("mask: remote masking service unavailable")
@@ -97,6 +117,15 @@ type RemoteConfig struct {
 	// image. See config.LoadRecognizersFile for how this is populated from a YAML file. Nil sends no
 	// ad_hoc_recognizers field, matching Presidio's own default of none.
 	AdHocRecognizers []any
+	// AllowList is Presidio's /analyze "allow_list" — literal values or regex patterns (per
+	// AllowListMatch) that should never be reported as PII, letting an operator suppress a known-safe
+	// recurring false positive (e.g. a support line's own phone number, a fixture SSN in a staging
+	// environment) without disabling an entire entity type or writing a custom recognizer. Nil sends
+	// no allow_list field, matching Presidio's own default of none.
+	AllowList []string
+	// AllowListMatch is Presidio's /analyze "allow_list_match": AllowListMatchExact (default) or
+	// AllowListMatchRegex. Meaningless when AllowList is empty.
+	AllowListMatch AllowListMatch
 	// ScoreThreshold sets Presidio's /analyze "score_threshold" (min confidence to report a match).
 	// The zero value means "not configured" and omits the field from the request entirely, letting
 	// Presidio fall back to each recognizer's own default threshold — see remoteState's doc comment
@@ -151,16 +180,22 @@ func NewRemote(cfg RemoteConfig) *Remote {
 	if cfg.ScoreThreshold > 0 {
 		threshold = cfg.ScoreThreshold
 	}
+	allowListMatch := cfg.AllowListMatch
+	if allowListMatch == "" {
+		allowListMatch = AllowListMatchExact
+	}
 	r := &Remote{
-		analyzeURL:    cfg.AnalyzeURL,
-		anonymizeURL:  cfg.AnonymizeURL,
-		language:      lang,
-		minLen:        minLen,
-		anonymizers:   anonymizers,
-		strict:        cfg.Strict,
-		http:          &http.Client{Timeout: to},
-		metrics:       cfg.Metrics,
-		connectionKey: cfg.ConnectionKey,
+		analyzeURL:     cfg.AnalyzeURL,
+		anonymizeURL:   cfg.AnonymizeURL,
+		language:       lang,
+		minLen:         minLen,
+		anonymizers:    anonymizers,
+		allowList:      cfg.AllowList,
+		allowListMatch: allowListMatch,
+		strict:         cfg.Strict,
+		http:           &http.Client{Timeout: to},
+		metrics:        cfg.Metrics,
+		connectionKey:  cfg.ConnectionKey,
 	}
 	r.state.Store(&remoteState{
 		recognizers:    cfg.AdHocRecognizers,
@@ -339,6 +374,10 @@ func (r *Remote) analyzeBatch(ctx context.Context, texts []string) ([][]detected
 	}
 	if threshold := r.currentScoreThreshold(); threshold != noScoreThreshold {
 		body["score_threshold"] = threshold
+	}
+	if len(r.allowList) > 0 {
+		body["allow_list"] = r.allowList
+		body["allow_list_match"] = r.allowListMatch
 	}
 	var out [][]detectedSpan
 	if !r.postJSON(ctx, r.analyzeURL, body, &out) || len(out) != len(texts) {

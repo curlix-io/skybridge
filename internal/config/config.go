@@ -76,6 +76,16 @@ type Agent struct {
 	// SKYBRIDGE_MASK_RECOGNIZERS_FILE via LoadRecognizers (internal/config/recognizers.go). Nil
 	// disables custom recognizers (Presidio's built-in set only).
 	MaskAdHocRecognizers []any
+	// MaskAllowList is Presidio's /analyze "allow_list" (SKYBRIDGE_MASK_ALLOW_LIST, comma-separated,
+	// case preserved since entries are literal values or patterns, not entity type names) — lets an
+	// operator suppress a known-safe recurring false positive (e.g. a support line's own phone
+	// number) without disabling an entire entity type or writing a custom recognizer. Static only:
+	// unlike MaskEntities/MaskAdHocRecognizers, there is no control-plane dynamic-source equivalent
+	// for this yet. Empty disables allow-listing (Presidio's own default of none).
+	MaskAllowList []string
+	// MaskAllowListMatch is Presidio's /analyze "allow_list_match" (SKYBRIDGE_MASK_ALLOW_LIST_MATCH):
+	// "exact" (default) or "regex". Meaningless when MaskAllowList is empty.
+	MaskAllowListMatch string
 	// ConnectionRole tags this agent's masking-outcome metrics and connection-scoped recognizer
 	// lookups (SKYBRIDGE_CONNECTION_ROLE, e.g. "primary", "readonly-replica") — combined with DBType
 	// into metrics.ConnectionKey. Empty is a valid role (matches an org-wide/unscoped rule set).
@@ -245,6 +255,8 @@ func LoadAgent() Agent {
 		MaskLanguage:          env("SKYBRIDGE_MASK_LANGUAGE", "en"),
 		MaskEntities:          parseEntities(env("SKYBRIDGE_MASK_ENTITIES", "")),
 		MaskAnonymizers:       parseAnonymizers(env("SKYBRIDGE_MASK_ANONYMIZERS", "")),
+		MaskAllowList:         parseAllowList(env("SKYBRIDGE_MASK_ALLOW_LIST", "")),
+		MaskAllowListMatch:    env("SKYBRIDGE_MASK_ALLOW_LIST_MATCH", "exact"),
 		MaskMode:              strings.ToLower(env("SKYBRIDGE_MASK_MODE", ModeBestEffort)),
 		PIIOverlay:            loadPIIOverlay(),
 		PIIOverlayURL:         env("SKYBRIDGE_PII_OVERLAY_URL", ""),
@@ -695,6 +707,24 @@ func parseEntities(raw string) []string {
 	var out []string
 	for _, part := range strings.Split(raw, ",") {
 		part = strings.ToUpper(strings.TrimSpace(part))
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+// parseAllowList splits SKYBRIDGE_MASK_ALLOW_LIST on commas, trimming whitespace around each entry
+// but preserving case — unlike parseEntities, entries here are literal values or regex patterns
+// (an email address, a phone number), not entity type names, so case is meaningful.
+func parseAllowList(raw string) []string {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil
+	}
+	var out []string
+	for _, part := range strings.Split(raw, ",") {
+		part = strings.TrimSpace(part)
 		if part != "" {
 			out = append(out, part)
 		}

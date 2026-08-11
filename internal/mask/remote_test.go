@@ -276,6 +276,99 @@ func TestNewRemoteHonorsExplicitEntitiesAndAnonymizers(t *testing.T) {
 	}
 }
 
+func TestNewRemoteHonorsAllowList(t *testing.T) {
+	r := NewRemote(RemoteConfig{
+		AnalyzeURL:     "http://a",
+		AnonymizeURL:   "http://b",
+		AllowList:      []string{"support@example.com", "555-0100"},
+		AllowListMatch: AllowListMatchRegex,
+	})
+	if len(r.allowList) != 2 || r.allowList[0] != "support@example.com" || r.allowList[1] != "555-0100" {
+		t.Fatalf("expected explicit allow list to be honored, got %v", r.allowList)
+	}
+	if r.allowListMatch != AllowListMatchRegex {
+		t.Fatalf("expected explicit allow list match to be honored, got %v", r.allowListMatch)
+	}
+}
+
+func TestNewRemoteDefaultsAllowListMatchToExact(t *testing.T) {
+	r := NewRemote(RemoteConfig{AnalyzeURL: "http://a", AnonymizeURL: "http://b", AllowList: []string{"support@example.com"}})
+	if r.allowListMatch != AllowListMatchExact {
+		t.Fatalf("expected AllowListMatch to default to exact, got %v", r.allowListMatch)
+	}
+}
+
+func TestRemoteAnalyzeSendsConfiguredAllowList(t *testing.T) {
+	var gotBody map[string]any
+	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
+	}))
+	defer analyzeSrv.Close()
+
+	r := NewRemote(RemoteConfig{
+		AnalyzeURL:     analyzeSrv.URL,
+		AnonymizeURL:   analyzeSrv.URL,
+		AllowList:      []string{"support@example.com", "555-0100"},
+		AllowListMatch: AllowListMatchExact,
+	})
+	cols := []Column{{Name: "note", Text: true, FreeText: true}}
+	if _, err := r.MaskRow(context.Background(), cols, [][]byte{[]byte("some text value")}); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := gotBody["allow_list"].([]any)
+	if !ok || len(got) != 2 || got[0] != "support@example.com" || got[1] != "555-0100" {
+		t.Fatalf("expected analyze request to carry configured allow_list, got %v", gotBody["allow_list"])
+	}
+	if match, ok := gotBody["allow_list_match"].(string); !ok || match != "exact" {
+		t.Fatalf("expected analyze request to carry allow_list_match=exact, got %v", gotBody["allow_list_match"])
+	}
+}
+
+func TestRemoteAnalyzeSendsRegexAllowListMatch(t *testing.T) {
+	var gotBody map[string]any
+	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
+	}))
+	defer analyzeSrv.Close()
+
+	r := NewRemote(RemoteConfig{
+		AnalyzeURL:     analyzeSrv.URL,
+		AnonymizeURL:   analyzeSrv.URL,
+		AllowList:      []string{`\d{3}-\d{4}`},
+		AllowListMatch: AllowListMatchRegex,
+	})
+	cols := []Column{{Name: "note", Text: true, FreeText: true}}
+	if _, err := r.MaskRow(context.Background(), cols, [][]byte{[]byte("some text value")}); err != nil {
+		t.Fatal(err)
+	}
+	if match, ok := gotBody["allow_list_match"].(string); !ok || match != "regex" {
+		t.Fatalf("expected analyze request to carry allow_list_match=regex, got %v", gotBody["allow_list_match"])
+	}
+}
+
+func TestRemoteAnalyzeOmitsAllowListWhenUnset(t *testing.T) {
+	var gotBody map[string]any
+	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewDecoder(r.Body).Decode(&gotBody)
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
+	}))
+	defer analyzeSrv.Close()
+
+	r := NewRemote(RemoteConfig{AnalyzeURL: analyzeSrv.URL, AnonymizeURL: analyzeSrv.URL})
+	cols := []Column{{Name: "note", Text: true, FreeText: true}}
+	if _, err := r.MaskRow(context.Background(), cols, [][]byte{[]byte("some text value")}); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := gotBody["allow_list"]; ok {
+		t.Fatalf("expected no allow_list field when unset, got %v", gotBody["allow_list"])
+	}
+	if _, ok := gotBody["allow_list_match"]; ok {
+		t.Fatalf("expected no allow_list_match field when allow_list unset, got %v", gotBody["allow_list_match"])
+	}
+}
+
 func TestRemoteAnalyzeSendsConfiguredEntities(t *testing.T) {
 	var gotBody map[string]any
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

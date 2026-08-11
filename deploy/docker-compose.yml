@@ -1,23 +1,36 @@
-# Run the Skybridge agent next to your network egress. Raw rows are masked here, in-process, before
+# Run skybridge-edge next to your network egress. Raw rows are masked here, in-process, before
 # anything leaves the network. Point SKYBRIDGE_UPSTREAM at the target database.
 #
 #   cd skybridge/deploy
 #   SKYBRIDGE_UPSTREAM=db.internal:5432 docker compose up -d
 #   psql "postgres://user:pass@localhost:15432/appdb"
 #
-# PII masking is on by default via Microsoft Presidio (analyzer + anonymizer, below). The agent
-# calls Presidio's "analyze"/"anonymize" HTTP endpoints over the compose network; any other service
+# edge is the unified binary: it co-hosts the wire proxy (started below whenever SKYBRIDGE_UPSTREAM
+# is set — the same masking pipeline the plain skybridge-agent binary runs) and, once
+# SKYBRIDGE_EDGE_GATEWAY is also set, dials out to a Connector Gateway for AWS/k8s tool dispatch —
+# no separate agent container needed for a deployment that wants both. Leave
+# SKYBRIDGE_EDGE_GATEWAY unset to run the wire proxy alone.
+#
+# PII masking is on by default via Microsoft Presidio (analyzer + anonymizer, below). edge calls
+# Presidio's "analyze"/"anonymize" HTTP endpoints over the compose network; any other service
 # exposing that same shape also works —
 # override SKYBRIDGE_MASK_ANALYZE_URL / SKYBRIDGE_MASK_ANONYMIZE_URL to point elsewhere, or set both
 # to empty to run as a governed passthrough with no content masking.
+#
+# labeller is an optional add-on behind its own Compose profile, since it needs external services
+# this repo doesn't ship (an LLM endpoint + control-plane pii-path-labels URL) — `docker compose up
+# -d` alone still starts only edge+Presidio (3 containers). Bring it in with:
+#   docker compose --profile labeller up -d
 name: skybridge
 
 services:
-  agent:
+  edge:
     build:
       context: ..
       dockerfile: Dockerfile
-    container_name: skybridge-agent
+      args:
+        SKYBRIDGE_CMD: skybridge-edge
+    container_name: skybridge-edge
     restart: unless-stopped
     depends_on:
       presidio-analyzer:
@@ -25,6 +38,7 @@ services:
       presidio-anonymizer:
         condition: service_healthy
     environment:
+      # Wire proxy (co-hosted — internal/config's Edge.WireProxyEnabled()):
       - SKYBRIDGE_DB_TYPE=${SKYBRIDGE_DB_TYPE:-postgres}
       - SKYBRIDGE_LISTEN=:15432
       - SKYBRIDGE_UPSTREAM=${SKYBRIDGE_UPSTREAM:?set the database host:port}
@@ -58,6 +72,15 @@ services:
       - SKYBRIDGE_MASK_MODE=${SKYBRIDGE_MASK_MODE:-best-effort}
       # Column overlay (off by default): JSON map of column name -> replacement token.
       - SKYBRIDGE_PII_OVERLAY=${SKYBRIDGE_PII_OVERLAY:-}
+      # Connector Gateway call-home (optional — AWS/k8s tool dispatch, internal/edge). Leave
+      # SKYBRIDGE_EDGE_GATEWAY unset to run the wire proxy alone with no outbound gateway dial.
+      - SKYBRIDGE_EDGE_GATEWAY=${SKYBRIDGE_EDGE_GATEWAY:-}
+      - SKYBRIDGE_ORG_ID=${SKYBRIDGE_ORG_ID:-}
+      - SKYBRIDGE_EDGE_ID=${SKYBRIDGE_EDGE_ID:-}
+      - SKYBRIDGE_TOKEN=${SKYBRIDGE_TOKEN:-}
+      - SKYBRIDGE_AWS_REGION=${SKYBRIDGE_AWS_REGION:-}
+      - SKYBRIDGE_K8S_KUBECONFIG=${SKYBRIDGE_K8S_KUBECONFIG:-}
+      - SKYBRIDGE_K8S_CONTEXT=${SKYBRIDGE_K8S_CONTEXT:-}
     volumes:
       # Mounted so SKYBRIDGE_MASK_RECOGNIZERS_FILE (above) can point at it; harmless if unused.
       - ./recognizers.example.yaml:/etc/skybridge/recognizers.yaml:ro
@@ -109,3 +132,38 @@ services:
       timeout: 3s
       start_period: 30s
       retries: 3
+
+  # skybridge-labeller: periodic AI-based path-label scan job (docs/AI_PATH_LABELLING_DESIGN.md).
+  # Not part of `make build`/the default profile — only starts with
+  # `docker compose --profile labeller up -d`. Needs its own read-only DSN into the target
+  # database (SKYBRIDGE_LABELLER_DSN) plus an LLM completion endpoint; both are required and have
+  # no default, so this profile is opt-in even when explicitly requested.
+  labeller:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        SKYBRIDGE_CMD: skybridge-labeller
+    container_name: skybridge-labeller
+    restart: unless-stopped
+    profiles:
+      - labeller
+    environment:
+      # No ${VAR:?...} required-var checks here — Compose interpolates every service's environment
+      # up front regardless of active profiles, so a required var on this opt-in service would
+      # break `docker compose up` even when --profile labeller isn't passed. labeller.go's own
+      # validate() already checks these at startup and fails fast with the same env var names.
+      - SKYBRIDGE_ORG_ID=${SKYBRIDGE_ORG_ID:-}
+      - SKYBRIDGE_TOKEN=${SKYBRIDGE_TOKEN:-}
+      - SKYBRIDGE_LABELLER_DB_TYPE=${SKYBRIDGE_LABELLER_DB_TYPE:-postgres}
+      - SKYBRIDGE_LABELLER_DSN=${SKYBRIDGE_LABELLER_DSN:-}
+      - SKYBRIDGE_LABELLER_DATABASE=${SKYBRIDGE_LABELLER_DATABASE:-}
+      - SKYBRIDGE_LABELLER_TABLES=${SKYBRIDGE_LABELLER_TABLES:-}
+      - SKYBRIDGE_LABELLER_LLM_ENDPOINT=${SKYBRIDGE_LABELLER_LLM_ENDPOINT:-}
+      - SKYBRIDGE_LABELLER_LLM_API_KEY=${SKYBRIDGE_LABELLER_LLM_API_KEY:-}
+      - SKYBRIDGE_LABELLER_LLM_CATEGORIES=${SKYBRIDGE_LABELLER_LLM_CATEGORIES:-}
+      - SKYBRIDGE_LABELLER_LLM_MIN_CONFIDENCE=${SKYBRIDGE_LABELLER_LLM_MIN_CONFIDENCE:-0.5}
+      - SKYBRIDGE_LABELLER_MAX_SAMPLES=${SKYBRIDGE_LABELLER_MAX_SAMPLES:-}
+      - SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS=${SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS:-3600}
+      - SKYBRIDGE_PATH_LABEL_URL=${SKYBRIDGE_PATH_LABEL_URL:-}
+      - SKYBRIDGE_PATH_LABEL_TOKEN=${SKYBRIDGE_PATH_LABEL_TOKEN:-}
