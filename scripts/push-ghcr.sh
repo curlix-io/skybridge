@@ -12,6 +12,16 @@
 #
 # Requires: docker login ghcr.io (a GitHub PAT with write:packages, or `gh auth token | docker
 # login ghcr.io -u <user> --password-stdin`) done beforehand — this script does not log in for you.
+# Also requires a docker buildx builder that supports multi-platform output (the default
+# "docker-container" driver does; the classic "docker" driver does not) — `docker buildx create --use`
+# once if `docker buildx ls` doesn't already show one.
+#
+# Builds+pushes a single multi-arch (linux/amd64 + linux/arm64) manifest per tag via buildx, rather
+# than a plain `docker build` (which only builds for the host's own architecture). A plain build run
+# from an Apple Silicon Mac produces an arm64-only image; ECS/Fargate tasks default to linux/amd64
+# unless the task definition explicitly sets `runtimePlatform` to ARM64, so an arm64-only image
+# fails to start there with an exec format / no matching manifest error that has nothing to do with
+# the tag name or registry auth.
 #
 # Usage:
 #   VERSION=1.2.3 ./scripts/push-ghcr.sh
@@ -27,6 +37,7 @@ if [ -z "$VERSION" ]; then
 fi
 
 IMAGE="ghcr.io/curlix-io/skybridge"
+PLATFORMS="linux/amd64,linux/arm64"
 
 CMDS=(skybridge-agent skybridge-gateway skybridge-edge)
 PREFIXES=(agent gateway edge)
@@ -36,13 +47,12 @@ for i in "${!CMDS[@]}"; do
   cmd="${CMDS[$i]}"
   prefix="${PREFIXES[$i]}"
   dockerfile="${DOCKERFILES[$i]}"
-  echo "==> building ${cmd} -> ${IMAGE}:${prefix}-${VERSION} (${dockerfile})"
-  docker build \
+  echo "==> building+pushing ${cmd} -> ${IMAGE}:${prefix}-${VERSION} (${dockerfile}, ${PLATFORMS})"
+  docker buildx build \
+    --platform "${PLATFORMS}" \
     --build-arg "SKYBRIDGE_CMD=${cmd}" \
     -t "${IMAGE}:${prefix}-${VERSION}" \
     -t "${IMAGE}:${prefix}-latest" \
-    -f "${dockerfile}" .
-  echo "==> pushing ${IMAGE}:${prefix}-${VERSION}"
-  docker push "${IMAGE}:${prefix}-${VERSION}"
-  docker push "${IMAGE}:${prefix}-latest"
+    -f "${dockerfile}" \
+    --push .
 done

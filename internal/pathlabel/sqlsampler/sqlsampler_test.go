@@ -22,6 +22,22 @@ func TestSample_ReturnsNonNullValues(t *testing.T) {
 	}
 }
 
+func TestSample_SnowflakeUsesDoubleQuoteQuoting(t *testing.T) {
+	// Snowflake gets no dedicated case in New's quoting switch — it falls into the same
+	// double-quote default Postgres uses, since Snowflake's SQL dialect quotes identifiers the
+	// same way (see this package's doc comment).
+	db, fd := registerFakeDB()
+	defer db.Close()
+	fd.setResult(`SELECT "email" FROM "users" WHERE "email" IS NOT NULL LIMIT 2`, []string{"email"},
+		[][]driver.Value{{"a@b.com"}})
+
+	s := New(db, "snowflake")
+	samples, ok := s.Sample(context.Background(), "org:snowflake:appdb:users", "email", 2)
+	if !ok || len(samples) != 1 {
+		t.Fatalf("expected 1 sample via double-quoted query, got ok=%v samples=%v", ok, samples)
+	}
+}
+
 func TestSample_MySQLUsesBacktickQuoting(t *testing.T) {
 	db, fd := registerFakeDB()
 	defer db.Close()
@@ -124,6 +140,51 @@ func TestListColumns_FallsBackToQuestionMarkPlaceholders(t *testing.T) {
 	}
 	if len(cols) != 1 || cols[0] != "id" {
 		t.Fatalf("unexpected columns: %v", cols)
+	}
+}
+
+func TestListTables_UsesDollarPlaceholderFirst(t *testing.T) {
+	db, fd := registerFakeDB()
+	defer db.Close()
+	fd.setResult("SELECT table_name FROM information_schema.tables WHERE table_schema = $1",
+		[]string{"table_name"}, [][]driver.Value{{"users"}, {"orders"}})
+
+	s := New(db, "postgres")
+	tables, err := s.ListTables(context.Background(), "public")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tables) != 2 || tables[0] != "users" || tables[1] != "orders" {
+		t.Fatalf("unexpected tables: %v", tables)
+	}
+}
+
+func TestListTables_FallsBackToQuestionMarkPlaceholder(t *testing.T) {
+	db, fd := registerFakeDB()
+	defer db.Close()
+	fd.setFail("SELECT table_name FROM information_schema.tables WHERE table_schema = $1")
+	fd.setResult("SELECT table_name FROM information_schema.tables WHERE table_schema = ?",
+		[]string{"table_name"}, [][]driver.Value{{"users"}})
+
+	s := New(db, "mysql")
+	tables, err := s.ListTables(context.Background(), "appdb")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if len(tables) != 1 || tables[0] != "users" {
+		t.Fatalf("unexpected tables: %v", tables)
+	}
+}
+
+func TestListTables_PropagatesErrorWhenBothPlaceholderStylesFail(t *testing.T) {
+	db, fd := registerFakeDB()
+	defer db.Close()
+	fd.setFail("SELECT table_name FROM information_schema.tables WHERE table_schema = $1")
+	fd.setFail("SELECT table_name FROM information_schema.tables WHERE table_schema = ?")
+
+	s := New(db, "mysql")
+	if _, err := s.ListTables(context.Background(), "appdb"); err == nil {
+		t.Fatal("expected an error when both placeholder styles fail")
 	}
 }
 

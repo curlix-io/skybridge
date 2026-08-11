@@ -490,3 +490,14 @@ Kafka Streams/Flink transform) that plays the role the wire engines play today**
    (`internal/wire`, `internal/mask`, `internal/tunnel`, `internal/gateway`) would be broken by a
    Kafka client dependency if pulled into this module directly — favors a separate repo/module over
    a new build tag, unlike `querystudio`'s in-repo pattern.
+9. **Resolved**: table discovery started as an explicit `SKYBRIDGE_LABELLER_TABLES` list (the
+   simpler first cut this doc originally described) but now defaults to a live
+   `information_schema.tables` / `ListCollectionNames` crawl (`sqlsampler.ListTables`,
+   `mongosampler.ListTables`) when that list is unset, so a newly-created table/collection doesn't
+   need an operator to notice and add it. This reopened a scale question the original explicit-list
+   design never had to answer: a schema with tens of thousands of tables would otherwise fan out
+   into a proportional number of LLM `Classify` calls every cycle. `internal/labeller`'s `scheduler`
+   bounds this — `MaxObjectsPerScan` caps how many tables one cycle actually samples,
+   `RescanIntervalSeconds` skips a table scanned too recently, and least-recently-scanned tables are
+   preferred each cycle so a large schema still gets covered incrementally across many cycles
+   instead of needing one cycle to cover it all.
