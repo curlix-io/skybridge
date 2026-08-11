@@ -7,29 +7,9 @@ before:
     - go mod tidy
 
 builds:
-  - id: skybridge-agent
-    main: ./cmd/skybridge-agent
-    binary: skybridge-agent
-    env: [CGO_ENABLED=0]
-    flags: [-trimpath]
-    ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
-    goos: [linux, darwin]
-    goarch: [amd64, arm64]
-
-  - id: skybridge-gateway
-    main: ./cmd/skybridge-gateway
-    binary: skybridge-gateway
-    env: [CGO_ENABLED=0]
-    flags: [-trimpath]
-    ldflags:
-      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}}
-    goos: [linux, darwin]
-    goarch: [amd64, arm64]
-
-  - id: skybridge-edge
-    main: ./cmd/skybridge-edge
-    binary: skybridge-edge
+  - id: skybridge
+    main: ./cmd/skybridge
+    binary: skybridge
     env: [CGO_ENABLED=0]
     flags: [-trimpath]
     ldflags:
@@ -46,7 +26,7 @@ checksum:
 
 brews:
   - name: skybridge
-    ids: [skybridge-agent, skybridge-gateway, skybridge-edge]
+    ids: [skybridge]
     repository:
       owner: curlix-io
       name: skybridge
@@ -54,14 +34,12 @@ brews:
       token: "{{ .Env.GITHUB_TOKEN }}"
     directory: Formula
     homepage: "https://github.com/curlix-io/skybridge"
-    description: "Egress-only data plane for governed native database access, plus the skybridge-edge connector for Curlix."
+    description: "Egress-only data plane for governed native database access, plus the edge connector for Curlix — one binary, role picked by the first argument (agent/gateway/edge/labeller)."
     license: "Apache-2.0"
     install: |
-      bin.install "skybridge-agent"
-      bin.install "skybridge-gateway"
-      bin.install "skybridge-edge"
+      bin.install "skybridge"
     test: |
-      system "#{bin}/skybridge-agent", "--help"
+      system "#{bin}/skybridge", "--help"
 
 snapshot:
   version_template: "{{ incpatch .Version }}-next"

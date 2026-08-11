@@ -240,8 +240,8 @@ per-row table/collection identity for two of the three wire engines:
   `ObjectID` exactly as before this feature existed: `PathOverlay` treats that as "no label
   available," never as a lookup key of its own, so it's a guaranteed, safe no-op falling straight
   through to layer 3 (`Overlay`).
-- `internal/edge/dbquery`'s one-shot exec path (`internal/edge/dbquery/mask.go`, part of the
-  [`querystudio` build tag](./CLAUDE.md)) resolves `ObjectID`/`Path` for all four supported
+- `internal/edge/dbquery`'s one-shot exec path (`internal/edge/dbquery/mask.go`, always compiled
+  into `cmd/skybridge`'s `edge` role — see [CLAUDE.md](./CLAUDE.md)) resolves `ObjectID`/`Path` for all four supported
   databases regardless of wire-proxy support — `maskRows` resolves per-query table identity as
   `"{org}:{driver}:{database}:{table}"` and sets `Path == Name` for flat SQL rows; `maskDocuments`
   walks Mongo documents **nested**, not flattened first (via `docpath.Walk`), so a
@@ -371,7 +371,7 @@ value's internal structure the way `Remote` does — see layers 2 and 3 above.
 
 - `go test ./internal/mask/...` — the masking chain's own unit tests (each layer, plus
   `TestChainAppliesInOrder` for the fallthrough contract).
-- `go test ./internal/edge/dbquery/... -tags querystudio` — the path-scoped resolution tests
+- `go test ./internal/edge/dbquery/...` — the path-scoped resolution tests
   (`TestMaskDocuments_ResolvesNestedPaths`, `TestMaskDocuments_RedactsByPath`).
 - `./examples/demo/run-demo.sh up` — the same live demo behind the GIF above, for poking at with
   your own queries.

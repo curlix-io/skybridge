@@ -17,12 +17,12 @@ import (
 	"github.com/curlix-io/skybridge/internal/wiremtls"
 )
 
-func fatal(logger *slog.Logger, msg string) {
+func gatewayFatal(logger *slog.Logger, msg string) {
 	logger.Error(msg)
 	os.Exit(1)
 }
 
-func main() {
+func runGateway(args []string) {
 	cfg := config.LoadGateway()
 	logger := skylog.New(os.Stderr, "skybridge-gateway", skylog.ParseLevel(cfg.LogLevel))
 
@@ -50,7 +50,7 @@ func main() {
 
 	agentLn, err := net.Listen("tcp", cfg.AgentListen)
 	if err != nil {
-		fatal(logger, err.Error())
+		gatewayFatal(logger, err.Error())
 	}
 	if cfg.WireMtlsConfigured() {
 		serverCert, serverKey := cfg.WireMtlsServerCert, cfg.WireMtlsServerKey
@@ -58,7 +58,7 @@ func main() {
 			var genErr error
 			serverCert, serverKey, genErr = wiremtls.GenerateSelfSignedServerCert()
 			if genErr != nil {
-				fatal(logger, fmt.Sprintf("generating self-signed wire mTLS server cert: %v", genErr))
+				gatewayFatal(logger, fmt.Sprintf("generating self-signed wire mTLS server cert: %v", genErr))
 			}
 			logger.Warn("using an EPHEMERAL self-signed wire mTLS server cert " +
 				"(no SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM/_KEY_PEM). Client cert verification still authenticates " +
@@ -66,7 +66,7 @@ func main() {
 		}
 		tlsCfg, tlsErr := wiremtls.ServerConfig(serverCert, serverKey, cfg.WireMtlsCABundlePEM)
 		if tlsErr != nil {
-			fatal(logger, fmt.Sprintf("wire mTLS server config: %v", tlsErr))
+			gatewayFatal(logger, fmt.Sprintf("wire mTLS server config: %v", tlsErr))
 		}
 		agentLn = tls.NewListener(agentLn, tlsCfg)
 		logger.Info(fmt.Sprintf("agent endpoint %s (mTLS: agent client certs required)", cfg.AgentListen))
@@ -78,11 +78,11 @@ func main() {
 	for _, cl := range cfg.Clients {
 		cl := cl
 		if cl.Addr == "" || cl.Target == "" || cl.OrgID == "" {
-			fatal(logger, fmt.Sprintf("client listener missing addr/org_id/target: %+v", cl))
+			gatewayFatal(logger, fmt.Sprintf("client listener missing addr/org_id/target: %+v", cl))
 		}
 		ln, err := net.Listen("tcp", cl.Addr)
 		if err != nil {
-			fatal(logger, err.Error())
+			gatewayFatal(logger, err.Error())
 		}
 		if cfg.ClientProxyProtocol {
 			ln = gateway.WrapProxyProtocol(ln, 0)
@@ -102,7 +102,7 @@ func main() {
 	case <-ctx.Done():
 	case err := <-errs:
 		if err != nil && !errors.Is(err, net.ErrClosed) && ctx.Err() == nil {
-			fatal(logger, err.Error())
+			gatewayFatal(logger, err.Error())
 		}
 	}
 }

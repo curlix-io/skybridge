@@ -13,15 +13,15 @@ import (
 	skylog "github.com/curlix-io/skybridge/internal/log"
 )
 
-// helpText covers the SKYBRIDGE_* env vars this binary reads. See
+// labellerHelpText covers the SKYBRIDGE_* env vars this role reads. See
 // docs/AI_PATH_LABELLING_DESIGN.md for the design and internal/config/config.go's Labeller struct
 // for the exhaustive, always-up-to-date list.
-const helpText = `skybridge-labeller — periodic AI-based path-label scan job (docs/AI_PATH_LABELLING_DESIGN.md).
+const labellerHelpText = `skybridge labeller — periodic AI-based path-label scan job (docs/AI_PATH_LABELLING_DESIGN.md).
 
 Samples a bounded number of rows per configured table column, classifies each via an LLM, and
 proposes any confident result to the control plane as label.SourceProposed — it never redacts
 anything itself; a proposal only takes effect once a steward confirms it (PathOverlay's existing
-confirm gate is untouched by this binary).
+confirm gate is untouched by this role).
 
 All configuration is via SKYBRIDGE_* environment variables (no other flags):
 
@@ -47,13 +47,14 @@ All configuration is via SKYBRIDGE_* environment variables (no other flags):
 Full field-level documentation: internal/config/config.go's Labeller struct.
 `
 
-func main() {
+func runLabeller(args []string) {
+	fs := flag.NewFlagSet("labeller", flag.ExitOnError)
 	help := false
-	flag.BoolVar(&help, "help", false, "print SKYBRIDGE_* configuration options and exit")
-	flag.BoolVar(&help, "h", false, "alias for -help")
-	flag.Parse()
+	fs.BoolVar(&help, "help", false, "print SKYBRIDGE_* configuration options and exit")
+	fs.BoolVar(&help, "h", false, "alias for -help")
+	fs.Parse(args)
 	if help {
-		fmt.Print(helpText)
+		fmt.Print(labellerHelpText)
 		return
 	}
 

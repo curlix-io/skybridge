@@ -87,8 +87,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      args:
-        SKYBRIDGE_CMD: skybridge-gateway
+    command: ["gateway"]
     container_name: skybridge-tunnel-gateway
     restart: unless-stopped
     depends_on:
@@ -110,8 +109,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      args:
-        SKYBRIDGE_CMD: skybridge-agent
+    command: ["agent"]
     container_name: skybridge-tunnel-agent
     restart: unless-stopped
     depends_on:
@@ -136,8 +134,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      args:
-        SKYBRIDGE_CMD: skybridge-edge
+    command: ["edge"]
     container_name: skybridge-tunnel-edge
     restart: unless-stopped
     depends_on:
@@ -150,7 +147,7 @@ services:
     environment:
       # Edge's co-located wire proxy (config.Edge.WireProxy is a full config.Agent — see
       # internal/config/config.go) reuses the exact same SKYBRIDGE_MODE/SKYBRIDGE_GATEWAY tunnel
-      # path as the standalone agent above (cmd/skybridge-edge/main.go calls agent.RunTunnel).
+      # path as the standalone agent above (cmd/skybridge/edge.go calls agent.RunTunnel).
       - SKYBRIDGE_MODE=tunnel
       - SKYBRIDGE_GATEWAY=gateway:8010
       - SKYBRIDGE_AGENT_ID=edge-1
@@ -163,7 +160,7 @@ services:
       # Leave SKYBRIDGE_EDGE_GATEWAY unset: edge would otherwise also try to dial a Connector
       # Gateway for AWS/k8s tool dispatch, which this smoke test doesn't stand up. With it unset
       # and no AWS/k8s config, main.go's cfg.GatewayAddr=="" branch just blocks on ctx.Done() after
-      # the wire proxy starts (cmd/skybridge-edge/main.go) — the wire tunnel above is unaffected,
+      # the wire proxy starts (cmd/skybridge/edge.go) — the wire tunnel above is unaffected,
       # since it reads SKYBRIDGE_GATEWAY (WireProxy.GatewayAddr), a separate field from
       # cfg.GatewayAddr (SKYBRIDGE_EDGE_GATEWAY, defaulting to SKYBRIDGE_GATEWAY only when
       # SKYBRIDGE_EDGE_GATEWAY itself is unset — see LoadEdge in internal/config/config.go). Since
@@ -186,8 +183,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      args:
-        SKYBRIDGE_CMD: skybridge-labeller
+    command: ["labeller"]
     container_name: skybridge-tunnel-labeller
     restart: unless-stopped
     profiles:

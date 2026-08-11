@@ -3,7 +3,7 @@
 #
 #   SKYBRIDGE_PII_OVERLAY_FILE=./examples/pii-overlay.yaml \
 #   SKYBRIDGE_UPSTREAM=db.internal:5432 \
-#   go run ./cmd/skybridge-agent
+#   go run ./cmd/skybridge agent
 #
 # No Presidio, no Docker, no network calls — this layer only matches by column name (see the
 # masking pipeline in README.md for how it composes with the content-detection layer).

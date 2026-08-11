@@ -41,7 +41,7 @@ extra_pids=()
 extra_agent_count=0
 start_agent() { # env-assignments-string
   extra_agent_count=$((extra_agent_count + 1))
-  eval "$1 go run ./cmd/skybridge-agent >/tmp/skybridge-demo-extra-agent-${extra_agent_count}.log 2>&1 &"
+  eval "$1 go run ./cmd/skybridge agent >/tmp/skybridge-demo-extra-agent-${extra_agent_count}.log 2>&1 &"
   extra_pids+=("$!")
 }
 wait_ready() { # port
@@ -67,7 +67,7 @@ section "0a. Start the demo stack (Postgres + MySQL + MongoDB + Presidio + 3 Sky
 ./examples/demo/run-demo.sh up
 
 section "0b. skybridge-agent --help — see the agent's configuration options"
-go run ./cmd/skybridge-agent --help
+go run ./cmd/skybridge agent --help
 
 section "1. Postgres, raw (no agent)"
 sql localhost:15433

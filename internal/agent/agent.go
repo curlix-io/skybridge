@@ -90,7 +90,7 @@ func BuildMasker(cfg config.Agent) mask.Masker {
 // BuildMaskerWithPathLabelSync assembles the masking chain and starts its dynamic sources (the
 // flat column overlay poller and, when cfg.PathLabelURL is set, the pathlabel remotestore's
 // pull/push loops) against ctx. Use this instead of BuildMasker wherever a lifecycle ctx is
-// available — currently RunListener/RunTunnel (below) and cmd/skybridge-edge/main.go's shared
+// available — currently RunListener/RunTunnel (below) and cmd/skybridge/edge.go's shared
 // studio/dbexec masker, since dbquery's detector hook (internal/edge/dbquery/mask.go) needs the
 // store's push loop actually running for its Put calls to ever reach the control plane.
 //

@@ -28,8 +28,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      args:
-        SKYBRIDGE_CMD: skybridge-edge
+    command: ["edge"]
     container_name: skybridge-edge
     restart: unless-stopped
     depends_on:
@@ -142,8 +141,7 @@ services:
     build:
       context: ..
       dockerfile: Dockerfile
-      args:
-        SKYBRIDGE_CMD: skybridge-labeller
+    command: ["labeller"]
     container_name: skybridge-labeller
     restart: unless-stopped
     profiles:

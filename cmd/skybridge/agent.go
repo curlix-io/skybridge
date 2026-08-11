@@ -13,10 +13,10 @@ import (
 	skylog "github.com/curlix-io/skybridge/internal/log"
 )
 
-// helpText covers the SKYBRIDGE_* env vars most demo/quick-start users need. It is intentionally a
-// curated subset, not the exhaustive list — see internal/config/config.go and README.md#configure
-// for tunnel mode, TLS, credential handoff, and session-replay options.
-const helpText = `skybridge-agent — egress-only wire proxy that masks PII before it leaves the network.
+// agentHelpText covers the SKYBRIDGE_* env vars most demo/quick-start users need. It is
+// intentionally a curated subset, not the exhaustive list — see internal/config/config.go and
+// README.md#configure for tunnel mode, TLS, credential handoff, and session-replay options.
+const agentHelpText = `skybridge agent — egress-only wire proxy that masks PII before it leaves the network.
 
 All configuration is via SKYBRIDGE_* environment variables (no other flags). Common ones:
 
@@ -43,13 +43,14 @@ Exhaustive list, including tunnel mode, TLS, and credential-exchange options:
   README.md#configure
 `
 
-func main() {
+func runAgent(args []string) {
+	fs := flag.NewFlagSet("agent", flag.ExitOnError)
 	help := false
-	flag.BoolVar(&help, "help", false, "print SKYBRIDGE_* configuration options and exit")
-	flag.BoolVar(&help, "h", false, "alias for -help")
-	flag.Parse()
+	fs.BoolVar(&help, "help", false, "print SKYBRIDGE_* configuration options and exit")
+	fs.BoolVar(&help, "h", false, "alias for -help")
+	fs.Parse(args)
 	if help {
-		fmt.Print(helpText)
+		fmt.Print(agentHelpText)
 		return
 	}
 

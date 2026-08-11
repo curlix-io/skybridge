@@ -1,13 +1,13 @@
-# Real skybridge-agent (mongo mode), wired to a confirmed path-scoped label via
+# Real skybridge agent role (mongo mode), wired to a confirmed path-scoped label via
 # SKYBRIDGE_PATH_LABEL_URL — see stub_control_plane.py.
 FROM golang:1.26 AS build
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY internal ./internal
 COPY cmd ./cmd
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/skybridge-agent ./cmd/skybridge-agent
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -o /out/skybridge ./cmd/skybridge
 
 FROM gcr.io/distroless/static-debian12:nonroot
-COPY --from=build /out/skybridge-agent /usr/local/bin/skybridge-agent
+COPY --from=build /out/skybridge /usr/local/bin/skybridge
 USER nonroot:nonroot
-ENTRYPOINT ["/usr/local/bin/skybridge-agent"]
+ENTRYPOINT ["/usr/local/bin/skybridge", "agent"]

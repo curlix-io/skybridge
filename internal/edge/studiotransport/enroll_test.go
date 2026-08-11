@@ -1,5 +1,3 @@
-//go:build querystudio
-
 package studiotransport
 
 // This file exercises Client.enroll, Client.dial, and Client.Run against an in-process TLS gRPC

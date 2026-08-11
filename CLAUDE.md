@@ -6,19 +6,21 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Skybridge is a Go data plane for **governed native database access**. An egress-only agent sits in
 front of a database, speaks the native wire protocols (Postgres, MySQL, MongoDB), and masks PII in
-result rows before they leave the network. `skybridge-edge` is the broader "single install" binary:
-it also dials home to a Connector Gateway for AWS/k8s tool dispatch — AWS CLI calls are restricted to
-a read-only allowlist, kubectl calls are policy-gated (interactive verbs and cluster-wide deletes
-blocked, scoped mutations like `apply`/`patch`/a single-resource `delete` allowed) — and can co-host
-the wire proxy in the same process.
+result rows before they leave the network. It ships as a single binary, `cmd/skybridge`, with the
+role picked by the first argument at run time — `skybridge agent`, `skybridge gateway`, `skybridge
+edge`, or `skybridge labeller` — rather than as separate per-role binaries. The `edge` role is the
+broader "single install" role: it also dials home to a Connector Gateway for AWS/k8s tool dispatch —
+AWS CLI calls are restricted to a read-only allowlist, kubectl calls are policy-gated (interactive
+verbs and cluster-wide deletes blocked, scoped mutations like `apply`/`patch`/a single-resource
+`delete` allowed) — and can co-host the wire proxy in the same process.
 
 Skybridge is a standalone Go module, independently open-sourced by Curlix, with no required
 dependency on any specific control plane or SaaS backend — clone it, `go build`, and run it against
-your own database. The default build has zero optional-integration code compiled in. An optional
-Query Studio dispatch add-on lives behind the `querystudio` Go build tag — see
-[Optional `querystudio` build tag](#optional-querystudio-build-tag) below — for anyone who wants to
-wire skybridge-edge up to a query-execution dispatch backend of their own; it is not required to use
-any part of the core wire proxy, masking pipeline, or tunnel/gateway relay.
+your own database. Query Studio dispatch (`internal/edge/dbexec`, `internal/edge/dbquery`,
+`internal/edge/studiotransport`) is always compiled into the binary and simply stays dormant unless
+`SKYBRIDGE_STUDIO_GATEWAY` is set at runtime — it is not required to use any part of the core wire
+proxy, masking pipeline, or tunnel/gateway relay, but it is not excludable from the build either
+(a deliberate trade-off of collapsing to one binary/image; see the Layout table below).
 
 ---
 
@@ -38,42 +40,35 @@ exercise the `Remote` content-detection masking layer end to end — see
 ## Commands
 
 ```sh
-make build             # build all three binaries into bin/
-make agent             # build cmd/skybridge-agent only
-make gateway           # build cmd/skybridge-gateway only
-make edge              # build cmd/skybridge-edge only (default: no Query Studio extras)
-make edge-querystudio  # build cmd/skybridge-edge with Query Studio dispatch (-tags querystudio)
-make labeller          # build cmd/skybridge-labeller only (opt-in, not part of `make build`)
-make test              # go test ./...
-make test-querystudio  # go test -tags querystudio ./... (covers dbexec/dbquery/studiotransport)
-make race              # go test -race ./...
-make race-querystudio  # go test -race -tags querystudio ./...
-make vet               # go vet ./...
-make vet-querystudio   # go vet -tags querystudio ./...
-make fmt               # go fmt ./...
-make lint              # gofmt -l . check (what CI runs; fails on unformatted files)
-make tidy              # go mod tidy
-make gen               # regenerate gRPC stubs in internal/genpb (needs buf + protoc-gen-go[-grpc])
+make build   # build the single binary into bin/skybridge (all roles: agent/gateway/edge/labeller)
+make test    # go test ./...
+make race    # go test -race ./...
+make vet     # go vet ./...
+make fmt     # go fmt ./...
+make lint    # gofmt -l . check (what CI runs; fails on unformatted files)
+make tidy    # go mod tidy
+make gen     # regenerate gRPC stubs in internal/genpb (needs buf + protoc-gen-go[-grpc])
 ```
+
+Run with a role as the first argument, e.g. `bin/skybridge agent` or `go run ./cmd/skybridge edge`.
 
 Run a single test:
 
 ```sh
 go test ./internal/mask/... -run TestRemoteMasker_MaskRow
 go test ./internal/wire/mysql/... -run TestAuth -v
-go test -tags querystudio ./internal/edge/dbquery/... -run TestMaskRows -v
+go test ./internal/edge/dbquery/... -run TestMaskRows -v
 ```
 
-**Run before pushing:** `make lint && make vet && go test -race ./...` — and the querystudio legs
-(`make vet-querystudio && go test -race -tags querystudio ./...`) if you touched anything under a
-`querystudio`-gated package (see the layout table below) or `internal/certstore`. CI (`.github/workflows/ci.yml`)
-runs exactly these two legs; there's no local `make verify` alias for the combination, so run them
-by hand.
+**Run before pushing:** `make lint && make vet && go test -race ./...`. CI (`.github/workflows/ci.yml`)
+runs exactly this — `gofmt -l .`, `go vet ./...`, `make build`, `go test -race ./...` — there's no
+separate leg to run by hand.
 
 The wire-proxy core (`internal/wire`, `internal/mask`, `internal/tunnel`, `internal/gateway`) is
-**stdlib-only by design** — no third-party deps — so it builds and runs offline. The edge binary
-additionally pulls in gRPC + aws-sdk-go-v2 and k8s client libs, but generated stubs are committed
-under `internal/genpb` so `go build` still works without network access once modules are cached.
+**stdlib-only by design** — no third-party deps — so it builds and runs offline. The single binary
+additionally pulls in gRPC + aws-sdk-go-v2 and k8s client libs (needed by the `edge` role), but
+generated stubs are committed under `internal/genpb` so `go build` still works without network
+access once modules are cached.
 
 ---
 
@@ -83,24 +78,25 @@ Three deployment shapes, one masking guarantee: the customer side is always **eg
 dials out; nothing dials in), and PII masking always happens in the agent process before bytes leave
 the network.
 
-- **Listener** — native clients connect straight to `skybridge-agent`.
-- **Tunnel** — `skybridge-agent` dials out to `skybridge-gateway`; clients connect to the gateway,
+- **Listener** — native clients connect straight to the `agent` role.
+- **Tunnel** — the `agent` role dials out to the `gateway` role; clients connect to the gateway,
   which relays already-masked bytes over the tunnel (`internal/tunnel` — a length-prefixed framed
   transport documented in `CONTRACT.md`).
-- **Edge** — `skybridge-edge` dials out to a Connector Gateway (and optionally, with the
-  `querystudio` build tag, a Query Studio gateway) and executes dispatched AWS/k8s tool calls
-  locally, gated by the policies in `internal/edge/policy.go` and `internal/edge/k8sexec/policy.go`
-  (see the Layout table below for exactly what each allows); it can also co-host the wire proxy in
-  the same process. This is the single binary most customers install.
+- **Edge** — the `edge` role dials out to a Connector Gateway (and, if `SKYBRIDGE_STUDIO_GATEWAY`
+  is set, a Query Studio gateway too — always compiled in, see [What this is](#what-this-is)) and
+  executes dispatched AWS/k8s tool calls locally, gated by the policies in
+  `internal/edge/policy.go` and `internal/edge/k8sexec/policy.go` (see the Layout table below for
+  exactly what each allows); it can also co-host the wire proxy in the same process. This is the
+  role most customers run.
 
 ### Layout
 
 ```
-cmd/skybridge-agent      egress agent: listener OR tunnel mode
-cmd/skybridge-gateway    relay gateway: agent endpoint + client listeners
-cmd/skybridge-edge       unified edge: call-home transport(s) + AWS/k8s tool exec + optional wire proxy
-cmd/skybridge-labeller   periodic AI-based path-label scan job (see docs/AI_PATH_LABELLING_DESIGN.md);
-                         opt-in, not part of `make build` — build/run it explicitly via `make labeller`
+cmd/skybridge            single binary; role picked by the first argument at run time —
+                         agent (listener OR tunnel mode) | gateway (agent endpoint + client
+                         listeners) | edge (call-home transport(s) + AWS/k8s tool exec + optional
+                         wire proxy) | labeller (periodic AI-based path-label scan job, see
+                         docs/AI_PATH_LABELLING_DESIGN.md)
 internal/wire            wire engines: postgres, mysql, mongo, k8sapi — manual protocol parsing
 internal/mask            masking pipeline: remote (Presidio) masker + path overlay + column overlay;
                          Column.TypeKind lets PathOverlay redact a confirmed label on a typed
@@ -113,11 +109,11 @@ internal/pathlabel/aiclassifier  AI-based path labeller: Classifier/Scanner inte
                          LLM-API-backed implementation, proposing SourceProposed labels independent
                          of live query traffic — see docs/AI_PATH_LABELLING_DESIGN.md
 internal/pathlabel/sqlsampler    database/sql-based aiclassifier.Sampler for Postgres/MySQL/Snowflake,
-                         used by cmd/skybridge-labeller
+                         used by the labeller role
 internal/pathlabel/mongosampler  mongo-driver-based aiclassifier.Sampler for MongoDB — discovers
                          fields by sampling documents and walking them with docpath (no fixed schema
-                         to query), also used by cmd/skybridge-labeller
-internal/labeller        cmd/skybridge-labeller's run loop: validates config, wires
+                         to query), also used by the labeller role
+internal/labeller        the labeller role's run loop: validates config, wires
                          aiclassifier.Scanner + sqlsampler.Sampler + remotestore.Store together
 internal/tunnel          egress multiplexed transport (agent <-> gateway)
 internal/gateway         agent registry + relay + optional control-plane session recording
@@ -128,16 +124,16 @@ internal/edge/k8sexec    policy-gated kubectl tool implementation — allowlists
                          other verb, including apply/patch/create/delete/scale/label/cordon/drain
                          and the always-blocked interactive verbs (exec/attach/cp/port-forward), is
                          rejected before exec.CommandContext runs it
-internal/edge/dbexec     [querystudio tag] db_query_{postgres,mysql,mongo,snowflake} one-shot
-                         read-only exec tools (EnforceReadOnly:true, never overridden) plus
-                         db_execute_write, a distinct write-capable tool gated by Curlix's own
-                         allow/deny decision made before dispatch, not by any local keyword/statement
-                         classification here — see dbquery.Options.Write's doc comment
-internal/edge/dbquery    [querystudio tag] shared SQL/Mongo execute + PII masking for dbexec/studiotransport;
+internal/edge/dbexec     db_query_{postgres,mysql,mongo,snowflake} one-shot read-only exec tools
+                         (EnforceReadOnly:true, never overridden) plus db_execute_write, a distinct
+                         write-capable tool gated by Curlix's own allow/deny decision made before
+                         dispatch, not by any local keyword/statement classification here — see
+                         dbquery.Options.Write's doc comment
+internal/edge/dbquery    shared SQL/Mongo execute + PII masking for dbexec/studiotransport;
                          Options.Write routes to a separate ExecContext/CRUD write path (write.go),
                          mutually exclusive with EnforceReadOnly
 internal/edge/transport  egress-only gRPC call-home client to the Connector Gateway
-internal/edge/studiotransport  [querystudio tag] second egress-only gRPC dial to a Query Studio gateway
+internal/edge/studiotransport  second egress-only gRPC dial to a Query Studio gateway
 internal/edgeiam         edge enrollment / IAM helpers
 internal/certstore       persists issued mTLS identity (local disk, optionally mirrored to AWS
                           Secrets Manager) so redeployed tasks skip re-enrollment
@@ -210,10 +206,12 @@ set, periodic push, flush-on-shutdown.
   `internal/mask/metrics` (push masking-outcome counts). None of these block a live database
   session; a sync failure just leaves the last-known state in place.
 
-### Optional `querystudio` build tag
+### Query Studio dispatch (always compiled in)
 
-Query Studio dispatch is an optional add-on behind `//go:build querystudio`, excluded from the
-default build/test/vet so the module has no required dependency on it:
+Query Studio dispatch used to live behind an opt-out `querystudio` Go build tag; that tag is gone —
+collapsing to a single binary/image (see [What this is](#what-this-is)) meant there was no longer a
+build-time axis to gate it on. It is now unconditionally part of `cmd/skybridge`'s `edge` role and
+simply stays dormant unless `SKYBRIDGE_STUDIO_GATEWAY` is set:
 
 - `internal/edge/studiotransport/` — second outbound dial to a Studio Gateway (`:7200`) for Query
   Studio dispatch.
@@ -226,30 +224,22 @@ default build/test/vet so the module has no required dependency on it:
   inspecting the statement — the read-only `db_query_*` tools' `EnforceReadOnly: true` is untouched
   and permanent regardless of this tool's existence.
 - `internal/genpb/curlix/studiogateway/v1/` — generated gRPC stubs for the Studio Gateway protocol.
-- `cmd/skybridge-edge/main_querystudio.go` (built with the tag) vs. `main_noquerystudio.go` (the
-  default, no-op stub) implement `registerQueryStudioExtras`, the one hook `main.go` calls into.
+- `cmd/skybridge/edge.go`'s `registerQueryStudio` wires these up unconditionally as part of `runEdge`.
 
 Database support at a glance — which databases get a transparent wire-proxy engine (native client,
-no query rewriting) vs. one-shot exec-only support (behind the `querystudio` tag):
+no query rewriting) vs. one-shot exec-only support via `dbquery`/`dbexec`:
 
-| Database  | Wire protocol      | `internal/wire` engine | `dbquery`/`dbexec` (querystudio) | Notes |
+| Database  | Wire protocol      | `internal/wire` engine | `dbquery`/`dbexec` | Notes |
 |-----------|---------------------|:-----------------------:|:---------------------------------:|-------|
 | Postgres  | native TCP          | ✅ `internal/wire/postgres` | ✅ | Resolves real per-row table/path identity for `PathOverlay` via a dedicated `pg_class` lookup connection, when `SKYBRIDGE_POSTGRES_CATALOG_DSN` is set (falls back to layer-3-only otherwise — no name on the wire itself, only a numeric OID). |
 | MySQL     | native TCP          | ✅ `internal/wire/mysql`    | ✅ | Resolves real per-row table/path identity for `PathOverlay` from column-definition packets. |
 | MongoDB   | native TCP (BSON)   | ✅ `internal/wire/mongo`    | ✅ | Resolves real per-reply collection/path identity for `PathOverlay` by correlating each request with its reply. |
-| Snowflake | HTTPS/REST          | ❌ (no wire protocol to proxy) | ✅ (`querystudio` only) | `database/sql` + `gosnowflake`; one-shot exec is the whole integration, not a placeholder for a future wire engine. |
-
-Build/test with `make edge-querystudio` / `make test-querystudio` / `make vet-querystudio` (or
-`-tags querystudio` directly). CI runs both the default and `-tags querystudio` legs
-(`.github/workflows/ci.yml`'s `build-test` and `build-test-querystudio` jobs) so this surface stays
-covered — a package added under the tag is silently unbuilt/unvetted/untested by the default job
-alone, so any new `querystudio`-gated code must be exercised by that second job, not just built
-locally with the tag.
+| Snowflake | HTTPS/REST          | ❌ (no wire protocol to proxy) | ✅ | `database/sql` + `gosnowflake`; one-shot exec is the whole integration, not a placeholder for a future wire engine. |
 
 `internal/certstore/` (cross-redeploy mTLS identity persistence to AWS Secrets Manager via
 `SKYBRIDGE_IDENTITY_SECRET_ARN` / `SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN` /
 `SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN`) is generic infrastructure — used by both the core
-wire-mTLS enrollment path and the edge transport — and is **not** behind the build tag.
+wire-mTLS enrollment path and the edge transport.
 
 ---
 
@@ -281,8 +271,8 @@ already-live layers without altering either one's behavior.
 
 ### Logging
 - Log output must support a configurable debug level (not just info/error) so a customer running
-  their own `skybridge-agent`/`skybridge-gateway`/`skybridge-edge` binary can turn up verbosity to
-  troubleshoot a live issue without a code change or rebuild.
+  their own `skybridge` binary (any role — `agent`/`gateway`/`edge`/`labeller`) can turn up
+  verbosity to troubleshoot a live issue without a code change or rebuild.
 - Customer-facing log lines must stay generic and skybridge-branded — never mention "Curlix" or any
   Curlix-specific SaaS/product terminology. Skybridge is a standalone, independently open-sourced
   module (see [What this is](#what-this-is)); a customer who clones and runs it against their own
@@ -317,8 +307,8 @@ falls back to verbatim passthrough (logged at startup, not silent).
 ## Testing contracts
 
 ### What to run
-- **Unit tests** — `go test ./...` (default build) and, if you touched a `querystudio`-gated
-  package or `internal/certstore`, `go test -tags querystudio ./...`. Most packages have no
+- **Unit tests** — `go test ./...` covers the whole module, including `internal/edge/{dbexec,dbquery,studiotransport}`
+  and `internal/certstore` (no build tag gates them anymore). Most packages have no
   external-service dependency; a handful (`internal/edge/transport`, `internal/wiremtls`,
   `internal/gateway`) spin up an in-process TLS listener or hermetic HTTP test server rather than
   reaching a real network service — keep new tests hermetic the same way rather than reaching for
@@ -326,9 +316,8 @@ falls back to verbatim passthrough (logged at startup, not silent).
 - **Race detector** — `go test -race ./...` before pushing anything touching `internal/tunnel`,
   `internal/gateway`, or the sync loops in `internal/agent`/`internal/mask/metrics`/
   `internal/pathlabel/remotestore` — all of these run background goroutines against shared state.
-- **CI** mirrors this exactly: `.github/workflows/ci.yml` runs `gofmt -l .`, `go vet`, `make build`,
-  and `go test -race -coverprofile=... ./...` on the default build, then the same three steps again
-  with `-tags querystudio`.
+- **CI** mirrors this exactly: `.github/workflows/ci.yml` runs `gofmt -l .`, `go vet ./...`,
+  `make build`, and `go test -race -coverprofile=... ./...` — one job, no separate build-tag leg.
 
 ### Test naming
 `Test<Subject>_<Condition>`, e.g. `TestRemoteMasker_MaskRow`, `TestChainAppliesInOrder`,
@@ -363,8 +352,8 @@ it rather than inventing a new config shape for the next one.
 
 ## Docs stay in sync
 
-Any change to a wire/HTTP contract, an `SKYBRIDGE_*` env var, the masking chain's layer order, or the
-`querystudio` build-tag surface must update every doc that describes it in the same PR — a stale doc
+Any change to a wire/HTTP contract, an `SKYBRIDGE_*` env var, the masking chain's layer order, or a
+role's wiring in `cmd/skybridge` must update every doc that describes it in the same PR — a stale doc
 here is actively misleading since this repo (unlike a typical monorepo) *is* the external-facing
 documentation for anyone standing Skybridge up against their own database:
 
@@ -373,7 +362,7 @@ documentation for anyone standing Skybridge up against their own database:
 | Tunnel frame format, control message, or either HTTP contract body | `CONTRACT.md` |
 | New/changed `SKYBRIDGE_*` env var | `internal/config/config.go` doc comment + README's Configure table |
 | Masking chain layer order, fallthrough behavior, or what's live vs. groundwork | `REDACTION.md` + README's "How masking works" section |
-| `querystudio`-gated package added/moved | This file's Layout table + `.github/workflows/ci.yml` if a new CI leg is needed |
+| A role added/moved/renamed under `cmd/skybridge` | This file's Layout table + `.github/workflows/ci.yml`/`ghcr-publish.yml`/`.goreleaser.yaml` if the build/release surface changed |
 | Anything demoed in `examples/demo/` | Re-record `redaction-demo.gif`/`.cast` if the actual output changed (see `REDACTION.md`'s "See it work" section for the capture recipe) |
 
 ---
@@ -387,7 +376,7 @@ documentation for anyone standing Skybridge up against their own database:
 | Wire/HTTP contract reference | `CONTRACT.md` |
 | Quick start, all `SKYBRIDGE_*` vars, edge binary details | `README.md` |
 | Full env var list with defaults/behavior | `internal/config/config.go` |
-| CI pipeline (both build legs) | `.github/workflows/ci.yml` |
+| CI pipeline | `.github/workflows/ci.yml` |
 | Local Presidio + agent demo stack | `deploy/docker-compose.yml`, `examples/demo/run-demo.sh` |
 | TUNNEL deployment shape smoke test + exposing it externally | `deploy/docker-compose.tunnel.yml`, `deploy/TUNNEL_TESTING.md` |
 
