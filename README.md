@@ -691,6 +691,8 @@ on every subsequent start.
 
 - [`CONTRACT.md`](./CONTRACT.md) — the tunnel wire format and the gateway → control-plane HTTP
   session contract.
+- [`deploy/TUNNEL_TESTING.md`](./deploy/TUNNEL_TESTING.md) — standing up the TUNNEL deployment
+  shape locally and exposing it via ngrok for an external tester.
 - All `SKYBRIDGE_*` settings are documented inline in `internal/config/config.go`.
 
 ## License

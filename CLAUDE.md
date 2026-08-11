@@ -373,6 +373,7 @@ documentation for anyone standing Skybridge up against their own database:
 | Full env var list with defaults/behavior | `internal/config/config.go` |
 | CI pipeline (both build legs) | `.github/workflows/ci.yml` |
 | Local Presidio + agent demo stack | `deploy/docker-compose.yml`, `examples/demo/run-demo.sh` |
+| TUNNEL deployment shape smoke test + exposing it externally | `deploy/docker-compose.tunnel.yml`, `deploy/TUNNEL_TESTING.md` |
 
 ---
 
