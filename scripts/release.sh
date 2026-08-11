@@ -1,14 +1,24 @@
 #!/usr/bin/env bash
-# Cuts a new tagged release: creates+pushes a vX.Y.Z tag, which is the single trigger that fans out
-# to the two tag-driven GitHub Actions workflows already in this repo:
-#   .github/workflows/release.yml      goreleaser -> GitHub release + binary archives (+ brew tap)
-#   .github/workflows/ghcr-publish.yml docker build+push -> ghcr.io/curlix-io/skybridge (agent/
-#                                       gateway/edge tags, multi-arch)
-# This script does not build or push anything itself (no local docker/goreleaser dependency) — it
-# only creates the tag and waits for/reports on the two workflow runs so a normal cut doesn't require
-# tailing the Actions UI by hand. For an untagged, ad hoc image push, use scripts/push-ghcr.sh instead.
+# Cuts a new release entirely locally — no dependency on GitHub Actions:
+#   1. creates+pushes a vX.Y.Z git tag
+#   2. creates the GitHub release for that tag via `gh release create`
+#   3. builds+pushes the three skybridge docker images to ghcr.io/curlix-io/skybridge (multi-arch,
+#      via buildx), same layout as scripts/push-ghcr.sh:
+#        ghcr.io/curlix-io/skybridge:agent-<version>   (+ :agent-latest)
+#        ghcr.io/curlix-io/skybridge:gateway-<version> (+ :gateway-latest)
+#        ghcr.io/curlix-io/skybridge:edge-<version>    (+ :edge-latest, + bare :latest)
 #
-# Requires: gh CLI authenticated (`gh auth status`), push access to origin.
+# This does NOT run .github/workflows/release.yml or ghcr-publish.yml — if those are enabled on
+# this repo they'll also fire on the tag push and do the same work again; disable/ignore them or
+# use this script instead of relying on them. For an ad hoc image push with no tag/release at all,
+# use scripts/push-ghcr.sh instead.
+#
+# Requires:
+#   - gh CLI authenticated (`gh auth login`), push access to origin
+#   - docker login ghcr.io done beforehand (a GitHub PAT with write:packages, or
+#     `gh auth token | docker login ghcr.io -u <user> --password-stdin`)
+#   - a docker buildx builder that supports multi-platform output (`docker buildx create --use`
+#     once if `docker buildx ls` doesn't already show one)
 #
 # Usage:
 #   VERSION=1.2.3 ./scripts/release.sh
@@ -56,25 +66,41 @@ REPO="${REPO%.git}"
 echo "==> tagging ${TAG} on $(git rev-parse --short HEAD)"
 git tag -a "$TAG" -m "Release ${TAG}"
 
-echo "==> pushing ${TAG} to origin (triggers release.yml + ghcr-publish.yml on ${REPO})"
+echo "==> pushing ${TAG} to origin"
 git push origin "$TAG"
 
-echo "==> waiting for GitHub Actions to pick up the tag..."
-sleep 8
+echo "==> creating GitHub release ${TAG} on ${REPO}"
+gh release create "$TAG" \
+  --repo "$REPO" \
+  --title "$TAG" \
+  --generate-notes
 
-for workflow in release.yml ghcr-publish.yml; do
-  echo "==> ${workflow} run for ${TAG}:"
-  run_id="$(gh run list --repo "$REPO" --workflow "$workflow" --event push --limit 5 \
-    --json databaseId,headBranch,status,conclusion \
-    --jq "[.[] | select(.headBranch == \"${TAG}\")][0].databaseId" || true)"
-  if [ -z "${run_id:-}" ] || [ "$run_id" = "null" ]; then
-    echo "    no run found yet — check: gh run list --repo ${REPO} --workflow ${workflow}"
-    continue
+IMAGE="ghcr.io/curlix-io/skybridge"
+PLATFORMS="linux/amd64,linux/arm64"
+
+CMDS=(skybridge-agent skybridge-gateway skybridge-edge)
+PREFIXES=(agent gateway edge)
+DOCKERFILES=(Dockerfile Dockerfile Dockerfile.edge)
+
+for i in "${!CMDS[@]}"; do
+  cmd="${CMDS[$i]}"
+  prefix="${PREFIXES[$i]}"
+  dockerfile="${DOCKERFILES[$i]}"
+  tag_args=(-t "${IMAGE}:${prefix}-${VERSION}" -t "${IMAGE}:${prefix}-latest")
+  # skybridge-edge is the single-install binary most customers use (see CLAUDE.md), so it also
+  # gets the bare :latest alias on top of its edge-latest tag.
+  if [ "${prefix}" = "edge" ]; then
+    tag_args+=(-t "${IMAGE}:latest")
   fi
-  echo "    run ${run_id} — streaming status (ctrl-c to stop watching, the release continues)"
-  gh run watch "$run_id" --repo "$REPO" --exit-status || \
-    echo "    ${workflow} run ${run_id} did not succeed — check: gh run view ${run_id} --repo ${REPO} --log-failed"
+  echo "==> building+pushing ${cmd} -> ${IMAGE}:${prefix}-${VERSION} (${dockerfile}, ${PLATFORMS})"
+  docker buildx build \
+    --platform "${PLATFORMS}" \
+    --build-arg "SKYBRIDGE_CMD=${cmd}" \
+    "${tag_args[@]}" \
+    -f "${dockerfile}" \
+    --push .
 done
 
-echo "==> done. GitHub release: https://github.com/${REPO}/releases/tag/${TAG}"
-echo "==> GHCR images: https://github.com/curlix-io/skybridge/pkgs/container/skybridge (agent-${VERSION}, gateway-${VERSION}, edge-${VERSION}, latest)"
+echo "==> done."
+echo "    GitHub release: https://github.com/${REPO}/releases/tag/${TAG}"
+echo "    GHCR images:    https://github.com/curlix-io/skybridge/pkgs/container/skybridge (agent-${VERSION}, gateway-${VERSION}, edge-${VERSION}, latest)"
