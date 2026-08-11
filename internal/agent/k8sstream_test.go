@@ -3,7 +3,7 @@ package agent
 import (
 	"bytes"
 	"context"
-	"log"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -35,7 +35,7 @@ func TestServeK8sStreamMissingClientTLS(t *testing.T) {
 	defer cleanup()
 
 	var buf bytes.Buffer
-	serveK8sStream(context.Background(), st, tunnel.OpenMeta{Target: "cluster", Addr: "x:6443"}, config.Agent{}, log.New(&buf, "", 0))
+	serveK8sStream(context.Background(), st, tunnel.OpenMeta{Target: "cluster", Addr: "x:6443"}, config.Agent{}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM")) {
 		t.Fatalf("expected a missing-client-TLS warning, got %q", buf.String())
 	}
@@ -51,7 +51,7 @@ func TestServeK8sStreamMissingResolver(t *testing.T) {
 	}
 	var buf bytes.Buffer
 	cfg := config.Agent{K8sClientTLSCertPEM: certPEM, K8sClientTLSKeyPEM: keyPEM}
-	serveK8sStream(context.Background(), st, tunnel.OpenMeta{Target: "cluster", Addr: "x:6443"}, cfg, log.New(&buf, "", 0))
+	serveK8sStream(context.Background(), st, tunnel.OpenMeta{Target: "cluster", Addr: "x:6443"}, cfg, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("SKYBRIDGE_K8S_CREDENTIAL_EXCHANGE_URL")) {
 		t.Fatalf("expected a missing-resolver warning, got %q", buf.String())
 	}
@@ -75,7 +75,7 @@ func TestServeK8sStreamBadClientCertKey(t *testing.T) {
 		K8sClientTLSKeyPEM:       keyPEM2, // mismatched key
 		K8sCredentialExchangeURL: "http://127.0.0.1:0",
 	}
-	serveK8sStream(context.Background(), st, tunnel.OpenMeta{Target: "cluster", Addr: "x:6443"}, cfg, log.New(&buf, "", 0))
+	serveK8sStream(context.Background(), st, tunnel.OpenMeta{Target: "cluster", Addr: "x:6443"}, cfg, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("client TLS cert/key")) {
 		t.Fatalf("expected a cert/key error, got %q", buf.String())
 	}
@@ -125,7 +125,7 @@ func TestServeK8sStreamProxyInjectFailsFastOnClosedClient(t *testing.T) {
 		K8sClientTLSKeyPEM:       keyPEM,
 		K8sCredentialExchangeURL: "http://127.0.0.1:0",
 	}
-	serveK8sStream(context.Background(), st, tunnel.OpenMeta{Target: "cluster", Addr: upstreamLn.Addr().String()}, cfg, log.New(&buf, "", 0))
+	serveK8sStream(context.Background(), st, tunnel.OpenMeta{Target: "cluster", Addr: upstreamLn.Addr().String()}, cfg, slog.New(slog.NewTextHandler(&buf, nil)))
 	serverSess.Close()
 	if !bytes.Contains(buf.Bytes(), []byte("kubernetes proxy session ended")) {
 		t.Fatalf("expected a proxy-session-ended log, got %q", buf.String())
@@ -149,7 +149,7 @@ func TestServeK8sStreamDialFailure(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	// Port 0 on an unreachable-ish loopback address dials fast-fail (connection refused).
-	serveK8sStream(ctx, st, tunnel.OpenMeta{Target: "cluster", Addr: "127.0.0.1:1"}, cfg, log.New(&buf, "", 0))
+	serveK8sStream(ctx, st, tunnel.OpenMeta{Target: "cluster", Addr: "127.0.0.1:1"}, cfg, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("dial kubernetes API server")) {
 		t.Fatalf("expected a dial-failure log, got %q", buf.String())
 	}

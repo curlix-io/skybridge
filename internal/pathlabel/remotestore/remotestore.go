@@ -12,7 +12,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -84,7 +84,7 @@ type Store struct {
 	cache   map[cacheKey]label.Label // confirmed labels only (manual/platform)
 	pending map[pendingKey]label.Label
 
-	logger *log.Logger
+	logger *slog.Logger
 }
 
 type cacheKey struct {
@@ -111,9 +111,9 @@ func objectParts(objectID string) (driver, database, object string, ok bool) {
 
 // New returns a Store configured from cfg. cfg.PathLabelURL must be set; callers should check that
 // before constructing (mirrors newOverlaySource's caller-checks-first convention).
-func New(cfg config.Agent, logger *log.Logger) *Store {
+func New(cfg config.Agent, logger *slog.Logger) *Store {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	poll := time.Duration(cfg.PathLabelPollSeconds) * time.Second
 	if poll < minPollSeconds*time.Second {
@@ -170,7 +170,7 @@ func (s *Store) Put(_ context.Context, l label.Label) error {
 		return fmt.Errorf("remotestore: ObjectID and FieldPath are required")
 	}
 	if l.Source != label.SourceProposed {
-		s.logger.Printf("remotestore: Put ignoring non-proposed label source=%q object=%q path=%q", l.Source, l.ObjectID, l.FieldPath)
+		s.logger.Warn(fmt.Sprintf("Put ignoring non-proposed label source=%q object=%q path=%q", l.Source, l.ObjectID, l.FieldPath))
 		return nil
 	}
 	if l.MatchMode == "" {
@@ -266,7 +266,7 @@ func (s *Store) refreshPull(ctx context.Context) {
 		}
 		labels, err := s.pull(ctx, driver, db, obj)
 		if err != nil {
-			s.logger.Printf("remotestore: pull failed object=%q: %v", objectID, err)
+			s.logger.Warn(fmt.Sprintf("pull failed object=%q: %v", objectID, err))
 			continue
 		}
 		s.replaceCacheForObject(objectID, labels)
@@ -372,7 +372,7 @@ func (s *Store) replaceCacheForObject(objectID string, labels []label.Label) {
 	for _, l := range labels {
 		s.cache[cacheKey{objectID: l.ObjectID, fieldPath: l.FieldPath}] = l
 	}
-	s.logger.Printf("remotestore: pii-path-labels synced object=%q (%d confirmed labels)", objectID, len(labels))
+	s.logger.Debug(fmt.Sprintf("pii-path-labels synced object=%q (%d confirmed labels)", objectID, len(labels)))
 }
 
 // flushPush POSTs the current pending batch, grouped by object, to the control plane. On failure
@@ -385,7 +385,7 @@ func (s *Store) flushPush(ctx context.Context) {
 			continue
 		}
 		if err := s.push(ctx, driver, db, obj, items); err != nil {
-			s.logger.Printf("remotestore: push failed object=%q: %v (%d labels retained for next flush)", objectID, err, len(items))
+			s.logger.Warn(fmt.Sprintf("push failed object=%q: %v (%d labels retained for next flush)", objectID, err, len(items)))
 			s.restorePending(objectID, items)
 			continue
 		}

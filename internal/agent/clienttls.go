@@ -9,7 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
-	"log"
+	"log/slog"
 	"math/big"
 	"time"
 
@@ -23,9 +23,9 @@ import (
 // buildClientTLSConfig assembles the TLS config used to terminate native-client TLS. It returns
 // (nil, nil) when client TLS is not configured (the proxy then declines SSL, as before). A provided
 // cert+key wins; otherwise SKYBRIDGE_CLIENT_TLS_SELF_SIGNED generates an ephemeral cert for dev.
-func buildClientTLSConfig(cfg config.Agent, logger *log.Logger) (*tls.Config, error) {
+func buildClientTLSConfig(cfg config.Agent, logger *slog.Logger) (*tls.Config, error) {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if len(cfg.ClientTLSCertPEM) > 0 && len(cfg.ClientTLSKeyPEM) > 0 {
 		cert, err := tls.X509KeyPair(cfg.ClientTLSCertPEM, cfg.ClientTLSKeyPEM)
@@ -39,7 +39,7 @@ func buildClientTLSConfig(cfg config.Agent, logger *log.Logger) (*tls.Config, er
 		if err != nil {
 			return nil, fmt.Errorf("client TLS: self-signed cert: %w", err)
 		}
-		logger.Printf("skybridge-agent: WARNING: using an EPHEMERAL self-signed client TLS cert " +
+		logger.Warn("using an EPHEMERAL self-signed client TLS cert " +
 			"(SKYBRIDGE_CLIENT_TLS_SELF_SIGNED). Clients must connect with sslmode=require (no verify). " +
 			"Provide SKYBRIDGE_CLIENT_TLS_CERT_FILE/_KEY_FILE for a trusted cert in production.")
 		return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
@@ -139,9 +139,9 @@ func buildPostgresCatalogResolver(cfg config.Agent) (*postgres.CatalogResolver, 
 // logPostgresCatalogMode notes when Postgres table-identity resolution (PathOverlay support for
 // the Postgres wire proxy) is active, mirroring logClientTLSMode/logCredentialMode/
 // logUpstreamTLSMode's pattern of surfacing an optional feature's on/off state at startup.
-func logPostgresCatalogMode(cfg config.Agent, pgCatalog *postgres.CatalogResolver, logger *log.Logger) {
+func logPostgresCatalogMode(cfg config.Agent, pgCatalog *postgres.CatalogResolver, logger *slog.Logger) {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if pgCatalog == nil {
 		return
@@ -150,5 +150,5 @@ func logPostgresCatalogMode(cfg config.Agent, pgCatalog *postgres.CatalogResolve
 	if cfg.PathLabelURL == "" {
 		note = " (SKYBRIDGE_PATH_LABEL_URL is not set, so PathOverlay itself is not yet in the masking chain — this only prepares identity resolution for when it is)"
 	}
-	logger.Printf("skybridge-agent: Postgres table-identity resolution ENABLED (SKYBRIDGE_POSTGRES_CATALOG_DSN)%s.", note)
+	logger.Info(fmt.Sprintf("Postgres table-identity resolution ENABLED (SKYBRIDGE_POSTGRES_CATALOG_DSN)%s.", note))
 }

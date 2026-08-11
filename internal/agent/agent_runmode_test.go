@@ -5,7 +5,7 @@ import (
 	"context"
 	"crypto/tls"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -82,7 +82,7 @@ func TestRunListenerProxiesConnection(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
-	go func() { errc <- RunListener(ctx, cfg, log.New(io.Discard, "", 0)) }()
+	go func() { errc <- RunListener(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
 
 	// Give the listener a moment to bind before dialing.
 	var client net.Conn
@@ -129,7 +129,7 @@ func TestRunListenerLogsUpstreamDialFailure(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
-	go func() { errc <- RunListener(ctx, cfg, log.New(buf, "", 0)) }()
+	go func() { errc <- RunListener(ctx, cfg, slog.New(slog.NewTextHandler(buf, nil))) }()
 
 	var client net.Conn
 	var err error
@@ -193,7 +193,7 @@ func TestRunListenerLogsUpstreamTLSFailure(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
-	go func() { errc <- RunListener(ctx, cfg, log.New(buf, "", 0)) }()
+	go func() { errc <- RunListener(ctx, cfg, slog.New(slog.NewTextHandler(buf, nil))) }()
 
 	var client net.Conn
 	for i := 0; i < 50; i++ {
@@ -231,7 +231,7 @@ func TestRunListenerRejectsBadUpstreamTLSMode(t *testing.T) {
 		UpstreamAddr:    "127.0.0.1:1",
 		UpstreamTLSMode: "bogus",
 	}
-	if err := RunListener(context.Background(), cfg, log.New(io.Discard, "", 0)); err == nil {
+	if err := RunListener(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("expected an error for an invalid upstream TLS mode")
 	}
 }
@@ -252,7 +252,7 @@ func TestRunListenerRejectsBadClientTLSCertKeyPair(t *testing.T) {
 		ClientTLSCertPEM: certPEM,
 		ClientTLSKeyPEM:  keyPEM2, // mismatched key
 	}
-	if err := RunListener(context.Background(), cfg, log.New(io.Discard, "", 0)); err == nil {
+	if err := RunListener(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("expected an error for a mismatched client TLS cert/key pair")
 	}
 }
@@ -264,7 +264,7 @@ func TestRunListenerRejectsBadPostgresCatalogDSN(t *testing.T) {
 		UpstreamAddr:       "127.0.0.1:1",
 		PostgresCatalogDSN: "not-a-dsn",
 	}
-	if err := RunListener(context.Background(), cfg, log.New(io.Discard, "", 0)); err == nil {
+	if err := RunListener(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("expected an error for a malformed Postgres catalog DSN")
 	}
 }
@@ -296,7 +296,7 @@ func TestRunListenerWithPathLabelURLStartsStore(t *testing.T) {
 	}
 	ctx, cancel := context.WithCancel(context.Background())
 	errc := make(chan error, 1)
-	go func() { errc <- RunListener(ctx, cfg, log.New(io.Discard, "", 0)) }()
+	go func() { errc <- RunListener(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
 
 	var client net.Conn
 	for i := 0; i < 50; i++ {
@@ -326,7 +326,7 @@ func TestRunListenerRejectsUnsupportedDBType(t *testing.T) {
 		ListenAddr:   freeTCPAddr(t),
 		UpstreamAddr: "127.0.0.1:1",
 	}
-	if err := RunListener(context.Background(), cfg, log.New(io.Discard, "", 0)); err == nil {
+	if err := RunListener(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("expected an error for an unsupported db type")
 	}
 }
@@ -337,7 +337,7 @@ func TestRunListenerRejectsBadListenAddr(t *testing.T) {
 		ListenAddr:   "not-a-valid-address",
 		UpstreamAddr: "127.0.0.1:1",
 	}
-	if err := RunListener(context.Background(), cfg, log.New(io.Discard, "", 0)); err == nil {
+	if err := RunListener(context.Background(), cfg, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("expected an error for an unbindable listen address")
 	}
 }
@@ -384,7 +384,7 @@ func TestRunTunnelDialsGatewayAndRegisters(t *testing.T) {
 		GatewayAddr: gwLn.Addr().String(),
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, log.New(io.Discard, "", 0)) }()
+	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
 
 	select {
 	case <-registered:
@@ -444,7 +444,7 @@ func TestRunTunnelWithPathLabelURLStartsStore(t *testing.T) {
 		PathLabelURL: "http://127.0.0.1:0/path-labels",
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, log.New(io.Discard, "", 0)) }()
+	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
 
 	select {
 	case <-registered:
@@ -480,7 +480,7 @@ func TestRunTunnelRejectsBadClientTLSCertKeyPair(t *testing.T) {
 		ClientTLSCertPEM: certPEM,
 		ClientTLSKeyPEM:  keyPEM2, // mismatched key
 	}
-	if err := RunTunnel(context.Background(), cfg, Deps{}, log.New(io.Discard, "", 0)); err == nil {
+	if err := RunTunnel(context.Background(), cfg, Deps{}, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("expected an error for a mismatched client TLS cert/key pair")
 	}
 }
@@ -493,7 +493,7 @@ func TestRunTunnelRejectsBadPostgresCatalogDSN(t *testing.T) {
 		GatewayAddr:        "127.0.0.1:1",
 		PostgresCatalogDSN: "not-a-dsn",
 	}
-	if err := RunTunnel(context.Background(), cfg, Deps{}, log.New(io.Discard, "", 0)); err == nil {
+	if err := RunTunnel(context.Background(), cfg, Deps{}, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("expected an error for a malformed Postgres catalog DSN")
 	}
 }
@@ -541,7 +541,7 @@ func TestRunTunnelDefaultEngineWithClientTLSLogsEnabled(t *testing.T) {
 		PostgresCatalogDSN:  "postgres://db.internal:5432/postgres",
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, log.New(&buf, "", 0)) }()
+	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil))) }()
 
 	select {
 	case <-registered:
@@ -576,7 +576,7 @@ func TestRunTunnelWireMtlsIamAuthLogsAndRetries(t *testing.T) {
 		WireMtlsEnrollURL:      "http://127.0.0.1:1",
 		WireMtlsIamAuthEnabled: true,
 	}
-	err := RunTunnel(ctx, cfg, Deps{}, log.New(&buf, "", 0))
+	err := RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if err != nil {
 		t.Fatalf("expected RunTunnel to return nil on ctx timeout, got %v", err)
 	}
@@ -595,7 +595,7 @@ func TestRunTunnelRejectsBadUpstreamTLSMode(t *testing.T) {
 		GatewayAddr:     "127.0.0.1:1",
 		UpstreamTLSMode: "bogus",
 	}
-	if err := RunTunnel(context.Background(), cfg, Deps{}, log.New(io.Discard, "", 0)); err == nil {
+	if err := RunTunnel(context.Background(), cfg, Deps{}, slog.New(slog.NewTextHandler(io.Discard, nil))); err == nil {
 		t.Fatal("expected an error for an invalid upstream TLS mode")
 	}
 }
@@ -632,7 +632,7 @@ func TestRunTunnelInjectCredentialsWarnsWithoutExchangeURL(t *testing.T) {
 		InjectCredentials: true,
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, log.New(&buf, "", 0)) }()
+	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil))) }()
 
 	select {
 	case <-accepted:
@@ -682,7 +682,7 @@ func TestRunTunnelInjectCredentialsEnabledWithResolver(t *testing.T) {
 		CredentialExchangeURL: "http://127.0.0.1:1",
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, log.New(&buf, "", 0)) }()
+	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil))) }()
 
 	select {
 	case <-accepted:
@@ -754,7 +754,7 @@ func TestRunTunnelWireMtlsPresetCertLogsAndUses(t *testing.T) {
 		WireMtlsClientKeyPEM:  keyPEM,
 	}
 	errc := make(chan error, 1)
-	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, log.New(&buf, "", 0)) }()
+	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil))) }()
 
 	select {
 	case <-registered:
@@ -789,7 +789,7 @@ func TestRunTunnelWireMtlsEnrollFailureRetries(t *testing.T) {
 		WireMtlsEnrollURL:   "http://127.0.0.1:1",
 		WireMtlsEnrollToken: "tok",
 	}
-	err := RunTunnel(ctx, cfg, Deps{}, log.New(&buf, "", 0))
+	err := RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if err != nil {
 		t.Fatalf("expected RunTunnel to return nil on ctx timeout, got %v", err)
 	}

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -117,7 +117,7 @@ func TestServeDispatchesToolEnvelope(t *testing.T) {
 		return edge.Result{"ok": true, "tool": "ping_tool", "echo": args["x"]}, nil
 	})
 
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, reg, log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -202,7 +202,7 @@ func TestServeRejectsNonEnvelopeGoal(t *testing.T) {
 	conn := dialBufconn(t, srv, lis)
 	defer conn.Close()
 
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -296,7 +296,7 @@ func TestServeRespondsToPingWithHeartbeat(t *testing.T) {
 	conn := dialBufconn(t, srv, lis)
 	defer conn.Close()
 
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -344,7 +344,7 @@ func TestServeReturnsErrorWhenStreamRejected(t *testing.T) {
 	conn := dialBufconn(t, srv, lis)
 	defer conn.Close()
 
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -355,7 +355,7 @@ func TestServeReturnsErrorWhenStreamRejected(t *testing.T) {
 }
 
 func TestCancelWorkCancelsTrackedRun(t *testing.T) {
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	runCtx, cancel := context.WithCancel(context.Background())
 	c.mu.Lock()
@@ -374,7 +374,7 @@ func TestCancelWorkCancelsTrackedRun(t *testing.T) {
 }
 
 func TestStartWorkIgnoresEmptyRunID(t *testing.T) {
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.startWork(context.Background(), &safeStream{}, &connectorv1.WorkAssignment{RunId: ""})
 	c.mu.Lock()
 	n := len(c.runs)
@@ -385,7 +385,7 @@ func TestStartWorkIgnoresEmptyRunID(t *testing.T) {
 }
 
 func TestStartWorkDuplicateRunIDIsRejected(t *testing.T) {
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.mu.Lock()
 	c.runs["dup"] = func() {}
 	c.mu.Unlock()
@@ -403,14 +403,14 @@ func TestStartWorkDuplicateRunIDIsRejected(t *testing.T) {
 }
 
 func TestDialProducesClientForInsecureAndSystemRoots(t *testing.T) {
-	c := New(Config{Target: "127.0.0.1:0", Insecure: true}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:0", Insecure: true}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conn, err := c.dial(nil)
 	if err != nil {
 		t.Fatalf("dial insecure: %v", err)
 	}
 	_ = conn.Close()
 
-	c2 := New(Config{Target: "127.0.0.1:0"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c2 := New(Config{Target: "127.0.0.1:0"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conn2, err := c2.dial(nil)
 	if err != nil {
 		t.Fatalf("dial system-roots TLS: %v", err)
@@ -426,7 +426,7 @@ func TestRunFatalConfigErrorReturnsWithoutReconnect(t *testing.T) {
 		ConnectorID: "edge-1",
 		CABundlePEM: ca.certPEM,
 		TLSDir:      t.TempDir(), // no cert on disk, no enroll token -> fatal
-	}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	err := c.Run(context.Background())
 	if err == nil {
@@ -435,7 +435,7 @@ func TestRunFatalConfigErrorReturnsWithoutReconnect(t *testing.T) {
 }
 
 func TestRunReconnectsUntilContextCancelled(t *testing.T) {
-	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 5 * time.Millisecond}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 5 * time.Millisecond}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	err := c.Run(ctx)

@@ -5,7 +5,7 @@ import (
 	"crypto/x509"
 	"errors"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 
@@ -152,18 +152,18 @@ func (p *upstreamTLSPolicy) configureEngine(engine wire.Engine, dbType, dialAddr
 // logUpstreamTLSMode notes the active upstream TLS posture and warns when a weak (unverified) mode is
 // in use. Postgres, MySQL and Mongo all negotiate upstream TLS; the db-type list is accepted for
 // future engines that may not.
-func logUpstreamTLSMode(p *upstreamTLSPolicy, dbTypes []string, logger *log.Logger) {
+func logUpstreamTLSMode(p *upstreamTLSPolicy, dbTypes []string, logger *slog.Logger) {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if !p.enabled() {
 		return
 	}
-	logger.Printf("skybridge-agent: upstream TLS ENABLED (mode=%s) for the agent→database hop.", p.mode)
+	logger.Info(fmt.Sprintf("upstream TLS ENABLED (mode=%s) for the agent→database hop.", p.mode))
 	if p.mode == "prefer" || p.mode == "require" {
-		logger.Printf("skybridge-agent: NOTE: upstream TLS mode %q encrypts the agent→database hop but does "+
+		logger.Info(fmt.Sprintf("NOTE: upstream TLS mode %q encrypts the agent→database hop but does "+
 			"NOT authenticate the server certificate. Use verify-ca/verify-full with "+
-			"SKYBRIDGE_UPSTREAM_TLS_CA_FILE to verify the database identity.", p.mode)
+			"SKYBRIDGE_UPSTREAM_TLS_CA_FILE to verify the database identity.", p.mode))
 	}
 	seen := map[string]bool{}
 	for _, dt := range dbTypes {
@@ -171,8 +171,8 @@ func logUpstreamTLSMode(p *upstreamTLSPolicy, dbTypes []string, logger *log.Logg
 			continue
 		}
 		seen[dt] = true
-		logger.Printf("skybridge-agent: WARNING: upstream TLS is configured but db type %q does not "+
-			"negotiate upstream TLS yet; that hop stays plaintext.", dt)
+		logger.Warn(fmt.Sprintf("upstream TLS is configured but db type '%s' does not "+
+			"negotiate upstream TLS yet; that hop stays plaintext.", dt))
 	}
 }
 

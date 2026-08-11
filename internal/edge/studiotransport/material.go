@@ -7,6 +7,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/grpc"
@@ -75,7 +76,7 @@ func (c *Client) enroll(ctx context.Context) (*tlsMaterial, error) {
 	}
 	defer conn.Close()
 
-	c.logger.Printf("skybridge-edge: studio enrolling tenant=%s agent=%s via %s", c.cfg.TenantID, c.cfg.AgentID, target)
+	c.logger.Info(fmt.Sprintf("studio enrolling tenant=%s agent=%s via %s", c.cfg.TenantID, c.cfg.AgentID, target))
 	resp, err := studiov1.NewStudioGatewayClient(conn).Enroll(ctx, &studiov1.EnrollRequest{
 		EnrollmentToken: c.cfg.EnrollToken,
 		TenantId:        c.cfg.TenantID,

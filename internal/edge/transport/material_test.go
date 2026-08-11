@@ -11,7 +11,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"math/big"
 	"net"
 	"testing"
@@ -126,7 +126,7 @@ func TestClientEnrollSucceeds(t *testing.T) {
 		ConnectorID: "edge-1",
 		CABundlePEM: ca.certPEM,
 		EnrollToken: "one-time-token",
-	}, nil, log.New(io.Discard, "", 0))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	m, err := c.enroll(context.Background())
 	if err != nil {
@@ -152,7 +152,7 @@ func TestEnsureTLSMaterialEnrollErrorPropagates(t *testing.T) {
 		CABundlePEM: ca.certPEM,
 		TLSDir:      t.TempDir(),
 		EnrollToken: "one-time-token",
-	}, nil, log.New(io.Discard, "", 0))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if _, err := c.ensureTLSMaterial(context.Background()); err == nil {
 		t.Fatal("expected error to propagate from failed enroll")
@@ -172,7 +172,7 @@ func TestEnsureTLSMaterialEnrollsAndPersistsToDisk(t *testing.T) {
 		CABundlePEM: ca.certPEM,
 		TLSDir:      dir,
 		EnrollToken: "one-time-token",
-	}, nil, log.New(io.Discard, "", 0))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	m, err := c.ensureTLSMaterial(context.Background())
 	if err != nil {
@@ -190,7 +190,7 @@ func TestEnsureTLSMaterialEnrollsAndPersistsToDisk(t *testing.T) {
 		ConnectorID: "edge-1",
 		CABundlePEM: ca.certPEM,
 		TLSDir:      dir,
-	}, nil, log.New(io.Discard, "", 0))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	m2, err := c2.ensureTLSMaterial(context.Background())
 	if err != nil {
 		t.Fatalf("ensureTLSMaterial (reload): %v", err)
@@ -219,7 +219,7 @@ func TestEnsureTLSMaterialExpiredNoTokenReusesStale(t *testing.T) {
 		CABundlePEM: ca.certPEM,
 		TLSDir:      dir,
 		// No EnrollToken: expired-but-no-token path must reuse the stale material rather than error.
-	}, nil, log.New(io.Discard, "", 0))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	m, err := c.ensureTLSMaterial(context.Background())
 	if err != nil {
@@ -268,7 +268,7 @@ func TestMtlsTLSConfigRejectsInvalidCABundle(t *testing.T) {
 }
 
 func TestTLSDirDefault(t *testing.T) {
-	c := New(Config{}, nil, log.New(io.Discard, "", 0))
+	c := New(Config{}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if got := c.tlsDir(); got != "/var/lib/skybridge/tls" {
 		t.Fatalf("unexpected default tls dir: %q", got)
 	}

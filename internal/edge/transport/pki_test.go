@@ -9,7 +9,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"io"
-	"log"
+	"log/slog"
 	"math/big"
 	"net/url"
 	"os"
@@ -134,7 +134,7 @@ func TestCertValidRejectsExpiring(t *testing.T) {
 }
 
 func newTestClient(cfg Config) *Client {
-	return New(cfg, nil, log.New(io.Discard, "", 0))
+	return New(cfg, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 }
 
 func TestEnsureTLSMaterialBearerWhenNoCA(t *testing.T) {

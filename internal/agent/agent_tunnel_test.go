@@ -5,7 +5,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -77,7 +77,7 @@ func TestServeTunnelConnServesOneStream(t *testing.T) {
 	}()
 
 	deps := Deps{Dial: fakeDialer(&gotAddr, dialed), Masker: mask.Noop{}}
-	err := ServeTunnelConn(context.Background(), agentEnd, config.Agent{AgentID: "a1", OrgID: "org-1", Token: "t"}, deps, log.New(io.Discard, "", 0))
+	err := ServeTunnelConn(context.Background(), agentEnd, config.Agent{AgentID: "a1", OrgID: "org-1", Token: "t"}, deps, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if err != nil && !errors.Is(err, io.EOF) {
 		t.Logf("ServeTunnelConn ended: %v", err)
@@ -111,7 +111,7 @@ func TestServeStreamSkipsOnBadMeta(t *testing.T) {
 	}}.withDefaults(config.Agent{})
 
 	var buf bytes.Buffer
-	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(&buf, "", 0))
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, slog.New(slog.NewTextHandler(&buf, nil)))
 	if dialCalled {
 		t.Fatal("expected serveStream to bail out before dialing on bad meta")
 	}
@@ -138,7 +138,7 @@ func TestServeStreamLogsUnsupportedDBType(t *testing.T) {
 	}
 	deps := Deps{}.withDefaults(config.Agent{})
 	var buf bytes.Buffer
-	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(&buf, "", 0))
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("stream open:")) {
 		t.Fatalf("expected an unsupported-db-type log, got %q", buf.String())
 	}
@@ -164,7 +164,7 @@ func TestServeStreamLogsUpstreamDialFailure(t *testing.T) {
 		return nil, errors.New("connection refused")
 	}}.withDefaults(config.Agent{})
 	var buf bytes.Buffer
-	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(&buf, "", 0))
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("dial upstream")) {
 		t.Fatalf("expected a dial-failure log, got %q", buf.String())
 	}
@@ -193,7 +193,7 @@ func TestServeStreamLogsUpstreamTLSFailure(t *testing.T) {
 		return a, nil
 	}, UpstreamTLS: upTLS}.withDefaults(config.Agent{})
 	var buf bytes.Buffer
-	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(&buf, "", 0))
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("upstream TLS to")) {
 		t.Fatalf("expected an upstream-TLS-failure log, got %q", buf.String())
 	}
@@ -222,7 +222,7 @@ func TestServeStreamSkipsWhenMetaMissingAddrOrDBType(t *testing.T) {
 		return nil, nil
 	}}.withDefaults(config.Agent{})
 
-	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, log.New(io.Discard, "", 0))
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if dialCalled {
 		t.Fatal("expected serveStream to bail out before dialing when addr/db_type are empty")
 	}

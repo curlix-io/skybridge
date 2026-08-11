@@ -17,7 +17,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"math/big"
 	"net"
 	"testing"
@@ -162,7 +162,7 @@ func TestClientEnrollSucceeds(t *testing.T) {
 		AgentID:     "agent-1",
 		CABundlePEM: ca.pem,
 		EnrollToken: "one-time-token",
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	m, err := c.enroll(context.Background())
 	if err != nil {
@@ -192,7 +192,7 @@ func TestClientEnrollUsesConfigCABundleWhenEnrollResponseOmitsIt(t *testing.T) {
 		CABundlePEM: ca.pem,
 		EnrollToken: "one-time-token",
 		// EnrollTarget left empty: enroll() must fall back to Target.
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	m, err := c.enroll(context.Background())
 	if err != nil {
@@ -217,7 +217,7 @@ func TestClientEnrollFallsBackToConfigCABundleWhenEnrollResponseCAEmpty(t *testi
 		AgentID:     "agent-1",
 		CABundlePEM: ca.pem,
 		EnrollToken: "one-time-token",
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	m, err := c.enroll(context.Background())
 	if err != nil {
@@ -238,7 +238,7 @@ func TestClientEnrollPropagatesInvalidServerCABundleError(t *testing.T) {
 		AgentID:     "agent-1",
 		CABundlePEM: []byte("not a pem"),
 		EnrollToken: "one-time-token",
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if _, err := c.enroll(context.Background()); err == nil {
 		t.Fatal("expected enroll to propagate an error building the TLS config from an invalid CA bundle")
@@ -256,7 +256,7 @@ func TestClientEnrollPropagatesRPCError(t *testing.T) {
 		AgentID:     "agent-1",
 		CABundlePEM: ca.pem,
 		EnrollToken: "one-time-token",
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if _, err := c.enroll(context.Background()); err == nil {
 		t.Fatal("expected the Enroll RPC error to propagate")
@@ -276,7 +276,7 @@ func TestEnsureTLSMaterialEnrollsAndPersistsToDisk(t *testing.T) {
 		CABundlePEM: ca.pem,
 		TLSDir:      dir,
 		EnrollToken: "one-time-token",
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	m, err := c.ensureTLSMaterial(context.Background())
 	if err != nil {
@@ -293,7 +293,7 @@ func TestEnsureTLSMaterialEnrollsAndPersistsToDisk(t *testing.T) {
 		AgentID:     "agent-1",
 		CABundlePEM: ca.pem,
 		TLSDir:      dir,
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	m2, err := c2.ensureTLSMaterial(context.Background())
 	if err != nil {
 		t.Fatalf("ensureTLSMaterial (reload): %v", err)
@@ -315,7 +315,7 @@ func TestEnsureTLSMaterialEnrollErrorPropagates(t *testing.T) {
 		CABundlePEM: ca.pem,
 		TLSDir:      t.TempDir(),
 		EnrollToken: "one-time-token",
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if _, err := c.ensureTLSMaterial(context.Background()); err == nil {
 		t.Fatal("expected error to propagate from a failed enroll")
@@ -324,7 +324,7 @@ func TestEnsureTLSMaterialEnrollErrorPropagates(t *testing.T) {
 
 func TestDialProducesClientForMTLSInsecureAndSystemRoots(t *testing.T) {
 	certPEM, keyPEM := selfSignedMaterialForTest(t)
-	c := New(Config{Target: "127.0.0.1:0"}, log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:0"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	conn, err := c.dial(&tlsMaterial{clientCertPEM: certPEM, clientKeyPEM: keyPEM})
 	if err != nil {
@@ -332,14 +332,14 @@ func TestDialProducesClientForMTLSInsecureAndSystemRoots(t *testing.T) {
 	}
 	_ = conn.Close()
 
-	c2 := New(Config{Target: "127.0.0.1:0", Insecure: true}, log.New(io.Discard, "", 0))
+	c2 := New(Config{Target: "127.0.0.1:0", Insecure: true}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conn2, err := c2.dial(nil)
 	if err != nil {
 		t.Fatalf("dial insecure: %v", err)
 	}
 	_ = conn2.Close()
 
-	c3 := New(Config{Target: "127.0.0.1:0"}, log.New(io.Discard, "", 0))
+	c3 := New(Config{Target: "127.0.0.1:0"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conn3, err := c3.dial(nil)
 	if err != nil {
 		t.Fatalf("dial system-roots TLS: %v", err)
@@ -348,7 +348,7 @@ func TestDialProducesClientForMTLSInsecureAndSystemRoots(t *testing.T) {
 }
 
 func TestDialPropagatesInvalidMTLSMaterialError(t *testing.T) {
-	c := New(Config{Target: "127.0.0.1:0"}, log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:0"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	_, err := c.dial(&tlsMaterial{clientCertPEM: []byte("garbage"), clientKeyPEM: []byte("garbage")})
 	if err == nil {
 		t.Fatal("expected an error building mTLS config from an invalid cert/key pair")
@@ -363,7 +363,7 @@ func TestRunFatalConfigErrorReturnsWithoutReconnect(t *testing.T) {
 		AgentID:     "agent-1",
 		CABundlePEM: ca.pem,
 		TLSDir:      t.TempDir(), // no cached cert, no enroll token -> fatal
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	err := c.Run(context.Background())
 	if err == nil {
@@ -372,7 +372,7 @@ func TestRunFatalConfigErrorReturnsWithoutReconnect(t *testing.T) {
 }
 
 func TestRunReconnectsUntilContextCancelled(t *testing.T) {
-	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 5 * time.Millisecond}, log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 5 * time.Millisecond}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 	err := c.Run(ctx)
@@ -394,7 +394,7 @@ func TestRunServesOneRoundAgainstLiveGatewayThenStopsWithoutReconnect(t *testing
 		TenantID: "org-1",
 		AgentID:  "agent-1",
 		Insecure: false, // no CABundlePEM/TLSDir configured -> ensureTLSMaterial returns (nil, nil), bearer path
-	}, log.New(io.Discard, "", 0))
+	}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	err := c.Run(context.Background())
 	if err != nil {

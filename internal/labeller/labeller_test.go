@@ -2,7 +2,7 @@ package labeller
 
 import (
 	"context"
-	"log"
+	"log/slog"
 	"sort"
 	"testing"
 	"time"
@@ -69,7 +69,7 @@ func TestValidate_AcceptsEmptyTables(t *testing.T) {
 func TestRun_ReturnsValidationErrorWithoutDialing(t *testing.T) {
 	cfg := validLabellerConfig()
 	cfg.OrgID = "" // trigger validate's first failure before Run ever opens a DB connection
-	if err := Run(context.Background(), cfg, log.Default()); err == nil {
+	if err := Run(context.Background(), cfg, slog.Default()); err == nil {
 		t.Fatal("expected Run to return a validation error for a missing required field")
 	}
 }
@@ -123,7 +123,7 @@ func TestRun_MongoOpensLazilyThenFailsValidationFast(t *testing.T) {
 	cfg.DBType = "mongo"
 	cfg.DSN = "mongodb://127.0.0.1:1/appdb"
 	cfg.OrgID = "" // trigger validate's first failure before Run ever opens a connection
-	if err := Run(context.Background(), cfg, log.Default()); err == nil {
+	if err := Run(context.Background(), cfg, slog.Default()); err == nil {
 		t.Fatal("expected Run to return a validation error for a missing required field")
 	}
 }
@@ -240,7 +240,7 @@ func TestRunOnce_DiscoversTablesDynamicallyWhenTablesUnset(t *testing.T) {
 	cfg := validLabellerConfig()
 	cfg.Tables = nil // force dynamic discovery
 
-	runOnce(context.Background(), cfg, fl, scanner, newScheduler(), log.Default())
+	runOnce(context.Background(), cfg, fl, scanner, newScheduler(), slog.Default())
 
 	if fl.listTablesN != 1 {
 		t.Fatalf("expected ListTables to be called once for dynamic discovery, got %d", fl.listTablesN)
@@ -266,7 +266,7 @@ func TestRunOnce_MaxObjectsPerScanBoundsBreadthAcrossCycles(t *testing.T) {
 	cfg.RescanIntervalSeconds = 0 // no skip-if-recent, purely exercising the cap + round-robin order
 
 	sched := newScheduler()
-	runOnce(context.Background(), cfg, fl, scanner, sched, log.Default())
+	runOnce(context.Background(), cfg, fl, scanner, sched, slog.Default())
 	if len(fl.listColsCall) != 2 {
 		t.Fatalf("expected the first cycle to scan exactly 2 of 3 tables (the cap), got %v", fl.listColsCall)
 	}
@@ -282,7 +282,7 @@ func TestRunOnce_MaxObjectsPerScanBoundsBreadthAcrossCycles(t *testing.T) {
 	}
 
 	fl.listColsCall = nil
-	runOnce(context.Background(), cfg, fl, scanner, sched, log.Default())
+	runOnce(context.Background(), cfg, fl, scanner, sched, slog.Default())
 	if len(fl.listColsCall) != 2 {
 		t.Fatalf("expected the second cycle to scan 2 tables too, got %v", fl.listColsCall)
 	}

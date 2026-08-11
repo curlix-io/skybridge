@@ -5,7 +5,7 @@ import (
 	"crypto/tls"
 	"crypto/x509"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -293,14 +293,14 @@ func TestUpstreamTLSConfigForVerifyCAVerifiesChain(t *testing.T) {
 }
 
 func TestLogUpstreamTLSModeDefaultsNilLogger(t *testing.T) {
-	// A nil logger must fall back to log.Default() rather than panic.
+	// A nil logger must fall back to slog.Default() rather than panic.
 	p := &upstreamTLSPolicy{mode: "require"}
 	logUpstreamTLSMode(p, []string{"postgres"}, nil)
 }
 
 func TestLogUpstreamTLSModeNoopWhenDisabled(t *testing.T) {
 	var buf bytes.Buffer
-	logUpstreamTLSMode(nil, []string{"postgres"}, log.New(&buf, "", 0))
+	logUpstreamTLSMode(nil, []string{"postgres"}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if buf.Len() != 0 {
 		t.Fatalf("expected no output when policy is disabled, got %q", buf.String())
 	}
@@ -309,7 +309,7 @@ func TestLogUpstreamTLSModeNoopWhenDisabled(t *testing.T) {
 func TestLogUpstreamTLSModeWarnsOnUnverifiedMode(t *testing.T) {
 	var buf bytes.Buffer
 	p := &upstreamTLSPolicy{mode: "require"}
-	logUpstreamTLSMode(p, []string{"postgres"}, log.New(&buf, "", 0))
+	logUpstreamTLSMode(p, []string{"postgres"}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("does NOT authenticate")) {
 		t.Fatalf("expected an unverified-mode note, got %q", buf.String())
 	}
@@ -318,7 +318,7 @@ func TestLogUpstreamTLSModeWarnsOnUnverifiedMode(t *testing.T) {
 func TestLogUpstreamTLSModeSilentOnVerifiedMode(t *testing.T) {
 	var buf bytes.Buffer
 	p := &upstreamTLSPolicy{mode: "verify-full"}
-	logUpstreamTLSMode(p, []string{"postgres"}, log.New(&buf, "", 0))
+	logUpstreamTLSMode(p, []string{"postgres"}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if bytes.Contains(buf.Bytes(), []byte("does NOT authenticate")) {
 		t.Fatalf("expected no unverified-mode note for verify-full, got %q", buf.String())
 	}
@@ -327,9 +327,9 @@ func TestLogUpstreamTLSModeSilentOnVerifiedMode(t *testing.T) {
 func TestLogUpstreamTLSModeWarnsOnUnsupportedDBType(t *testing.T) {
 	var buf bytes.Buffer
 	p := &upstreamTLSPolicy{mode: "require"}
-	logUpstreamTLSMode(p, []string{"oracle", "oracle", ""}, log.New(&buf, "", 0))
+	logUpstreamTLSMode(p, []string{"oracle", "oracle", ""}, slog.New(slog.NewTextHandler(&buf, nil)))
 	out := buf.String()
-	if !bytes.Contains(buf.Bytes(), []byte(`"oracle"`)) {
+	if !bytes.Contains(buf.Bytes(), []byte(`'oracle'`)) {
 		t.Fatalf("expected a warning naming the unsupported db type, got %q", out)
 	}
 	// The dedup/skip-empty logic should produce exactly one such warning line despite the repeat and
@@ -342,7 +342,7 @@ func TestLogUpstreamTLSModeWarnsOnUnsupportedDBType(t *testing.T) {
 func TestLogUpstreamTLSModeSilentForSupportedDBTypes(t *testing.T) {
 	var buf bytes.Buffer
 	p := &upstreamTLSPolicy{mode: "require"}
-	logUpstreamTLSMode(p, []string{"postgres", "mysql", "mongodb", "mongo", "postgresql"}, log.New(&buf, "", 0))
+	logUpstreamTLSMode(p, []string{"postgres", "mysql", "mongodb", "mongo", "postgresql"}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if bytes.Contains(buf.Bytes(), []byte("does not negotiate")) {
 		t.Fatalf("expected no unsupported-db-type warning for known engines, got %q", buf.String())
 	}

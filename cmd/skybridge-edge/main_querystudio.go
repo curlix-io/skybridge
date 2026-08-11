@@ -4,7 +4,7 @@ package main
 
 import (
 	"context"
-	"log"
+	"log/slog"
 
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/edge"
@@ -17,7 +17,7 @@ import (
 // registerQueryStudioExtras wires up the Query Studio subsystems: the db_query_* one-shot exec
 // tools (registered on reg, dispatched over the connector-gateway transport already running in
 // main.go) and the second, independent Studio Gateway dial for Query Studio's own dispatch.
-func registerQueryStudioExtras(ctx context.Context, cfg config.Edge, reg *edge.Registry, masker mask.Masker, logger *log.Logger) {
+func registerQueryStudioExtras(ctx context.Context, cfg config.Edge, reg *edge.Registry, masker mask.Masker, logger *slog.Logger) {
 	execTargets := dbquery.MergeWireTargets(dbquery.ParseTargets(cfg.StudioTargetsJSON), cfg.WireProxy.Targets)
 	dbexec.Register(reg, dbexec.Options{
 		Targets:          execTargets,
@@ -62,7 +62,7 @@ func registerQueryStudioExtras(ctx context.Context, cfg config.Edge, reg *edge.R
 	}
 	go func() {
 		if err := studiotransport.New(studioCfg, logger).Run(ctx); err != nil && ctx.Err() == nil {
-			logger.Printf("skybridge-edge: studio gateway ended: %v", err)
+			logger.Error("studio gateway ended", "error", err)
 		}
 	}()
 }
