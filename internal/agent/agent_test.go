@@ -104,7 +104,7 @@ func TestBuildMaskerNoopWhenNothingConfigured(t *testing.T) {
 }
 
 func TestBuildMaskerWithOverlayReturnsHandleWhenOverlayConfigured(t *testing.T) {
-	m, overlay, _, _, _ := buildMaskerWithOverlay(config.Agent{PIIOverlay: map[string]string{"email": "[EMAIL]"}})
+	m, overlay, _, _, _ := buildMaskerWithOverlay(config.Agent{PIIOverlay: map[string]mask.OverlayRule{"email": {Token: "[EMAIL]"}}})
 	if overlay == nil {
 		t.Fatal("expected a non-nil overlay handle")
 	}
@@ -128,12 +128,12 @@ func TestMaskingMode(t *testing.T) {
 	}{
 		{"none", config.Agent{}, "none"},
 		{"remote-only", config.Agent{MaskAnalyzeURL: "http://a"}, "remote"},
-		{"overlay-only", config.Agent{PIIOverlay: map[string]string{"e": "x"}}, "overlay"},
+		{"overlay-only", config.Agent{PIIOverlay: map[string]mask.OverlayRule{"e": {Token: "x"}}}, "overlay"},
 		{"overlay-dynamic", config.Agent{PIIOverlayURL: "http://cp"}, "overlay(dynamic)"},
-		{"both", config.Agent{MaskAnalyzeURL: "http://a", PIIOverlay: map[string]string{"e": "x"}}, "remote+overlay"},
+		{"both", config.Agent{MaskAnalyzeURL: "http://a", PIIOverlay: map[string]mask.OverlayRule{"e": {Token: "x"}}}, "remote+overlay"},
 		{"both-dynamic", config.Agent{MaskAnalyzeURL: "http://a", PIIOverlayURL: "http://cp"}, "remote+overlay(dynamic)"},
 		{"remote-strict", config.Agent{MaskAnalyzeURL: "http://a", MaskMode: config.ModeStrict}, "remote(strict)"},
-		{"overlay-only-strict-ignored", config.Agent{PIIOverlay: map[string]string{"e": "x"}, MaskMode: config.ModeStrict}, "overlay"},
+		{"overlay-only-strict-ignored", config.Agent{PIIOverlay: map[string]mask.OverlayRule{"e": {Token: "x"}}, MaskMode: config.ModeStrict}, "overlay"},
 	}
 	for _, c := range cases {
 		if got := MaskingMode(c.cfg); got != c.want {

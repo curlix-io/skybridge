@@ -1,0 +1,54 @@
+# Tag-driven GHCR publish: builds and pushes the three skybridge binaries (agent, gateway, edge) as
+# separate tags of the single public image ghcr.io/curlix-io/skybridge, using the same root
+# Dockerfile's SKYBRIDGE_CMD build arg goreleaser/release.yml uses for the binary archives. Runs
+# alongside release.yml on the same v* tag push so binaries and images publish together.
+name: ghcr-publish
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        cmd: [skybridge-agent, skybridge-gateway, skybridge-edge]
+        include:
+          - cmd: skybridge-agent
+            tag_prefix: agent
+          - cmd: skybridge-gateway
+            tag_prefix: gateway
+          - cmd: skybridge-edge
+            tag_prefix: edge
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Log in to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Resolve version from tag
+        id: version
+        run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: Dockerfile
+          build-args: |
+            SKYBRIDGE_CMD=${{ matrix.cmd }}
+          push: true
+          tags: |
+            ghcr.io/curlix-io/skybridge:${{ matrix.tag_prefix }}-${{ steps.version.outputs.version }}
+            ghcr.io/curlix-io/skybridge:${{ matrix.tag_prefix }}-latest

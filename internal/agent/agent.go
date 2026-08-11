@@ -140,6 +140,8 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 		Entities:         cfg.MaskEntities,
 		Anonymizers:      cfg.MaskAnonymizers,
 		AdHocRecognizers: cfg.MaskAdHocRecognizers,
+		AllowList:        cfg.MaskAllowList,
+		AllowListMatch:   mask.AllowListMatch(cfg.MaskAllowListMatch),
 		Strict:           cfg.MaskStrict(),
 		Metrics:          metricsRecorder,
 		ConnectionKey:    connectionKey,
@@ -149,7 +151,7 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 	}
 	var overlay *mask.Overlay
 	if len(cfg.PIIOverlay) > 0 || cfg.PIIOverlayURL != "" {
-		overlay = mask.NewOverlay(cfg.PIIOverlay)
+		overlay = mask.NewOverlayWithRules(cfg.PIIOverlay)
 		maskers = append(maskers, overlay)
 	}
 	var store *remotestore.Store

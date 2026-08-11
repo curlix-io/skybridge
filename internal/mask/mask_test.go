@@ -54,6 +54,51 @@ func TestOverlaySkipsNullAndBinary(t *testing.T) {
 	}
 }
 
+func TestPartialMaskKeepsLastFourChars(t *testing.T) {
+	got := string(partialMask([]byte("123-45-6789")))
+	if got != "*******6789" {
+		t.Fatalf("expected last 4 chars kept and the rest masked, got %q", got)
+	}
+}
+
+func TestPartialMaskShortValueMaskedInFull(t *testing.T) {
+	got := string(partialMask([]byte("abc")))
+	if got != "***" {
+		t.Fatalf("expected a value shorter than partialKeepChars masked in full, got %q", got)
+	}
+}
+
+func TestPartialMaskExactlyKeepCharsMaskedInFull(t *testing.T) {
+	got := string(partialMask([]byte("1234")))
+	if got != "****" {
+		t.Fatalf("expected a value exactly partialKeepChars long masked in full (nothing left over to keep), got %q", got)
+	}
+}
+
+func TestOverlayWithRulesAppliesPartialMask(t *testing.T) {
+	o := NewOverlayWithRules(map[string]OverlayRule{"credit_card": {Partial: true}})
+	row := [][]byte{[]byte("4111111111111234")}
+	out, err := o.MaskRow(context.Background(), cols("credit_card"), row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "************1234" {
+		t.Fatalf("expected partial mask output, got %q", out[0])
+	}
+}
+
+func TestOverlayWithRulesTokenRuleUnchanged(t *testing.T) {
+	o := NewOverlayWithRules(map[string]OverlayRule{"email": {Token: "[redacted]"}})
+	row := [][]byte{[]byte("a@b.com")}
+	out, err := o.MaskRow(context.Background(), cols("email"), row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "[redacted]" {
+		t.Fatalf("expected full-value replace, got %q", out[0])
+	}
+}
+
 func TestChainAppliesInOrder(t *testing.T) {
 	first := NewOverlay(map[string]string{"a": "1"})
 	second := NewOverlay(map[string]string{"b": "2"})

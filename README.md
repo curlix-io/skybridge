@@ -118,6 +118,17 @@ disable content masking (governed passthrough), or point them at a different `an
 service. Running with plain `go run` (no compose) has no mask URLs by default — set them explicitly
 to reach a Presidio instance you run yourself.
 
+The compose file runs `skybridge-edge` (not the plain agent) so this same stack, unchanged, also
+covers AWS/k8s tool dispatch — just set `SKYBRIDGE_EDGE_GATEWAY` (plus `SKYBRIDGE_ORG_ID`/
+`SKYBRIDGE_EDGE_ID`) alongside `SKYBRIDGE_UPSTREAM` and edge dials out to a Connector Gateway in
+the same process that's already running the wire proxy; leave `SKYBRIDGE_EDGE_GATEWAY` unset to run
+the wire proxy alone, no outbound gateway dial. That keeps a full-featured install at 3 containers:
+`edge` + the two Presidio containers.
+
+`deploy/docker-compose.yml` also has an opt-in `--profile labeller` for `skybridge-labeller`, off
+by default since it needs external services this repo doesn't ship (an LLM endpoint + control-plane
+`pii-path-labels` URL). Bring it in with `docker compose --profile labeller up -d`.
+
 ### Test data for Postgres, MySQL, and MongoDB
 
 [`examples/demo/`](./examples/demo/) ships the same small, fabricated customer dataset — name,
@@ -377,7 +388,7 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_DB_TYPE` | `postgres` | `postgres`, `mysql`, or `mongodb` |
 | `SKYBRIDGE_LISTEN` | `:15432` / `:13306` / `:27018` | local address clients connect to |
 | `SKYBRIDGE_PII_OVERLAY` | — | JSON `{ "column": "[redacted]" }` map you define (static) |
-| `SKYBRIDGE_PII_OVERLAY_FILE` | — | path to a YAML or JSON file with the same column->token map (see [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml)) — easier to author/diff/commit than inline JSON; takes priority over `SKYBRIDGE_PII_OVERLAY` when both are set, falling back to it if the file is missing/invalid |
+| `SKYBRIDGE_PII_OVERLAY_FILE` | — | path to a YAML or JSON file with the same column->token map (see [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml)) — easier to author/diff/commit than inline JSON; takes priority over `SKYBRIDGE_PII_OVERLAY` when both are set, falling back to it if the file is missing/invalid. Also the only form that accepts a `partial_mask: true` rule per column (keep the last 4 characters, mask the rest) instead of a plain replacement token — `SKYBRIDGE_PII_OVERLAY` stays token-only |
 | `SKYBRIDGE_PII_OVERLAY_URL` | — | control-plane endpoint to fetch the org's projected overlay (`GET /your-control-plane/pii-overlay`); enables dynamic, hot-swapped masking |
 | `SKYBRIDGE_PII_OVERLAY_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token for the overlay fetch |
 | `SKYBRIDGE_PII_OVERLAY_POLL_SECONDS` | `60` | overlay refresh interval (min 15s; `-1` = fetch once at startup) |
@@ -386,6 +397,8 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_MASK_LANGUAGE` | `en` | language passed to the analyzer |
 | `SKYBRIDGE_MASK_ENTITIES` | — (low-cost regex set: `EMAIL_ADDRESS,PHONE_NUMBER,CREDIT_CARD,US_SSN,IP_ADDRESS,IBAN_CODE,CRYPTO`) | comma-separated Presidio entity types to detect; NER-backed types (`PERSON`, `LOCATION`, `ORGANIZATION`, `NRP`) are opt-in — they run full spaCy inference per value and are prone to false positives on ordinary business data |
 | `SKYBRIDGE_MASK_ANONYMIZERS` | — (blanket `{"DEFAULT":{"type":"replace","new_value":"[redacted]"}}`) | JSON Presidio "anonymizers" object, one strategy per entity type — e.g. partial-mask an SSN instead of a flat replace |
+| `SKYBRIDGE_MASK_ALLOW_LIST` | — | comma-separated literal values or regex patterns (per `SKYBRIDGE_MASK_ALLOW_LIST_MATCH`) to never report as PII — suppress a known-safe recurring false positive without disabling an entity type or writing a custom recognizer |
+| `SKYBRIDGE_MASK_ALLOW_LIST_MATCH` | `exact` | `exact` or `regex` — how `SKYBRIDGE_MASK_ALLOW_LIST` entries are interpreted; meaningless when the allow list is empty |
 | `SKYBRIDGE_MASK_MODE` | `best-effort` | `best-effort` forwards a value unmasked if the remote masker errors/is unreachable (a masker outage never blocks a query); `strict` aborts the row/connection instead so unmasked content never reaches the client |
 | `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present an opaque session token, not a DB password) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /your-control-plane/proxy-exchange`) |

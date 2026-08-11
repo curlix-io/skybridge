@@ -25,6 +25,13 @@ type MetricsRecorder interface {
 // them) to redact sensitive values in text fields. Any service that implements these two JSON
 // endpoints can be used.
 //
+// MaskRow batches every eligible column's text into a single "analyze" call per row (Presidio's
+// stock analyzer server accepts "text" as a JSON array and returns one span list per input in the
+// same order — see analyzeBatch), then calls "anonymize" once per column that actually had a
+// detection (Presidio's anonymizer has no batch input, so that half stays one call per hit).
+// RemoteConfig.AllowList lets an operator suppress specific known-safe values/patterns from ever
+// being reported as a detection in the first place.
+//
 // It is best-effort: a detection miss or transport error never fails the session; the value is
 // forwarded unchanged. The masker is a no-op when the analyze/anonymize URLs are empty.
 type Remote struct {
@@ -33,6 +40,11 @@ type Remote struct {
 	language     string
 	minLen       int
 	anonymizers  map[string]any
+	// allowList/allowListMatch are Presidio's /analyze "allow_list"/"allow_list_match" — construction-
+	// time only, like anonymizers, since there's no control-plane dynamic-source equivalent for this
+	// yet (unlike entities/recognizers/threshold, which live in remoteState for hot-swapping).
+	allowList      []string
+	allowListMatch AllowListMatch
 	// metrics records analyzed/masked outcome counts (pure metadata, never values) for the Data
 	// Classification dashboard. Nil is a safe no-op — see MetricsRecorder's doc comment.
 	metrics MetricsRecorder
@@ -67,6 +79,19 @@ type remoteState struct {
 // was chosen.
 const noScoreThreshold float64 = -1
 
+// AllowListMatch selects how RemoteConfig.AllowList entries are interpreted by Presidio's
+// /analyze "allow_list_match" — see RemoteConfig.AllowListMatch.
+type AllowListMatch string
+
+const (
+	// AllowListMatchExact suppresses a detection only when it exactly matches an AllowList entry.
+	// Presidio's own default.
+	AllowListMatchExact AllowListMatch = "exact"
+	// AllowListMatchRegex treats every AllowList entry as a regex pattern; a detection matching any
+	// of them is suppressed.
+	AllowListMatchRegex AllowListMatch = "regex"
+)
+
 // ErrMaskerUnavailable is returned by MaskRow (strict mode only) when the remote analyze/anonymize
 // service could not be reached or returned an unusable response for a value that needed masking.
 var ErrMaskerUnavailable = errors.New("mask: remote masking service unavailable")
@@ -92,6 +117,15 @@ type RemoteConfig struct {
 	// image. See config.LoadRecognizersFile for how this is populated from a YAML file. Nil sends no
 	// ad_hoc_recognizers field, matching Presidio's own default of none.
 	AdHocRecognizers []any
+	// AllowList is Presidio's /analyze "allow_list" — literal values or regex patterns (per
+	// AllowListMatch) that should never be reported as PII, letting an operator suppress a known-safe
+	// recurring false positive (e.g. a support line's own phone number, a fixture SSN in a staging
+	// environment) without disabling an entire entity type or writing a custom recognizer. Nil sends
+	// no allow_list field, matching Presidio's own default of none.
+	AllowList []string
+	// AllowListMatch is Presidio's /analyze "allow_list_match": AllowListMatchExact (default) or
+	// AllowListMatchRegex. Meaningless when AllowList is empty.
+	AllowListMatch AllowListMatch
 	// ScoreThreshold sets Presidio's /analyze "score_threshold" (min confidence to report a match).
 	// The zero value means "not configured" and omits the field from the request entirely, letting
 	// Presidio fall back to each recognizer's own default threshold — see remoteState's doc comment
@@ -146,16 +180,22 @@ func NewRemote(cfg RemoteConfig) *Remote {
 	if cfg.ScoreThreshold > 0 {
 		threshold = cfg.ScoreThreshold
 	}
+	allowListMatch := cfg.AllowListMatch
+	if allowListMatch == "" {
+		allowListMatch = AllowListMatchExact
+	}
 	r := &Remote{
-		analyzeURL:    cfg.AnalyzeURL,
-		anonymizeURL:  cfg.AnonymizeURL,
-		language:      lang,
-		minLen:        minLen,
-		anonymizers:   anonymizers,
-		strict:        cfg.Strict,
-		http:          &http.Client{Timeout: to},
-		metrics:       cfg.Metrics,
-		connectionKey: cfg.ConnectionKey,
+		analyzeURL:     cfg.AnalyzeURL,
+		anonymizeURL:   cfg.AnonymizeURL,
+		language:       lang,
+		minLen:         minLen,
+		anonymizers:    anonymizers,
+		allowList:      cfg.AllowList,
+		allowListMatch: allowListMatch,
+		strict:         cfg.Strict,
+		http:           &http.Client{Timeout: to},
+		metrics:        cfg.Metrics,
+		connectionKey:  cfg.ConnectionKey,
 	}
 	r.state.Store(&remoteState{
 		recognizers:    cfg.AdHocRecognizers,
@@ -217,10 +257,11 @@ func (r *Remote) Detect(ctx context.Context, text string) (category string, conf
 	if !r.Enabled() || len(text) < r.minLen {
 		return "", 0, false
 	}
-	spans, failed := r.analyze(ctx, text)
-	if failed || len(spans) == 0 {
+	results, failed := r.analyzeBatch(ctx, []string{text})
+	if failed || len(results) == 0 || len(results[0]) == 0 {
 		return "", 0, false
 	}
+	spans := results[0]
 	best := spans[0]
 	for _, s := range spans[1:] {
 		if s.Score > best.Score {
@@ -237,14 +278,21 @@ type detectedSpan struct {
 	Score      float64 `json:"score"`
 }
 
-// MaskRow implements Masker by anonymizing each eligible text value. In strict mode (r.strict) a
-// masker failure (transport error, non-200, malformed response) returns ErrMaskerUnavailable
-// instead of forwarding the value unmasked; a successful call that simply finds nothing to mask is
-// never an error, in either mode.
+// MaskRow implements Masker by anonymizing each eligible text value. Every eligible column's text
+// is analyzed in a single batched "analyze" call (see analyzeBatch); anonymize is then called once
+// per column that actually had a detection. In strict mode (r.strict) a masker failure (transport
+// error, non-200, malformed response) returns ErrMaskerUnavailable instead of forwarding the
+// row unmasked; a successful call that simply finds nothing to mask is never an error, in either
+// mode. A failed batch analyze call is one failure for the whole row (every eligible column shares
+// the same outcome), rather than independently per column as when each column called analyze on
+// its own — these calls hit the same backing service, so a real outage was already effectively
+// correlated across columns in practice.
 func (r *Remote) MaskRow(ctx context.Context, cols []Column, row [][]byte) ([][]byte, error) {
 	if !r.Enabled() {
 		return row, nil
 	}
+	var eligible []int
+	var texts []string
 	for i := range row {
 		if i >= len(cols) || row[i] == nil || !cols[i].Text || !cols[i].FreeText {
 			continue
@@ -252,71 +300,87 @@ func (r *Remote) MaskRow(ctx context.Context, cols []Column, row [][]byte) ([][]
 		if len(row[i]) < r.minLen {
 			continue
 		}
-		// RecordAnalyzed fires once per eligible value entering analyze/anonymize, regardless of
-		// outcome — a clean miss, a transport failure, and a successful redaction are all
-		// "analyzed" here, per RecordAnalyzed's contract.
-		if r.metrics != nil {
+		eligible = append(eligible, i)
+		texts = append(texts, string(row[i]))
+	}
+	if len(eligible) == 0 {
+		return row, nil
+	}
+	// RecordAnalyzed fires once per eligible value entering analyze/anonymize, regardless of
+	// outcome — a clean miss, a transport failure, and a successful redaction are all "analyzed"
+	// here, per RecordAnalyzed's contract.
+	if r.metrics != nil {
+		for range eligible {
 			r.metrics.RecordAnalyzed(r.connectionKey, "recognizer")
 		}
-		masked, spans, failed := r.anonymize(ctx, string(row[i]))
-		if failed {
+	}
+	results, failed := r.analyzeBatch(ctx, texts)
+	if failed {
+		if r.strict {
+			return row, ErrMaskerUnavailable
+		}
+		return row, nil
+	}
+	for j, i := range eligible {
+		spans := results[j]
+		if len(spans) == 0 {
+			continue
+		}
+		masked, ok := r.anonymizeSpans(ctx, texts[j], spans)
+		if !ok {
 			if r.strict {
 				return row, ErrMaskerUnavailable
 			}
 			continue
 		}
-		if len(spans) > 0 {
-			row[i] = []byte(masked)
-			if r.metrics != nil {
-				for _, s := range spans {
-					r.metrics.RecordMasked(r.connectionKey, s.EntityType, s.End-s.Start, "recognizer")
-				}
+		row[i] = []byte(masked)
+		if r.metrics != nil {
+			for _, s := range spans {
+				r.metrics.RecordMasked(r.connectionKey, s.EntityType, s.End-s.Start, "recognizer")
 			}
 		}
 	}
 	return row, nil
 }
 
-// anonymize runs analyze -> anonymize for one value. Returns the anonymized text (or the original
-// text if nothing was detected), the detected spans (empty when nothing was found), and
-// failed=true only when the remote calls themselves could not be completed — never for a clean
-// "no PII found" result. Callers must only treat the value as actually masked when failed is false
-// AND spans is non-empty (a value can come back byte-identical to the input from anonymize even
-// with spans, but an empty spans list unambiguously means nothing was masked).
-func (r *Remote) anonymize(ctx context.Context, text string) (string, []detectedSpan, bool) {
-	results, failed := r.analyze(ctx, text)
-	if failed {
-		return text, nil, true
-	}
-	if len(results) == 0 {
-		return text, nil, false
-	}
+// anonymizeSpans calls "anonymize" for one value given its already-known analyzer_results.
+// Returns ok=false only when the remote call itself could not be completed (transport error,
+// non-200, malformed response) — callers must leave the original value in place in that case.
+func (r *Remote) anonymizeSpans(ctx context.Context, text string, spans []detectedSpan) (string, bool) {
 	body := map[string]any{
 		"text":             text,
-		"analyzer_results": results,
+		"analyzer_results": spans,
 		"anonymizers":      r.anonymizers,
 	}
 	var out struct {
 		Text string `json:"text"`
 	}
 	if !r.postJSON(ctx, r.anonymizeURL, body, &out) {
-		return text, nil, true
+		return text, false
 	}
-	return out.Text, results, false
+	return out.Text, true
 }
 
-// analyze returns the detected spans and failed=true only on a transport/decode/non-200 error —
-// an empty result slice with failed=false means the call succeeded and found nothing.
-func (r *Remote) analyze(ctx context.Context, text string) ([]detectedSpan, bool) {
-	body := map[string]any{"text": text, "language": r.language, "entities": r.currentEntities()}
+// analyzeBatch analyzes texts in a single "analyze" call. "text" is always sent as a JSON array
+// (even for a length-1 slice) since Presidio's stock analyzer server branches its response shape
+// on whether the request's "text" field is a list: an array in means an array of per-item span
+// lists comes back, in the same order as texts — see presidio-analyzer's app.py. failed=true only
+// on a transport/decode/non-200 error; a successful call always returns len(results) ==
+// len(texts), each entry possibly empty when nothing was found for that text.
+func (r *Remote) analyzeBatch(ctx context.Context, texts []string) ([][]detectedSpan, bool) {
+	body := map[string]any{"text": texts, "language": r.language, "entities": r.currentEntities()}
 	if recognizers := r.currentRecognizers(); len(recognizers) > 0 {
 		body["ad_hoc_recognizers"] = recognizers
 	}
 	if threshold := r.currentScoreThreshold(); threshold != noScoreThreshold {
 		body["score_threshold"] = threshold
 	}
-	var out []detectedSpan
-	if !r.postJSON(ctx, r.analyzeURL, body, &out) {
+	if len(r.allowList) > 0 {
+		body["allow_list"] = r.allowList
+		body["allow_list_match"] = r.allowListMatch
+	}
+	var out [][]detectedSpan
+	if !r.postJSON(ctx, r.analyzeURL, body, &out) || len(out) != len(texts) {
 		return nil, true
 	}
 	return out, false

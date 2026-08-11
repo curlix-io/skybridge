@@ -114,8 +114,19 @@ func TestLoadAgentTargetsInvalidJSONReturnsNil(t *testing.T) {
 func TestLoadAgentParsesPIIOverlayJSON(t *testing.T) {
 	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[EMAIL]"}`)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[EMAIL]" {
+	if a.PIIOverlay["email"].Token != "[EMAIL]" {
 		t.Fatalf("unexpected overlay: %v", a.PIIOverlay)
+	}
+}
+
+func TestLoadAgentPIIOverlayInlineJSONNeverPartial(t *testing.T) {
+	// The inline env var only ever supports a plain string (full-value replacement); a mapping
+	// value there isn't a valid string, so json.Unmarshal into map[string]string fails and the
+	// whole overlay comes back nil, per parseOverlay's contract.
+	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"credit_card":{"partial_mask":true}}`)
+	a := LoadAgent()
+	if a.PIIOverlay != nil {
+		t.Fatalf("expected nil overlay for a non-string inline value, got %v", a.PIIOverlay)
 	}
 }
 
@@ -136,8 +147,42 @@ func TestLoadAgentParsesPIIOverlayFileYAML(t *testing.T) {
 	}
 	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[EMAIL]" || a.PIIOverlay["ssn"] != "[SSN]" {
+	if a.PIIOverlay["email"].Token != "[EMAIL]" || a.PIIOverlay["ssn"].Token != "[SSN]" {
 		t.Fatalf("unexpected overlay: %v", a.PIIOverlay)
+	}
+}
+
+func TestLoadAgentParsesPIIOverlayFilePartialMaskRule(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlay.yaml")
+	yaml := "email: \"[EMAIL]\"\ncredit_card:\n  partial_mask: true\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
+	a := LoadAgent()
+	if a.PIIOverlay["email"].Token != "[EMAIL]" || a.PIIOverlay["email"].Partial {
+		t.Fatalf("expected email to be a plain token rule, got %+v", a.PIIOverlay["email"])
+	}
+	if !a.PIIOverlay["credit_card"].Partial {
+		t.Fatalf("expected credit_card to be a partial-mask rule, got %+v", a.PIIOverlay["credit_card"])
+	}
+}
+
+func TestLoadAgentPIIOverlayFileSkipsUnrecognizedRuleShapeButKeepsOthers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlay.yaml")
+	yaml := "email: \"[EMAIL]\"\nbad_column:\n  something_else: true\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
+	a := LoadAgent()
+	if a.PIIOverlay["email"].Token != "[EMAIL]" {
+		t.Fatalf("expected valid rule to survive alongside a bad one, got %v", a.PIIOverlay)
+	}
+	if _, ok := a.PIIOverlay["bad_column"]; ok {
+		t.Fatalf("expected unrecognized rule shape to be skipped, got %v", a.PIIOverlay["bad_column"])
 	}
 }
 
@@ -150,7 +195,7 @@ func TestLoadAgentPIIOverlayFileTakesPriorityOverInline(t *testing.T) {
 	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
 	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[FROM-FILE]" {
+	if a.PIIOverlay["email"].Token != "[FROM-FILE]" {
 		t.Fatalf("expected overlay file to take priority, got %v", a.PIIOverlay)
 	}
 }
@@ -159,7 +204,7 @@ func TestLoadAgentPIIOverlayFileMissingFallsBackToInline(t *testing.T) {
 	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[FROM-ENV]" {
+	if a.PIIOverlay["email"].Token != "[FROM-ENV]" {
 		t.Fatalf("expected fallback to inline overlay, got %v", a.PIIOverlay)
 	}
 }
@@ -173,7 +218,7 @@ func TestLoadAgentPIIOverlayFileInvalidYAMLFallsBackToInline(t *testing.T) {
 	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
 	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[FROM-ENV]" {
+	if a.PIIOverlay["email"].Token != "[FROM-ENV]" {
 		t.Fatalf("expected fallback to inline overlay, got %v", a.PIIOverlay)
 	}
 }
@@ -213,6 +258,42 @@ func TestLoadAgentMaskAnonymizersInvalidJSONReturnsNil(t *testing.T) {
 	a := LoadAgent()
 	if a.MaskAnonymizers != nil {
 		t.Fatalf("expected nil anonymizers on invalid JSON, got %v", a.MaskAnonymizers)
+	}
+}
+
+func TestLoadAgentParsesMaskAllowListCSVPreservingCase(t *testing.T) {
+	t.Setenv("SKYBRIDGE_MASK_ALLOW_LIST", " support@example.com ,555-0100,,Some-Value")
+	a := LoadAgent()
+	want := []string{"support@example.com", "555-0100", "Some-Value"}
+	if len(a.MaskAllowList) != len(want) {
+		t.Fatalf("unexpected allow list: %v", a.MaskAllowList)
+	}
+	for i, e := range want {
+		if a.MaskAllowList[i] != e {
+			t.Fatalf("unexpected allow list: %v", a.MaskAllowList)
+		}
+	}
+}
+
+func TestLoadAgentMaskAllowListEmptyReturnsNil(t *testing.T) {
+	a := LoadAgent()
+	if a.MaskAllowList != nil {
+		t.Fatalf("expected nil allow list by default, got %v", a.MaskAllowList)
+	}
+}
+
+func TestLoadAgentMaskAllowListMatchDefaultsToExact(t *testing.T) {
+	a := LoadAgent()
+	if a.MaskAllowListMatch != "exact" {
+		t.Fatalf("expected default allow list match %q, got %q", "exact", a.MaskAllowListMatch)
+	}
+}
+
+func TestLoadAgentMaskAllowListMatchHonorsRegex(t *testing.T) {
+	t.Setenv("SKYBRIDGE_MASK_ALLOW_LIST_MATCH", "regex")
+	a := LoadAgent()
+	if a.MaskAllowListMatch != "regex" {
+		t.Fatalf("expected allow list match %q, got %q", "regex", a.MaskAllowListMatch)
 	}
 }
 

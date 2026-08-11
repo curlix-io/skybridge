@@ -247,8 +247,29 @@ func TestPathOverlay_PartialMaskProfile(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(out[0]) != "[masked]" {
-		t.Fatalf("expected partial_mask token, got %q", out[0])
+	if string(out[0]) != "****1234" {
+		t.Fatalf("expected value's last 4 characters kept and the rest masked, got %q", out[0])
+	}
+}
+
+// TestPathOverlay_PartialMaskProfileTypedColumnUnaffected locks in
+// docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap B non-goal: partial_mask has no defined meaning for
+// a typed (non-free-text) column, so a confirmed label with that profile on a typed column must
+// still fall back to the type-valid placeholder (full_redact's behavior), never partial masking.
+func TestPathOverlay_PartialMaskProfileTypedColumnUnaffected(t *testing.T) {
+	store := label.NewMemStore()
+	ctx := context.Background()
+	_ = store.Put(ctx, label.Label{
+		ObjectID: "org1:postgres:orders", FieldPath: "created_at", Source: label.SourceManual, Profile: "partial_mask",
+	})
+	p := NewPathOverlay(store)
+	c := []Column{{Name: "created_at", ObjectID: "org1:postgres:orders", Text: true, FreeText: false, TypeKind: TypeKindDate}}
+	out, err := p.MaskRow(ctx, c, [][]byte{[]byte("2026-01-15")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "0001-01-01" {
+		t.Fatalf("expected type-valid date placeholder, not partial masking, got %q", out[0])
 	}
 }
 
