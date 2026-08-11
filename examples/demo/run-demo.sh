@@ -69,7 +69,7 @@ up() {
   SKYBRIDGE_PII_OVERLAY_FILE="$(pwd)/examples/pii-overlay.yaml" \
   SKYBRIDGE_MASK_ANALYZE_URL="http://localhost:13000/analyze" \
   SKYBRIDGE_MASK_ANONYMIZE_URL="http://localhost:13001/anonymize" \
-  go run ./cmd/skybridge-agent >/tmp/skybridge-demo-pg-agent.log 2>&1 &
+  go run ./cmd/skybridge agent >/tmp/skybridge-demo-pg-agent.log 2>&1 &
   echo $! >> "$PID_FILE"
 
   echo "starting skybridge-agent (mysql) on :${MYSQL_AGENT_PORT}..."
@@ -77,7 +77,7 @@ up() {
   SKYBRIDGE_UPSTREAM="localhost:${MYSQL_PORT}" \
   SKYBRIDGE_LISTEN=":${MYSQL_AGENT_PORT}" \
   SKYBRIDGE_PII_OVERLAY_FILE="$(pwd)/examples/pii-overlay.yaml" \
-  go run ./cmd/skybridge-agent >/tmp/skybridge-demo-mysql-agent.log 2>&1 &
+  go run ./cmd/skybridge agent >/tmp/skybridge-demo-mysql-agent.log 2>&1 &
   echo $! >> "$PID_FILE"
 
   echo "starting skybridge-agent (mongodb) on :${MONGO_AGENT_PORT}..."
@@ -85,7 +85,7 @@ up() {
   SKYBRIDGE_UPSTREAM="localhost:${MONGO_PORT}" \
   SKYBRIDGE_LISTEN=":${MONGO_AGENT_PORT}" \
   SKYBRIDGE_PII_OVERLAY_FILE="$(pwd)/examples/pii-overlay.yaml" \
-  go run ./cmd/skybridge-agent >/tmp/skybridge-demo-mongo-agent.log 2>&1 &
+  go run ./cmd/skybridge agent >/tmp/skybridge-demo-mongo-agent.log 2>&1 &
   echo $! >> "$PID_FILE"
 
   sleep 2

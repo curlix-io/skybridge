@@ -1,5 +1,3 @@
-//go:build querystudio
-
 package studiotransport
 
 // Additional coverage for branches transport_test.go doesn't already exercise: the Registered log

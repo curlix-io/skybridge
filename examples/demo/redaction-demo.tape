@@ -30,7 +30,7 @@ Enter
 Sleep 45s
 
 # ---- 0b. See the agent's configuration options ----
-Type "go run ./cmd/skybridge-agent --help"
+Type "go run ./cmd/skybridge agent --help"
 Enter
 Sleep 3s
 

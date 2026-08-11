@@ -7,29 +7,30 @@ drivers), and **masks PII at the source** — so raw rows never leave your netwo
 - Stdlib-only wire-proxy core — manual protocol parsing + masking, no third-party deps.
 - Content-aware masking — pluggable remote masker + a column overlay you define.
 - Anything an engine can't parse is forwarded **unmasked, never corrupted**.
-- One edge binary (`skybridge-edge`) also dials home for **live read-only AWS reads**, so everything
-  that must run inside your network is a single install.
+- One binary (`skybridge`, roles picked by the first argument) also dials home for **live read-only
+  AWS reads** in its `edge` role, so everything that must run inside your network is a single
+  install.
 
 **Jump to:** [How it works](#how-it-works) · [Quick start](#quick-start) ·
 [How masking works](#how-masking-works) · [Configure](#configure) ·
 [Performance and tuning](#performance-and-tuning) ·
-[The `skybridge-edge` binary](#the-skybridge-edge-binary) · [Layout](#layout) ·
+[The `edge` role](#the-edge-role) · [Layout](#layout) ·
 [Database support](#database-support-at-a-glance) ·
 [REDACTION.md](./REDACTION.md) (deep dive, with a live demo GIF)
 
 ### Database support at a glance
 
-| Database  | Wire protocol     | Transparent wire proxy (`internal/wire`) | One-shot exec (`dbquery`/`dbexec`, `querystudio` tag) |
+| Database  | Wire protocol     | Transparent wire proxy (`internal/wire`) | One-shot exec (`dbquery`/`dbexec`) |
 |-----------|-------------------|:-----------------------------------------:|:-------------------------------------------------------:|
 | Postgres  | native TCP        | ✅ | ✅ |
 | MySQL     | native TCP        | ✅ | ✅ |
 | MongoDB   | native TCP (BSON) | ✅ | ✅ |
-| Snowflake | HTTPS/REST        | ❌ — no wire protocol to proxy | ✅ (querystudio only) |
+| Snowflake | HTTPS/REST        | ❌ — no wire protocol to proxy | ✅ |
 
 Postgres/MySQL/Mongo get a full native-client wire proxy: point `psql`/`mysql`/`mongosh` (or an app
 driver) straight at the agent and it masks rows in flight. Snowflake speaks HTTPS/REST, not a native
-TCP protocol, so there's no handshake to transparently proxy — it's supported only via the optional
-`querystudio` build tag's one-shot query-exec path, sharing the same masking pipeline.
+TCP protocol, so there's no handshake to transparently proxy — it's supported only via the
+one-shot query-exec path (`edge` role), sharing the same masking pipeline.
 
 ## How it works
 
@@ -65,10 +66,10 @@ dials out, nothing dials in):
 - **Listener** — native clients connect straight to the agent. Simplest setup.
 - **Tunnel** — the agent dials **out** to a gateway; clients connect to the gateway, which relays
   already-masked bytes over the tunnel. Masking still happens at the agent.
-- **Edge** — `skybridge-edge` dials **out** to a Connector Gateway and runs dispatched
+- **Edge** — the `edge` role dials **out** to a Connector Gateway and runs dispatched
   **read-only tool calls** locally — chiefly live AWS reads against your account — and can co-host the
   wire proxy in the same process. One install for everything that must run inside your network. See
-  [The `skybridge-edge` binary](#the-skybridge-edge-binary) below.
+  [The `edge` role](#the-edge-role) below.
 
 ## Quick start
 
@@ -81,14 +82,15 @@ brew tap curlix-io/skybridge https://github.com/curlix-io/skybridge
 brew install skybridge
 ```
 
-Installs `skybridge-agent`, `skybridge-gateway`, and `skybridge-edge` (macOS/Linux, amd64/arm64).
+Installs the single `skybridge` binary (macOS/Linux, amd64/arm64) — the role
+(`agent`/`gateway`/`edge`/`labeller`) is picked by the first argument at run time.
 The formula (`Formula/skybridge.rb`) is regenerated and pushed to this repo's `main` branch on
 every tagged release by `.goreleaser.yaml`'s `brews:` block, installing from that release's tar.gz
-archives — see the repo's [Releases](https://github.com/curlix-io/skybridge/releases) page (prebuilt
-container images are published separately to
+archives — see the repo's [Releases](https://github.com/curlix-io/skybridge/releases) page (a prebuilt
+container image is published separately to
 [github.com/curlix-io/skybridge/packages](https://github.com/curlix-io/skybridge/packages), see
-[`scripts/push-ghcr.sh`](./scripts/push-ghcr.sh)). `skybridge-edge` is the single binary most
-customers run to connect to Curlix — see [The `skybridge-edge` binary](#the-skybridge-edge-binary).
+[`scripts/push-ghcr.sh`](./scripts/push-ghcr.sh)). `skybridge edge` is the role most
+customers run to connect to Curlix — see [The `edge` role](#the-edge-role).
 
 ### Fastest path: column redaction, no external services
 
@@ -99,7 +101,7 @@ free text, but it's the quickest way to see redaction working end to end.
 ```sh
 SKYBRIDGE_UPSTREAM=db.internal:5432 \
 SKYBRIDGE_PII_OVERLAY_FILE=./examples/pii-overlay.yaml \
-go run ./cmd/skybridge-agent
+go run ./cmd/skybridge agent
 ```
 
 [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml) is a column → replacement-token map in
@@ -134,14 +136,14 @@ disable content masking (governed passthrough), or point them at a different `an
 service. Running with plain `go run` (no compose) has no mask URLs by default — set them explicitly
 to reach a Presidio instance you run yourself.
 
-The compose file runs `skybridge-edge` (not the plain agent) so this same stack, unchanged, also
+The compose file runs the `edge` role (not the plain `agent` role) so this same stack, unchanged, also
 covers AWS/k8s tool dispatch — just set `SKYBRIDGE_EDGE_GATEWAY` (plus `SKYBRIDGE_ORG_ID`/
 `SKYBRIDGE_EDGE_ID`) alongside `SKYBRIDGE_UPSTREAM` and edge dials out to a Connector Gateway in
 the same process that's already running the wire proxy; leave `SKYBRIDGE_EDGE_GATEWAY` unset to run
 the wire proxy alone, no outbound gateway dial. That keeps a full-featured install at 3 containers:
 `edge` + the two Presidio containers.
 
-`deploy/docker-compose.yml` also has an opt-in `--profile labeller` for `skybridge-labeller`, off
+`deploy/docker-compose.yml` also has an opt-in `--profile labeller` for the `labeller` role, off
 by default since it needs external services this repo doesn't ship (an LLM endpoint + control-plane
 `pii-path-labels` URL). Bring it in with `docker compose --profile labeller up -d`.
 
@@ -182,7 +184,7 @@ docker compose down
 ```
 
 **Typed-column (BSON) redaction against a real MongoDB** ([`examples/mongo-typekind-demo/`](./examples/mongo-typekind-demo/)) —
-runs a real `skybridge-agent` (mongo mode) in front of a real MongoDB, wired to a stub control-plane
+runs a real `skybridge agent` (mongo mode) in front of a real MongoDB, wired to a stub control-plane
 server serving one confirmed `manual` label on a BSON datetime field, and a runner that queries
 through the agent and asserts the typed field comes back redacted to a type-valid placeholder
 rather than left raw or corrupted (`mask.Column.TypeKind`, see [How masking
@@ -403,7 +405,7 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_UPSTREAM` | — | upstream database `host:port` (**required**) |
 | `SKYBRIDGE_DB_TYPE` | `postgres` | `postgres`, `mysql`, or `mongodb` |
 | `SKYBRIDGE_LISTEN` | `:15432` / `:13306` / `:27018` | local address clients connect to |
-| `SKYBRIDGE_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` — set to `debug` for extra per-connection troubleshooting detail; every log line is tagged with a `component` (e.g. `skybridge-agent`) rather than a hardcoded backend name, so it reads the same whether or not a control-plane integration is configured |
+| `SKYBRIDGE_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` — set to `debug` for extra per-connection troubleshooting detail; every log line is tagged with a `component` (e.g. `skybridge-agent` for the `agent` role) rather than a hardcoded backend name, so it reads the same whether or not a control-plane integration is configured |
 | `SKYBRIDGE_PII_OVERLAY` | — | JSON `{ "column": "[redacted]" }` map you define (static) |
 | `SKYBRIDGE_PII_OVERLAY_FILE` | — | path to a YAML or JSON file with the same column->token map (see [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml)) — easier to author/diff/commit than inline JSON; takes priority over `SKYBRIDGE_PII_OVERLAY` when both are set, falling back to it if the file is missing/invalid. Also the only form that accepts a `partial_mask: true` rule per column (keep the last 4 characters, mask the rest) instead of a plain replacement token — `SKYBRIDGE_PII_OVERLAY` stays token-only |
 | `SKYBRIDGE_PII_OVERLAY_URL` | — | control-plane endpoint to fetch the org's projected overlay (`GET /your-control-plane/pii-overlay`); enables dynamic, hot-swapped masking |
@@ -446,7 +448,7 @@ SKYBRIDGE_UPSTREAM=db.internal:5432 \
 SKYBRIDGE_INJECT_CREDENTIALS=true \
 SKYBRIDGE_TOKEN=<agent-service-bearer> \
 SKYBRIDGE_CREDENTIAL_EXCHANGE_URL=https://app.example.com/your-control-plane/proxy-exchange \
-go run ./cmd/skybridge-agent
+go run ./cmd/skybridge agent
 ```
 
 Your control plane mints the session token however it likes (e.g. a `proxy-session` endpoint that
@@ -486,7 +488,7 @@ SKYBRIDGE_DB_TYPE=postgres SKYBRIDGE_UPSTREAM=db.internal:5432 \
 SKYBRIDGE_INJECT_CREDENTIALS=true SKYBRIDGE_TOKEN=… \
 SKYBRIDGE_CREDENTIAL_EXCHANGE_URL=https://app.example.com/your-control-plane/proxy-exchange \
 SKYBRIDGE_CLIENT_TLS_SELF_SIGNED=true \
-go run ./cmd/skybridge-agent
+go run ./cmd/skybridge agent
 # then: psql "host=localhost port=15432 user=me sslmode=require"  (password = the session token)
 ```
 
@@ -516,7 +518,7 @@ SKYBRIDGE_DB_TYPE=postgres \
 SKYBRIDGE_UPSTREAM=mydb.abc123.us-east-1.rds.amazonaws.com:5432 \
 SKYBRIDGE_UPSTREAM_TLS=verify-full \
 SKYBRIDGE_UPSTREAM_TLS_CA_FILE=/etc/ssl/rds/global-bundle.pem \
-go run ./cmd/skybridge-agent
+go run ./cmd/skybridge agent
 ```
 
 `prefer`/`require` encrypt the hop but do **not** authenticate the database; use `verify-ca` (handy
@@ -543,7 +545,7 @@ sync with column rules your own admin surface manages, point the agent at an HTT
 SKYBRIDGE_ORG_ID=<org-uuid> \
 SKYBRIDGE_TOKEN=<org-scoped-bearer> \
 SKYBRIDGE_PII_OVERLAY_URL=https://app.example.com/your-control-plane/pii-overlay \
-go run ./cmd/skybridge-agent
+go run ./cmd/skybridge agent
 ```
 
 The agent fetches `{ "columns": { "<column>": "<token>" } }` at startup and re-fetches every
@@ -600,8 +602,8 @@ truth — the table below is a summary, not a replacement).
 | `SKYBRIDGE_PATH_LABEL_PUSH_SECONDS` | `15` (floored) | How often detector-proposed labels are pushed upstream. More frequent pushes surface new proposals faster at the cost of more outbound requests. |
 | `SKYBRIDGE_MASKING_METRICS_PUSH_SECONDS` | `60` (floored) | Push interval for masking-outcome metrics (counts only, never values). Purely observability — has no effect on masking behavior or query latency. |
 | `SKYBRIDGE_SESSION_REPLAY_MAX_BYTES` | `5 MiB` | Caps the in-memory transcript buffer per session when `SKYBRIDGE_SESSION_REPLAY_ENABLED=true`. Lower this on memory-constrained deployments with many concurrent sessions. |
-| `SKYBRIDGE_STUDIO_MAX_SESSIONS` | `8` | (`querystudio` tag) Caps concurrent Query Studio dispatch sessions on one edge process. |
-| `SKYBRIDGE_GW_CLIENT_CONN_PER_MIN` / `SKYBRIDGE_GW_ORG_CONN_PER_MIN` | unset (no limit) | Gateway-side per-client / per-org connection-rate ceilings — the main throughput/abuse knobs on `skybridge-gateway` in tunnel mode. |
+| `SKYBRIDGE_STUDIO_MAX_SESSIONS` | `8` | Caps concurrent Query Studio dispatch sessions on one `edge`-role process. |
+| `SKYBRIDGE_GW_CLIENT_CONN_PER_MIN` / `SKYBRIDGE_GW_ORG_CONN_PER_MIN` | unset (no limit) | Gateway-side per-client / per-org connection-rate ceilings — the main throughput/abuse knobs on the `gateway` role in tunnel mode. |
 
 Everything else in `internal/config/config.go` (TLS, credential exchange, enrollment) is
 correctness/security configuration, not a performance knob.
@@ -609,9 +611,9 @@ correctness/security configuration, not a performance knob.
 ## Layout
 
 ```
-cmd/skybridge-agent     egress agent: listener OR tunnel mode
-cmd/skybridge-gateway   relay gateway: agent endpoint + client listeners
-cmd/skybridge-edge      unified edge: call-home transport + AWS reads + optional wire proxy
+cmd/skybridge           single binary; role picked by the first argument — agent (listener OR
+                        tunnel mode) | gateway (agent endpoint + client listeners) | edge (call-home
+                        transport + AWS reads + optional wire proxy) | labeller
 internal/wire           wire engines: postgres, mysql, mongo
 internal/wire/scram     protocol-agnostic SCRAM-SHA-1/SHA-256 client-conversation math, shared by
                         postgres and mongo's credential-injection upstream-auth origination
@@ -628,11 +630,11 @@ internal/config         SKYBRIDGE_* environment config
 ```
 
 See [Database support at a glance](#database-support-at-a-glance) above for which databases get a
-wire engine (`internal/wire`) vs. exec-only support (`dbquery`/`dbexec`, `querystudio` tag).
+wire engine (`internal/wire`) vs. exec-only support (`dbquery`/`dbexec`).
 
-### The `skybridge-edge` binary
+### The `edge` role
 
-`skybridge-edge` is the single thing a customer installs. It dials **out** (egress-only) to the SaaS
+`skybridge edge` is the single thing a customer installs. It dials **out** (egress-only) to the SaaS
 Connector Gateway and serves dispatched **single read-only tool calls** locally — chiefly live AWS
 reads against the customer account (`aws_readonly_cli`, `cloudwatch_logs_insights`,
 `cloudwatch_metrics`) — and, when DB targets are configured, also runs the co-located wire proxy. The
@@ -642,7 +644,7 @@ LLM agent loop and platform-coupled tools stay on the SaaS side.
 SKYBRIDGE_EDGE_GATEWAY=gateway.example.com:8020 \
 SKYBRIDGE_ORG_ID=org-123 SKYBRIDGE_EDGE_ID=edge-1 SKYBRIDGE_TOKEN=... \
 SKYBRIDGE_AWS_REGION=us-east-1 \
-go run ./cmd/skybridge-edge
+go run ./cmd/skybridge edge
 ```
 
 Or set a single `SKYBRIDGE_KEY` instead of `SKYBRIDGE_EDGE_GATEWAY`/`SKYBRIDGE_ORG_ID`/`SKYBRIDGE_TOKEN`
@@ -651,7 +653,7 @@ Or set a single `SKYBRIDGE_KEY` instead of `SKYBRIDGE_EDGE_GATEWAY`/`SKYBRIDGE_O
 ```sh
 SKYBRIDGE_KEY="skybridge://org-123:<enrollment-token>@gateway.example.com?edge_id=edge-1" \
 SKYBRIDGE_AWS_REGION=us-east-1 \
-go run ./cmd/skybridge-edge
+go run ./cmd/skybridge edge
 ```
 
 `SKYBRIDGE_KEY` only seeds defaults — any discrete `SKYBRIDGE_*` var above still overrides it, so

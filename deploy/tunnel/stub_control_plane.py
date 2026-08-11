@@ -9,7 +9,7 @@ best-effort/no-op without one. This stub implements the wire-targets GET route
 gateway + agent/edge setup can resolve a target and relay real wire traffic to UPSTREAM_ADDR.
 
 Once SKYBRIDGE_GW_CONTROL_PLANE_URL is set at all, the gateway also wires up HTTPWireAdmitter and
-HTTPStore (cmd/skybridge-gateway/main.go) against the same base URL — unlike NoopTargetResolver,
+HTTPStore (cmd/skybridge/gateway.go) against the same base URL — unlike NoopTargetResolver,
 their Noop counterparts aren't the default once a control-plane URL is configured, so this stub
 must answer POST /api/v1/wire-admit (200 = admitted) and the session-lifecycle POSTs
 (internal/gateway/httpstore.go's contract) too, or the gateway's default http.Server 501s on POST

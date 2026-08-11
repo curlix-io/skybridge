@@ -1,5 +1,3 @@
-//go:build querystudio
-
 package studiotransport
 
 import "testing"

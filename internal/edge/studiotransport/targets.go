@@ -1,5 +1,3 @@
-//go:build querystudio
-
 package studiotransport
 
 import "github.com/curlix-io/skybridge/internal/edge/dbquery"

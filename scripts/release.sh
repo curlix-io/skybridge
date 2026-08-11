@@ -2,15 +2,11 @@
 # Cuts a new release entirely locally — no dependency on GitHub Actions:
 #   1. creates+pushes a vX.Y.Z git tag
 #   2. creates the GitHub release for that tag via `gh release create`
-#   3. builds+pushes the skybridge docker images to ghcr.io/curlix-io/skybridge (multi-arch, via
-#      buildx), same layout as scripts/push-ghcr.sh — including a separate edge-querystudio image,
-#      since the plain edge image never has Query Studio dispatch compiled in (Dockerfile.edge's
-#      BUILD_TAGS defaults to empty, matching `make edge`; see CLAUDE.md's "default build has zero
-#      optional-integration code" contract):
-#        ghcr.io/curlix-io/skybridge:agent-<version>              (+ :agent-latest)
-#        ghcr.io/curlix-io/skybridge:gateway-<version>            (+ :gateway-latest)
-#        ghcr.io/curlix-io/skybridge:edge-<version>               (+ :edge-latest, + bare :latest)
-#        ghcr.io/curlix-io/skybridge:edge-querystudio-<version>   (+ :edge-querystudio-latest)
+#   3. builds+pushes the skybridge docker image to ghcr.io/curlix-io/skybridge (multi-arch, via
+#      buildx), same layout as scripts/push-ghcr.sh — one binary, one image; the role
+#      (agent/gateway/edge/labeller) is picked by the container's runtime args, not by which image
+#      tag was pulled:
+#        ghcr.io/curlix-io/skybridge:<version>   (+ :latest)
 #
 # This does NOT run .github/workflows/release.yml or ghcr-publish.yml — if those are enabled on
 # this repo they'll also fire on the tag push and do the same work again; disable/ignore them or
@@ -86,27 +82,11 @@ gh release create "$TAG" \
 
 IMAGE="ghcr.io/curlix-io/skybridge"
 PLATFORMS="linux/amd64,linux/arm64"
+TAGS=("${IMAGE}:${VERSION}" "${IMAGE}:latest")
 
-CMDS=(skybridge-agent skybridge-gateway skybridge-edge skybridge-edge)
-PREFIXES=(agent gateway edge edge-querystudio)
-DOCKERFILES=(Dockerfile Dockerfile Dockerfile.edge Dockerfile.edge)
-BUILD_TAGS=("" "" "" "querystudio")
-
-for i in "${!CMDS[@]}"; do
-  cmd="${CMDS[$i]}"
-  prefix="${PREFIXES[$i]}"
-  dockerfile="${DOCKERFILES[$i]}"
-  build_tags="${BUILD_TAGS[$i]}"
-  tags=("${IMAGE}:${prefix}-${VERSION}" "${IMAGE}:${prefix}-latest")
-  # skybridge-edge is the single-install binary most customers use (see CLAUDE.md), so it also
-  # gets the bare :latest alias on top of its edge-latest tag.
-  if [ "${prefix}" = "edge" ]; then
-    tags+=("${IMAGE}:latest")
-  fi
-  echo "==> building+pushing ${cmd} -> ${IMAGE}:${prefix}-${VERSION} (${dockerfile}, tags=[${build_tags}], engine=${CONTAINER_ENGINE:-docker}, ${PLATFORMS})"
-  build_and_push_image "${cmd}" "${dockerfile}" "${build_tags}" "${PLATFORMS}" "${tags[@]}"
-done
+echo "==> building+pushing ${IMAGE}:${VERSION} (engine=${CONTAINER_ENGINE:-docker}, ${PLATFORMS})"
+build_and_push_image "${PLATFORMS}" "${TAGS[@]}"
 
 echo "==> done."
 echo "    GitHub release: https://github.com/${REPO}/releases/tag/${TAG}"
-echo "    GHCR images:    https://github.com/curlix-io/skybridge/pkgs/container/skybridge (agent-${VERSION}, gateway-${VERSION}, edge-${VERSION}, latest)"
+echo "    GHCR image:     https://github.com/curlix-io/skybridge/pkgs/container/skybridge (${VERSION}, latest)"

@@ -31,7 +31,7 @@ extra_pids=()
 extra_agent_count=0
 start_agent() { # env-assignments-string
   extra_agent_count=$((extra_agent_count + 1))
-  eval "$1 go run ./cmd/skybridge-agent >/tmp/skybridge-demo-extra-agent-${extra_agent_count}.log 2>&1 &"
+  eval "$1 go run ./cmd/skybridge agent >/tmp/skybridge-demo-extra-agent-${extra_agent_count}.log 2>&1 &"
   extra_pids+=("$!")
 }
 wait_ready() { # port

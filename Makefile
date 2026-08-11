@@ -1,11 +1,11 @@
 # Skybridge — Go data plane for governed native database access + edge tool execution.
-# The wire-proxy core is stdlib-only; the edge binary adds gRPC + aws-sdk-go-v2 (committed stubs in
+# The wire-proxy core is stdlib-only; the edge role adds gRPC + aws-sdk-go-v2 (committed stubs in
 # internal/genpb, so `go build` still works offline once deps are cached).
 #
-# The `querystudio` build tag adds Query Studio dispatch (internal/edge/studiotransport, dbexec,
-# dbquery) to the edge binary — an optional extra excluded from the default build so this module
-# has no required dependency on it. Use `make edge-querystudio`/`test-querystudio`/etc. to build/test
-# with it.
+# One binary (./cmd/skybridge), one image — the role (agent/gateway/edge/labeller) is picked by the
+# first argument at run time, e.g. `bin/skybridge agent` or `docker run <image> edge`, not by which
+# binary was built. Query Studio dispatch (internal/edge/studiotransport, dbexec, dbquery) is always
+# compiled in and simply stays dormant unless SKYBRIDGE_STUDIO_GATEWAY is set at runtime.
 GO       ?= go
 GOFLAGS  ?=
 BINDIR   ?= bin
@@ -13,34 +13,14 @@ LDFLAGS  ?= -s -w
 BUF      ?= buf
 GOTAGS   ?=
 
-.PHONY: all build agent gateway edge edge-querystudio labeller gen test test-querystudio race race-querystudio vet vet-querystudio fmt lint tidy clean verify verify-querystudio
+.PHONY: all build gen test race vet fmt lint tidy clean verify
 
 all: build
 
-build: agent gateway edge
-
-agent:
-	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -tags "$(GOTAGS)" -ldflags="$(LDFLAGS)" -o $(BINDIR)/skybridge-agent ./cmd/skybridge-agent
-
-gateway:
-	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -tags "$(GOTAGS)" -ldflags="$(LDFLAGS)" -o $(BINDIR)/skybridge-gateway ./cmd/skybridge-gateway
-
-edge:
-	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -tags "$(GOTAGS)" -ldflags="$(LDFLAGS)" -o $(BINDIR)/skybridge-edge ./cmd/skybridge-edge
-
-# skybridge-labeller: the periodic AI-based path-label scan job (docs/AI_PATH_LABELLING_DESIGN.md).
-# Not part of the default `build` target — it's a separate, opt-in job most deployments don't run,
-# same reasoning as edge-querystudio being its own target rather than folded into `edge`.
-labeller:
-	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -tags "$(GOTAGS)" -ldflags="$(LDFLAGS)" -o $(BINDIR)/skybridge-labeller ./cmd/skybridge-labeller
-
-# Same as `edge`, but with Query Studio dispatch compiled in.
-edge-querystudio:
-	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -tags "querystudio $(GOTAGS)" -ldflags="$(LDFLAGS)" -o $(BINDIR)/skybridge-edge ./cmd/skybridge-edge
+build:
+	CGO_ENABLED=0 $(GO) build $(GOFLAGS) -trimpath -tags "$(GOTAGS)" -ldflags="$(LDFLAGS)" -o $(BINDIR)/skybridge ./cmd/skybridge
 
 # Regenerate the Go gRPC stubs for the call-home contracts (needs buf + protoc-gen-go[-grpc] on PATH).
-# internal/genpb/curlix/studiogateway/v1/*.pb.go carry a //go:build querystudio line — re-add it by
-# hand after regenerating, since buf/protoc-gen-go doesn't preserve manually-added build constraints.
 gen:
 	$(BUF) generate ../../proto --template buf.gen.yaml \
 	  --path ../../proto/curlix/agent/v1/agent_runner.proto \
@@ -50,20 +30,11 @@ gen:
 test:
 	$(GO) test ./...
 
-test-querystudio:
-	$(GO) test -tags querystudio ./...
-
 race:
 	$(GO) test -race ./...
 
-race-querystudio:
-	$(GO) test -race -tags querystudio ./...
-
 vet:
 	$(GO) vet ./...
-
-vet-querystudio:
-	$(GO) vet -tags querystudio ./...
 
 fmt:
 	$(GO) fmt ./...
@@ -78,8 +49,5 @@ tidy:
 clean:
 	rm -rf $(BINDIR) dist
 
-# Mirrors the default CI leg: lint, vet, then the race-enabled test suite.
+# Mirrors CI: lint, vet, then the race-enabled test suite.
 verify: lint vet race
-
-# Mirrors the querystudio CI leg: lint, vet, then the race-enabled test suite, with the tag on.
-verify-querystudio: lint vet-querystudio race-querystudio

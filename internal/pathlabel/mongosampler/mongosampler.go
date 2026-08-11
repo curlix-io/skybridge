@@ -2,7 +2,7 @@
 // the read-only, off-the-hot-path document sampling docs/AI_PATH_LABELLING_DESIGN.md §5.2 describes,
 // the Mongo counterpart to internal/pathlabel/sqlsampler's SQL implementation. This is a sampling
 // connection, not a wire-proxy or client-session connection: it exists purely to feed the periodic
-// classification scan (cmd/skybridge-labeller) and never touches live query traffic. Callers are
+// classification scan (cmd/skybridge's labeller role) and never touches live query traffic. Callers are
 // expected to use a dedicated, read-only credential, the same posture sqlsampler's callers use.
 //
 // Unlike SQL, a Mongo collection has no fixed schema to enumerate — ListColumns (kept as the same

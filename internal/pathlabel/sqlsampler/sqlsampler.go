@@ -4,7 +4,7 @@
 // does, so New's existing driver switch covers it without a third case) —
 // the read-only, off-the-hot-path row sampling docs/AI_PATH_LABELLING_DESIGN.md §5.2 describes.
 // This is a sampling connection, not a wire-proxy or client-session connection: it exists purely to
-// feed the periodic classification scan (cmd/skybridge-labeller) and never touches live query
+// feed the periodic classification scan (cmd/skybridge's labeller role) and never touches live query
 // traffic. Callers are expected to use a dedicated, read-only credential — the same posture
 // SKYBRIDGE_POSTGRES_CATALOG_DSN already uses for the wire proxy's catalog lookups (see
 // REDACTION.md's "Postgres table-identity resolution").
