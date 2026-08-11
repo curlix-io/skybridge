@@ -9,8 +9,9 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -65,16 +66,16 @@ type Config struct {
 type Client struct {
 	cfg    Config
 	reg    *edge.Registry
-	logger *log.Logger
+	logger *slog.Logger
 
 	mu   sync.Mutex
 	runs map[string]context.CancelFunc
 }
 
 // New builds a call-home client. reg supplies the edge-handled tools.
-func New(cfg Config, reg *edge.Registry, logger *log.Logger) *Client {
+func New(cfg Config, reg *edge.Registry, logger *slog.Logger) *Client {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if cfg.MaxBackoff <= 0 {
 		cfg.MaxBackoff = 30 * time.Second
@@ -101,11 +102,11 @@ func (c *Client) Run(ctx context.Context) error {
 			serveErr := c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), material == nil)
 			_ = conn.Close()
 			if serveErr != nil {
-				c.logger.Printf("skybridge-edge: call-home stream ended: %v", serveErr)
+				c.logger.Warn(fmt.Sprintf("call-home stream ended: %v", serveErr))
 			}
 			backoff = time.Second
 		} else {
-			c.logger.Printf("skybridge-edge: dial %s failed: %v", c.cfg.Target, derr)
+			c.logger.Warn(fmt.Sprintf("dial %s failed: %v", c.cfg.Target, derr))
 		}
 		if !c.cfg.Reconnect {
 			return derr
@@ -177,7 +178,7 @@ func (c *Client) serve(ctx context.Context, client connectorv1.ConnectorGatewayC
 		}
 		switch m := gmsg.Msg.(type) {
 		case *connectorv1.GatewayMessage_Registered:
-			c.logger.Printf("skybridge-edge: registered session=%s tenant=%s", m.Registered.GetSessionId(), c.cfg.TenantID)
+			c.logger.Info(fmt.Sprintf("registered session=%s tenant=%s", m.Registered.GetSessionId(), c.cfg.TenantID))
 		case *connectorv1.GatewayMessage_WorkAssignment:
 			c.startWork(ctx, ss, m.WorkAssignment)
 		case *connectorv1.GatewayMessage_CancelWork:

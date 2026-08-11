@@ -8,7 +8,7 @@
 # own tag prefix:
 #   ghcr.io/curlix-io/skybridge:agent-<version>   (+ :agent-latest)
 #   ghcr.io/curlix-io/skybridge:gateway-<version> (+ :gateway-latest)
-#   ghcr.io/curlix-io/skybridge:edge-<version>    (+ :edge-latest)
+#   ghcr.io/curlix-io/skybridge:edge-<version>    (+ :edge-latest, + bare :latest)
 #
 # Requires: docker login ghcr.io (a GitHub PAT with write:packages, or `gh auth token | docker
 # login ghcr.io -u <user> --password-stdin`) done beforehand — this script does not log in for you.
@@ -47,12 +47,17 @@ for i in "${!CMDS[@]}"; do
   cmd="${CMDS[$i]}"
   prefix="${PREFIXES[$i]}"
   dockerfile="${DOCKERFILES[$i]}"
+  tag_args=(-t "${IMAGE}:${prefix}-${VERSION}" -t "${IMAGE}:${prefix}-latest")
+  # skybridge-edge is the single-install binary most customers use (see CLAUDE.md), so it also
+  # gets the bare :latest alias on top of its edge-latest tag.
+  if [ "${prefix}" = "edge" ]; then
+    tag_args+=(-t "${IMAGE}:latest")
+  fi
   echo "==> building+pushing ${cmd} -> ${IMAGE}:${prefix}-${VERSION} (${dockerfile}, ${PLATFORMS})"
   docker buildx build \
     --platform "${PLATFORMS}" \
     --build-arg "SKYBRIDGE_CMD=${cmd}" \
-    -t "${IMAGE}:${prefix}-${VERSION}" \
-    -t "${IMAGE}:${prefix}-latest" \
+    "${tag_args[@]}" \
     -f "${dockerfile}" \
     --push .
 done

@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"sync"
 	"testing"
 	"time"
@@ -103,7 +103,7 @@ func TestSafeStreamSendIsConcurrencySafe(t *testing.T) {
 
 func TestServeSendsRegisterWithBindingsAndStopsOnEOF(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{TenantID: "org-1", AgentID: "agent-a", MaxSessions: 3, Targets: []Target{{DBType: "postgres", DatabaseName: "app"}}}, log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", AgentID: "agent-a", MaxSessions: 3, Targets: []Target{{DBType: "postgres", DatabaseName: "app"}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	errc := make(chan error, 1)
 	go func() { errc <- c.serve(context.Background(), fakeGatewayClient{connectStream: f}, false) }()
@@ -130,7 +130,7 @@ func TestServeSendsRegisterWithBindingsAndStopsOnEOF(t *testing.T) {
 func TestServePropagatesNonEOFRecvError(t *testing.T) {
 	f := newFakeBidiStream()
 	f.recvErr = errors.New("connection reset")
-	c := New(Config{TenantID: "org-1"}, log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	errc := make(chan error, 1)
 	go func() { errc <- c.serve(context.Background(), fakeGatewayClient{connectStream: f}, false) }()
@@ -149,7 +149,7 @@ func TestServePropagatesNonEOFRecvError(t *testing.T) {
 
 func TestServeRespondsToPingWithHeartbeat(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{TenantID: "org-1"}, log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	go func() { _ = c.serve(context.Background(), fakeGatewayClient{connectStream: f}, false) }()
 	drainRegister(t, f)
 
@@ -167,7 +167,7 @@ func TestServeRespondsToPingWithHeartbeat(t *testing.T) {
 
 func TestStartAssignmentRejectsWhenAtCapacity(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{MaxSessions: 1}, log.New(io.Discard, "", 0))
+	c := New(Config{MaxSessions: 1}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ss := &safeStream{stream: f}
 	c.runs["already-running"] = func() {}
 
@@ -185,7 +185,7 @@ func TestStartAssignmentRejectsWhenAtCapacity(t *testing.T) {
 
 func TestStartAssignmentIgnoresEmptySessionID(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{MaxSessions: 5}, log.New(io.Discard, "", 0))
+	c := New(Config{MaxSessions: 5}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ss := &safeStream{stream: f}
 	c.startAssignment(context.Background(), ss, &studiov1.ExecuteAssignment{SessionId: ""})
 	select {
@@ -197,7 +197,7 @@ func TestStartAssignmentIgnoresEmptySessionID(t *testing.T) {
 
 func TestStartAssignmentIgnoresDuplicateSessionID(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{MaxSessions: 5}, log.New(io.Discard, "", 0))
+	c := New(Config{MaxSessions: 5}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.runs["dup"] = func() {}
 	before := c.activeSessions()
 
@@ -211,7 +211,7 @@ func TestStartAssignmentIgnoresDuplicateSessionID(t *testing.T) {
 
 func TestStartAssignmentDryRunEmitsFinishedWithoutExecuting(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{MaxSessions: 5}, log.New(io.Discard, "", 0))
+	c := New(Config{MaxSessions: 5}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ss := &safeStream{stream: f}
 
 	c.startAssignment(context.Background(), ss, &studiov1.ExecuteAssignment{
@@ -253,7 +253,7 @@ func TestStartAssignmentDryRunEmitsFinishedWithoutExecuting(t *testing.T) {
 
 func TestStartAssignmentExecuteErrorEmitsErrorEvent(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{MaxSessions: 5, Targets: nil}, log.New(io.Discard, "", 0))
+	c := New(Config{MaxSessions: 5, Targets: nil}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ss := &safeStream{stream: f}
 
 	c.startAssignment(context.Background(), ss, &studiov1.ExecuteAssignment{
@@ -280,7 +280,7 @@ func TestStartAssignmentExecuteErrorEmitsErrorEvent(t *testing.T) {
 }
 
 func TestCancelSessionCancelsTrackedRun(t *testing.T) {
-	c := New(Config{}, log.New(io.Discard, "", 0))
+	c := New(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	cancelled := false
 	c.runs["s1"] = func() { cancelled = true }
 	c.cancelSession("s1")
@@ -290,12 +290,12 @@ func TestCancelSessionCancelsTrackedRun(t *testing.T) {
 }
 
 func TestCancelSessionNoopForUnknownID(t *testing.T) {
-	c := New(Config{}, log.New(io.Discard, "", 0))
+	c := New(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	c.cancelSession("does-not-exist") // must not panic
 }
 
 func TestFinishSessionRemovesTrackedRun(t *testing.T) {
-	c := New(Config{}, log.New(io.Discard, "", 0))
+	c := New(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	cancelled := false
 	c.runs["s1"] = func() { cancelled = true }
 	c.finishSession("s1")
@@ -308,7 +308,7 @@ func TestFinishSessionRemovesTrackedRun(t *testing.T) {
 }
 
 func TestExecuteLocallyNoTargetBindingErrors(t *testing.T) {
-	c := New(Config{}, log.New(io.Discard, "", 0))
+	c := New(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	_, err := c.executeLocally(context.Background(), &studiov1.ExecuteRequest{DbType: "postgres", DatabaseName: "app"})
 	if err == nil {
 		t.Fatal("expected an error when no local target binding matches")
@@ -316,7 +316,7 @@ func TestExecuteLocallyNoTargetBindingErrors(t *testing.T) {
 }
 
 func TestExecuteLocallyDefaultsDBTypeToPostgres(t *testing.T) {
-	c := New(Config{}, log.New(io.Discard, "", 0))
+	c := New(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	_, err := c.executeLocally(context.Background(), &studiov1.ExecuteRequest{DatabaseName: "app"})
 	if err == nil {
 		t.Fatal("expected an error (still no target binding), confirming the postgres default path ran")
@@ -358,7 +358,7 @@ func (f fakeGatewayClient) Enroll(context.Context, *studiov1.EnrollRequest, ...g
 }
 
 func TestHeartbeatLoopStopsOnContextCancel(t *testing.T) {
-	c := New(Config{}, log.New(io.Discard, "", 0))
+	c := New(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ss := &safeStream{stream: newFakeBidiStream()}
 	ctx, cancel := context.WithCancel(context.Background())
 	done := make(chan struct{})

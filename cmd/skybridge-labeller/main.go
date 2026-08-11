@@ -4,13 +4,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/labeller"
+	skylog "github.com/curlix-io/skybridge/internal/log"
 )
 
 // helpText covers the SKYBRIDGE_* env vars this binary reads. See
@@ -61,7 +61,9 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
-	if err := labeller.Run(ctx, cfg, log.Default()); err != nil && ctx.Err() == nil {
-		log.Fatal(err)
+	logger := skylog.New(os.Stderr, "skybridge-labeller", skylog.ParseLevel(cfg.LogLevel))
+	if err := labeller.Run(ctx, cfg, logger); err != nil && ctx.Err() == nil {
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 }

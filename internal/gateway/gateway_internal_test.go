@@ -3,7 +3,7 @@ package gateway
 import (
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -11,7 +11,7 @@ import (
 	"github.com/curlix-io/skybridge/internal/tunnel"
 )
 
-func silentLogger() *log.Logger { return log.New(io.Discard, "", 0) }
+func silentLogger() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // funcResolver adapts a function to TargetResolver for tests that need a specific canned response.
 type funcResolver func(ctx context.Context, orgID, target string) (tunnel.Target, error)

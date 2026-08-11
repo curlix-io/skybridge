@@ -2,7 +2,7 @@ package agent
 
 import (
 	"bytes"
-	"log"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -85,7 +85,7 @@ func TestFlushTranscriptNoopForNonTranscriptRecorder(t *testing.T) {
 	defer sess.Close()
 
 	// Must not panic or block for wire.NoopRecorder{}.
-	flushTranscript(wire.NoopRecorder{}, sess, log.Default())
+	flushTranscript(wire.NoopRecorder{}, sess, slog.Default())
 }
 
 func TestFlushTranscriptNoopWhenNoChunksRecorded(t *testing.T) {
@@ -97,7 +97,7 @@ func TestFlushTranscriptNoopWhenNoChunksRecorded(t *testing.T) {
 
 	r := newTranscriptRecorder("sess-1", config.Agent{SessionReplayEnabled: true})
 	// No RecordInput/RecordOutput calls -> nothing to flush.
-	flushTranscript(r, sess, log.Default())
+	flushTranscript(r, sess, slog.Default())
 }
 
 func TestFlushTranscriptSendsAccumulatedChunks(t *testing.T) {
@@ -122,7 +122,7 @@ func TestFlushTranscriptSendsAccumulatedChunks(t *testing.T) {
 		done <- ctrl
 	}()
 
-	flushTranscript(r, clientSess, log.Default())
+	flushTranscript(r, clientSess, slog.Default())
 
 	select {
 	case ctrl := <-done:
@@ -145,7 +145,7 @@ func TestFlushTranscriptLogsFailureWithoutPanicking(t *testing.T) {
 	r.RecordInput([]byte("in"))
 
 	var buf bytes.Buffer
-	flushTranscript(r, sess, log.New(&buf, "", 0))
+	flushTranscript(r, sess, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("transcript flush failed")) {
 		t.Fatalf("expected a flush-failure log line, got %q", buf.String())
 	}

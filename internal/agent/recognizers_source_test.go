@@ -5,7 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -129,7 +129,7 @@ func TestStartRecognizersSyncSeedsRemote(t *testing.T) {
 
 	remote := mask.NewRemote(mask.RemoteConfig{})
 	cfg := config.Agent{PIIRecognizersURL: srv.URL, PIIRecognizersPollSeconds: -1} // fetch-once
-	startRecognizersSync(context.Background(), cfg, remote, log.Default())
+	startRecognizersSync(context.Background(), cfg, remote, slog.Default())
 
 	// No direct getter is exported on Remote besides ReplaceConfig; the sync path having run to
 	// completion is asserted indirectly by the fact that startRecognizersSync (which calls fetch
@@ -140,7 +140,7 @@ func TestStartRecognizersSyncLogsFailedInitialFetch(t *testing.T) {
 	remote := mask.NewRemote(mask.RemoteConfig{})
 	var buf bytes.Buffer
 	cfg := config.Agent{PIIRecognizersURL: "http://127.0.0.1:0", PIIRecognizersPollSeconds: -1}
-	startRecognizersSync(context.Background(), cfg, remote, log.New(&buf, "", 0))
+	startRecognizersSync(context.Background(), cfg, remote, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !strings.Contains(buf.String(), "pii-recognizers refresh failed") {
 		t.Fatalf("expected a refresh-failure log, got %q", buf.String())
 	}
@@ -160,7 +160,7 @@ func TestStartRecognizersSyncPollsInBackground(t *testing.T) {
 	// PIIRecognizersPollSeconds unset (0) exercises the "below recognizersMinPoll, clamp up" branch
 	// and launches the background poll goroutine; we only assert the synchronous initial fetch ran.
 	cfg := config.Agent{PIIRecognizersURL: srv.URL, PIIRecognizersPollSeconds: 0}
-	startRecognizersSync(ctx, cfg, remote, log.Default())
+	startRecognizersSync(ctx, cfg, remote, slog.Default())
 
 	if atomic.LoadInt32(&calls) < 1 {
 		t.Fatal("expected at least one synchronous initial fetch")
@@ -170,6 +170,6 @@ func TestStartRecognizersSyncPollsInBackground(t *testing.T) {
 func TestStartRecognizersSyncNoURLIsNoop(t *testing.T) {
 	remote := mask.NewRemote(mask.RemoteConfig{})
 	// No URL and nil remote must both be safe no-ops that don't block.
-	startRecognizersSync(context.Background(), config.Agent{}, remote, log.Default())
-	startRecognizersSync(context.Background(), config.Agent{PIIRecognizersURL: "http://x"}, nil, log.Default())
+	startRecognizersSync(context.Background(), config.Agent{}, remote, slog.Default())
+	startRecognizersSync(context.Background(), config.Agent{PIIRecognizersURL: "http://x"}, nil, slog.Default())
 }

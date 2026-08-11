@@ -29,7 +29,8 @@ const (
 
 // Agent is the resolved configuration for an egress-side Skybridge agent.
 type Agent struct {
-	Mode string // listener | tunnel
+	Mode     string // listener | tunnel
+	LogLevel string // SKYBRIDGE_LOG_LEVEL: debug | info (default) | warn | error
 
 	// Listener-mode (single target).
 	DBType       string // postgres | mysql | mongodb
@@ -245,6 +246,7 @@ func LoadAgent() Agent {
 	dbType := strings.ToLower(env("SKYBRIDGE_DB_TYPE", "postgres"))
 	a := Agent{
 		Mode:                  strings.ToLower(env("SKYBRIDGE_MODE", ModeListener)),
+		LogLevel:              env("SKYBRIDGE_LOG_LEVEL", ""),
 		DBType:                dbType,
 		ListenAddr:            env("SKYBRIDGE_LISTEN", defaultListen(dbType)),
 		UpstreamAddr:          env("SKYBRIDGE_UPSTREAM", ""),
@@ -363,6 +365,8 @@ func (a Agent) TargetByName(name string) (tunnel.Target, bool) {
 // configured, the co-located wire proxy — one process, one identity, for everything that must run
 // inside the customer environment.
 type Edge struct {
+	LogLevel string // SKYBRIDGE_LOG_LEVEL: debug | info (default) | warn | error
+
 	// Call-home transport (always on when GatewayAddr is set).
 	GatewayAddr string // Connector Gateway endpoint host:port (dialed OUT)
 	TenantID    string // organization id this edge serves
@@ -427,6 +431,7 @@ func LoadEdge() Edge {
 		caBundle = key.CABundlePEM
 	}
 	return Edge{
+		LogLevel:                env("SKYBRIDGE_LOG_LEVEL", ""),
 		GatewayAddr:             env("SKYBRIDGE_EDGE_GATEWAY", env("SKYBRIDGE_GATEWAY", hostPort(key.GatewayHost, "7100"))),
 		TenantID:                env("SKYBRIDGE_ORG_ID", key.OrgID),
 		EdgeID:                  env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", key.EdgeID)),
@@ -478,6 +483,8 @@ func (e Edge) WireProxyEnabled() bool {
 
 // Gateway is the resolved configuration for the relay-side gateway.
 type Gateway struct {
+	LogLevel string // SKYBRIDGE_LOG_LEVEL: debug | info (default) | warn | error
+
 	AgentListen string           // address agents dial into (egress endpoint), e.g. ":8010"
 	AuthToken   string           // required registration token (empty disables the check)
 	Clients     []ClientListener // native-client listeners, each bound to a target
@@ -540,6 +547,7 @@ func LoadGateway() Gateway {
 		clientConnPerMin = 60
 	}
 	return Gateway{
+		LogLevel:            env("SKYBRIDGE_LOG_LEVEL", ""),
 		AgentListen:         env("SKYBRIDGE_GW_AGENT_LISTEN", ":8010"),
 		AuthToken:           env("SKYBRIDGE_GW_TOKEN", ""),
 		Clients:             parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
@@ -563,6 +571,8 @@ func LoadGateway() Gateway {
 // Agent/Gateway because it's a separate process with no wire-proxy or client-listener concerns of
 // its own; it only samples a database on a schedule and proposes labels to the control plane.
 type Labeller struct {
+	LogLevel string // SKYBRIDGE_LOG_LEVEL: debug | info (default) | warn | error
+
 	OrgID string // tenant this scan job proposes labels for; required
 	Token string // bearer token (defaults to SKYBRIDGE_TOKEN)
 
@@ -639,6 +649,7 @@ const labellerMinScanIntervalSeconds = 300
 // LoadLabeller reads skybridge-labeller's config from the environment.
 func LoadLabeller() Labeller {
 	return Labeller{
+		LogLevel:              env("SKYBRIDGE_LOG_LEVEL", ""),
 		OrgID:                 env("SKYBRIDGE_ORG_ID", ""),
 		Token:                 env("SKYBRIDGE_TOKEN", ""),
 		DBType:                strings.ToLower(env("SKYBRIDGE_LABELLER_DB_TYPE", "postgres")),

@@ -14,7 +14,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
-	"log"
+	"log/slog"
 	"net"
 	"time"
 
@@ -99,7 +99,7 @@ func BuildMasker(cfg config.Agent) mask.Masker {
 // on the same Remote analyze call and the same synced Store, rather than a second detection pass.
 // Either return value is nil when its respective prerequisite isn't configured (no
 // MaskAnalyzeURL/MaskAnonymizeURL, or no PathLabelURL).
-func BuildMaskerWithPathLabelSync(ctx context.Context, cfg config.Agent, logger *log.Logger) (masker mask.Masker, detector *mask.Remote, store *remotestore.Store) {
+func BuildMaskerWithPathLabelSync(ctx context.Context, cfg config.Agent, logger *slog.Logger) (masker mask.Masker, detector *mask.Remote, store *remotestore.Store) {
 	m, overlay, remote, st, metricsRecorder := buildMaskerWithOverlay(cfg)
 	startOverlaySync(ctx, cfg, overlay, logger)
 	startRecognizersSync(ctx, cfg, remote, logger)
@@ -175,32 +175,32 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 // — a masker miss or outage forwards the value unchanged — so a missing layer silently lets data
 // through; these logs make that explicit at boot. SKYBRIDGE_MASK_MODE=strict instead aborts the
 // row/connection on a masker failure rather than ever forwarding it unmasked.
-func logMaskingGuardrails(cfg config.Agent, logger *log.Logger) {
+func logMaskingGuardrails(cfg config.Agent, logger *slog.Logger) {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	presidioOn := cfg.MaskAnalyzeURL != "" && cfg.MaskAnonymizeURL != ""
 	overlayOn := len(cfg.PIIOverlay) > 0 || cfg.PIIOverlayURL != ""
 
 	// Half-configured Presidio: one URL without the other disables the remote masker entirely.
 	if (cfg.MaskAnalyzeURL != "") != (cfg.MaskAnonymizeURL != "") {
-		logger.Printf("skybridge-agent: WARNING: Presidio masking is half-configured " +
+		logger.Warn("Presidio masking is half-configured " +
 			"(set BOTH SKYBRIDGE_MASK_ANALYZE_URL and SKYBRIDGE_MASK_ANONYMIZE_URL); the remote masker is DISABLED")
 	}
 
 	switch {
 	case !presidioOn && !overlayOn:
-		logger.Printf("skybridge-agent: WARNING: no masking configured — result rows are forwarded UNMASKED " +
+		logger.Warn("no masking configured — result rows are forwarded UNMASKED " +
 			"(transparent passthrough). Set SKYBRIDGE_MASK_ANALYZE_URL/SKYBRIDGE_MASK_ANONYMIZE_URL " +
 			"and/or SKYBRIDGE_PII_OVERLAY / SKYBRIDGE_PII_OVERLAY_URL.")
 	case !presidioOn && overlayOn:
-		logger.Printf("skybridge-agent: WARNING: Presidio content masking is not configured " +
+		logger.Warn("Presidio content masking is not configured " +
 			"(SKYBRIDGE_MASK_ANALYZE_URL/SKYBRIDGE_MASK_ANONYMIZE_URL); only exact column-name overlay rules are " +
 			"masked — PII in free-text columns, JSON blobs, or unlisted columns will NOT be masked.")
 	}
 
 	if presidioOn && cfg.MaskStrict() {
-		logger.Printf("skybridge-agent: SKYBRIDGE_MASK_MODE=strict — a Presidio outage or error will abort " +
+		logger.Info("SKYBRIDGE_MASK_MODE=strict — a Presidio outage or error will abort " +
 			"the affected connection instead of forwarding data unmasked.")
 	}
 }
@@ -232,9 +232,9 @@ func MaskingMode(cfg config.Agent) string {
 }
 
 // RunListener serves native clients directly (listener mode).
-func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) error {
+func RunListener(ctx context.Context, cfg config.Agent, logger *slog.Logger) error {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if cfg.UpstreamAddr == "" {
 		return fmt.Errorf("set SKYBRIDGE_UPSTREAM to the database address (host:port)")
@@ -280,7 +280,7 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 	}
 	defer ln.Close()
 	go func() { <-ctx.Done(); _ = ln.Close() }()
-	logger.Printf("skybridge-agent[listener]: %s proxy %s -> %s (masking: %s)", engine.Name(), cfg.ListenAddr, cfg.UpstreamAddr, MaskingMode(cfg))
+	logger.Info(fmt.Sprintf("[listener] %s proxy %s -> %s (masking: %s)", engine.Name(), cfg.ListenAddr, cfg.UpstreamAddr, MaskingMode(cfg)))
 
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	for {
@@ -289,14 +289,15 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 			if ctx.Err() != nil {
 				return nil
 			}
-			logger.Printf("accept: %v", err)
+			logger.Error(fmt.Sprintf("accept: %v", err))
 			continue
 		}
+		logger.Debug(fmt.Sprintf("accepted client connection from %s", client.RemoteAddr()))
 		go func() {
 			defer client.Close()
 			rawUpstream, err := dialer.DialContext(ctx, "tcp", cfg.UpstreamAddr)
 			if err != nil {
-				logger.Printf("dial upstream %s: %v", cfg.UpstreamAddr, err)
+				logger.Error(fmt.Sprintf("dial upstream %s: %v", cfg.UpstreamAddr, err))
 				return
 			}
 			upstream := rawUpstream
@@ -304,7 +305,7 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 				upstream, err = upTLS.startUpstreamTLS(cfg.DBType, rawUpstream, cfg.UpstreamAddr)
 				if err != nil {
 					_ = rawUpstream.Close()
-					logger.Printf("upstream TLS to %s: %v", cfg.UpstreamAddr, err)
+					logger.Error(fmt.Sprintf("upstream TLS to %s: %v", cfg.UpstreamAddr, err))
 					return
 				}
 			}
@@ -313,33 +314,33 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *log.Logger) erro
 			// Listener mode has no control-plane session id to tag a transcript with (it never
 			// goes through the gateway's SessionStarted call) — replay is tunnel-mode only for now.
 			if err := proxyConn(sessCtx, engine, client, upstream, masker, resolver, wire.NoopRecorder{}); err != nil {
-				logger.Printf("session ended: %v", err)
+				logger.Debug(fmt.Sprintf("session ended: %v", err))
 			}
 		}()
 	}
 }
 
 // logCredentialMode warns when injection is requested but cannot run, and notes when it is active.
-func logCredentialMode(cfg config.Agent, engine wire.Engine, resolver wire.CredentialResolver, logger *log.Logger) {
+func logCredentialMode(cfg config.Agent, engine wire.Engine, resolver wire.CredentialResolver, logger *slog.Logger) {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if !cfg.InjectCredentials {
 		return
 	}
 	if resolver == nil {
-		logger.Printf("skybridge-agent: WARNING: SKYBRIDGE_INJECT_CREDENTIALS is set but no " +
+		logger.Warn("SKYBRIDGE_INJECT_CREDENTIALS is set but no " +
 			"SKYBRIDGE_CREDENTIAL_EXCHANGE_URL is configured; falling back to verbatim auth passthrough.")
 		return
 	}
 	if _, ok := engine.(wire.InjectingEngine); !ok {
-		logger.Printf("skybridge-agent: WARNING: credential injection is enabled but the %q engine "+
-			"does not support it yet; falling back to verbatim auth passthrough.", engine.Name())
+		logger.Warn(fmt.Sprintf("credential injection is enabled but the %q engine "+
+			"does not support it yet; falling back to verbatim auth passthrough.", engine.Name()))
 		return
 	}
-	logger.Printf("skybridge-agent: credential injection ENABLED (clients present an opaque session token; the agent originates upstream auth).")
+	logger.Info("credential injection ENABLED (clients present an opaque session token; the agent originates upstream auth).")
 	if !cfg.ClientTLSConfigured() {
-		logger.Printf("skybridge-agent: WARNING: client TLS is OFF, so the session token rides in the " +
+		logger.Warn("client TLS is OFF, so the session token rides in the " +
 			"client's CLEARTEXT password. Run the listener on a trusted/in-network hop, or set " +
 			"SKYBRIDGE_CLIENT_TLS_CERT_FILE/_KEY_FILE (or SKYBRIDGE_CLIENT_TLS_SELF_SIGNED for dev).")
 	}
@@ -347,9 +348,9 @@ func logCredentialMode(cfg config.Agent, engine wire.Engine, resolver wire.Crede
 
 // logClientTLSMode notes whether the client link is TLS-terminated, and warns when TLS was requested
 // for a db type that does not terminate it yet.
-func logClientTLSMode(cfg config.Agent, clientTLS *tls.Config, engine wire.Engine, logger *log.Logger) {
+func logClientTLSMode(cfg config.Agent, clientTLS *tls.Config, engine wire.Engine, logger *slog.Logger) {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if !cfg.ClientTLSConfigured() {
 		return
@@ -359,23 +360,23 @@ func logClientTLSMode(cfg config.Agent, clientTLS *tls.Config, engine wire.Engin
 	}
 	switch engine.Name() {
 	case "postgres":
-		logger.Printf("skybridge-agent: client TLS termination ENABLED (clients connect with sslmode=require/verify-*).")
+		logger.Info("client TLS termination ENABLED (clients connect with sslmode=require/verify-*).")
 	case "mysql":
-		logger.Printf("skybridge-agent: client TLS termination ENABLED for MySQL (connect with TLS; for credential " +
+		logger.Info("client TLS termination ENABLED for MySQL (connect with TLS; for credential " +
 			"injection the client must also enable the mysql_clear_password plugin).")
 	case "mongodb":
-		logger.Printf("skybridge-agent: client TLS termination ENABLED for MongoDB (Mongo has no in-band STARTTLS, " +
+		logger.Info("client TLS termination ENABLED for MongoDB (Mongo has no in-band STARTTLS, " +
 			"so clients must speak TLS immediately on connect — e.g. mongosh --tls).")
 	default:
-		logger.Printf("skybridge-agent: WARNING: client TLS is configured but the %q engine does not "+
-			"terminate client TLS yet; the client link stays plaintext.", engine.Name())
+		logger.Warn(fmt.Sprintf("client TLS is configured but the %q engine does not "+
+			"terminate client TLS yet; the client link stays plaintext.", engine.Name()))
 	}
 }
 
 // RunTunnel dials the gateway and serves its streams (tunnel mode), reconnecting on failure.
-func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Logger) error {
+func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Logger) error {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if cfg.GatewayAddr == "" {
 		return fmt.Errorf("set SKYBRIDGE_GATEWAY to the gateway address (host:port)")
@@ -407,7 +408,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 		}
 		deps.Engine = engineFactory(clientTLS, cfg.OrgID, pgCatalog)
 		if clientTLS != nil {
-			logger.Printf("skybridge-agent[tunnel]: client TLS termination ENABLED for Postgres targets.")
+			logger.Info("[tunnel] client TLS termination ENABLED for Postgres targets.")
 		}
 		logPostgresCatalogMode(cfg, pgCatalog, logger)
 	}
@@ -424,12 +425,12 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 	deps = deps.withDefaults(cfg)
 	if cfg.InjectCredentials {
 		if deps.Resolver != nil {
-			logger.Printf("skybridge-agent[tunnel]: credential injection ENABLED for Postgres targets (clients present an opaque session token).")
+			logger.Info("[tunnel] credential injection ENABLED for Postgres targets (clients present an opaque session token).")
 			if !cfg.ClientTLSConfigured() {
-				logger.Printf("skybridge-agent[tunnel]: WARNING: client TLS is OFF; the session token rides in the client's CLEARTEXT password. Set SKYBRIDGE_CLIENT_TLS_* or keep the client link on a trusted hop.")
+				logger.Warn("[tunnel] client TLS is OFF; the session token rides in the client's CLEARTEXT password. Set SKYBRIDGE_CLIENT_TLS_* or keep the client link on a trusted hop.")
 			}
 		} else {
-			logger.Printf("skybridge-agent[tunnel]: WARNING: SKYBRIDGE_INJECT_CREDENTIALS set but no SKYBRIDGE_CREDENTIAL_EXCHANGE_URL; using verbatim auth passthrough.")
+			logger.Warn("[tunnel] SKYBRIDGE_INJECT_CREDENTIALS set but no SKYBRIDGE_CREDENTIAL_EXCHANGE_URL; using verbatim auth passthrough.")
 		}
 	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
@@ -438,11 +439,11 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 	if cfg.WireMtlsConfigured() {
 		switch {
 		case cfg.WireMtlsIamAuthEnabled:
-			logger.Printf("skybridge-agent[tunnel]: wire mTLS via AWS IAM auth configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL)
+			logger.Info(fmt.Sprintf("[tunnel] wire mTLS via AWS IAM auth configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL))
 		case hasPresetCert:
-			logger.Printf("skybridge-agent[tunnel]: wire mTLS configured with a pre-issued client cert — will present it instead of the bearer token.")
+			logger.Info("[tunnel] wire mTLS configured with a pre-issued client cert — will present it instead of the bearer token.")
 		default:
-			logger.Printf("skybridge-agent[tunnel]: wire mTLS enrollment configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL)
+			logger.Info(fmt.Sprintf("[tunnel] wire mTLS enrollment configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL))
 		}
 	}
 
@@ -461,7 +462,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 				},
 			)
 			if merr != nil {
-				logger.Printf("wire mTLS IAM enroll: %v (retrying)", merr)
+				logger.Warn(fmt.Sprintf("wire mTLS IAM enroll: %v (retrying)", merr))
 				if !sleep(ctx, 3*time.Second) {
 					return nil
 				}
@@ -470,7 +471,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			if material != nil {
 				tlsCfg, terr := material.ClientTLSConfig()
 				if terr != nil {
-					logger.Printf("wire mTLS material invalid: %v (retrying)", terr)
+					logger.Warn(fmt.Sprintf("wire mTLS material invalid: %v (retrying)", terr))
 					if !sleep(ctx, 3*time.Second) {
 						return nil
 					}
@@ -486,7 +487,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			}
 			tlsCfg, terr := material.ClientTLSConfig()
 			if terr != nil {
-				logger.Printf("wire mTLS preset cert invalid: %v (retrying)", terr)
+				logger.Warn(fmt.Sprintf("wire mTLS preset cert invalid: %v (retrying)", terr))
 				if !sleep(ctx, 3*time.Second) {
 					return nil
 				}
@@ -505,7 +506,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 				IdentitySecretARN: cfg.WireMtlsIdentitySecretARN,
 			})
 			if merr != nil {
-				logger.Printf("wire mTLS enroll: %v (retrying)", merr)
+				logger.Warn(fmt.Sprintf("wire mTLS enroll: %v (retrying)", merr))
 				if !sleep(ctx, 3*time.Second) {
 					return nil
 				}
@@ -514,7 +515,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			if material != nil {
 				tlsCfg, terr := material.ClientTLSConfig()
 				if terr != nil {
-					logger.Printf("wire mTLS material invalid: %v (retrying)", terr)
+					logger.Warn(fmt.Sprintf("wire mTLS material invalid: %v (retrying)", terr))
 					if !sleep(ctx, 3*time.Second) {
 						return nil
 					}
@@ -526,7 +527,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 
 		conn, err := dialer.DialContext(ctx, "tcp", cfg.GatewayAddr)
 		if err != nil {
-			logger.Printf("dial gateway %s: %v (retrying)", cfg.GatewayAddr, err)
+			logger.Warn(fmt.Sprintf("dial gateway %s: %v (retrying)", cfg.GatewayAddr, err))
 			if !sleep(ctx, 3*time.Second) {
 				return nil
 			}
@@ -537,9 +538,9 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 			conn = tls.Client(conn, wireTLS)
 			mode = "mTLS"
 		}
-		logger.Printf("skybridge-agent[tunnel]: connected to gateway %s as %q (%s, masking: %s)", cfg.GatewayAddr, cfg.AgentID, mode, MaskingMode(cfg))
+		logger.Info(fmt.Sprintf("[tunnel] connected to gateway %s as %q (%s, masking: %s)", cfg.GatewayAddr, cfg.AgentID, mode, MaskingMode(cfg)))
 		if err := ServeTunnelConn(ctx, conn, cfg, deps, logger); err != nil && ctx.Err() == nil {
-			logger.Printf("tunnel session ended: %v (reconnecting)", err)
+			logger.Warn(fmt.Sprintf("tunnel session ended: %v (reconnecting)", err))
 		}
 		if !sleep(ctx, 2*time.Second) {
 			return nil
@@ -550,9 +551,9 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *log.Log
 
 // ServeTunnelConn registers over an established gateway connection and serves inbound streams. It is
 // separated from RunTunnel so tests can drive it over an in-memory pipe.
-func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps Deps, logger *log.Logger) error {
+func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps Deps, logger *slog.Logger) error {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	deps = deps.withDefaults(cfg)
 	sess := tunnel.Client(conn)
@@ -592,31 +593,32 @@ func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps 
 	}
 }
 
-func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, cfg config.Agent, deps Deps, logger *log.Logger) {
+func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, cfg config.Agent, deps Deps, logger *slog.Logger) {
 	defer st.Close()
 	meta, err := tunnel.DecodeOpenMeta(st.Meta())
 	if err != nil {
-		logger.Printf("stream open: bad meta: %v", err)
+		logger.Error(fmt.Sprintf("stream open: bad meta: %v", err))
 		return
 	}
 	if meta.Addr == "" || meta.DBType == "" {
-		logger.Printf("stream open: gateway sent no addr/db_type for target %q "+
-			"(upgrade the gateway or check its SKYBRIDGE_GW_CONTROL_PLANE_URL)", meta.Target)
+		logger.Error(fmt.Sprintf("stream open: gateway sent no addr/db_type for target %q "+
+			"(upgrade the gateway or check its SKYBRIDGE_GW_CONTROL_PLANE_URL)", meta.Target))
 		return
 	}
+	logger.Debug(fmt.Sprintf("stream open: target %q db_type %q addr %q", meta.Target, meta.DBType, meta.Addr))
 	if meta.DBType == "kubernetes" {
 		serveK8sStream(ctx, st, meta, cfg, logger)
 		return
 	}
 	engine, err := deps.Engine(meta.DBType)
 	if err != nil {
-		logger.Printf("stream open: %v", err)
+		logger.Error(fmt.Sprintf("stream open: %v", err))
 		return
 	}
 	engine = deps.UpstreamTLS.configureEngine(engine, meta.DBType, meta.Addr)
 	rawUpstream, err := deps.Dial(ctx, "tcp", meta.Addr)
 	if err != nil {
-		logger.Printf("dial upstream %s: %v", meta.Addr, err)
+		logger.Error(fmt.Sprintf("dial upstream %s: %v", meta.Addr, err))
 		return
 	}
 	upstream := rawUpstream
@@ -624,7 +626,7 @@ func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, c
 		upstream, err = deps.UpstreamTLS.startUpstreamTLS(meta.DBType, rawUpstream, meta.Addr)
 		if err != nil {
 			_ = rawUpstream.Close()
-			logger.Printf("upstream TLS to %s: %v", meta.Addr, err)
+			logger.Error(fmt.Sprintf("upstream TLS to %s: %v", meta.Addr, err))
 			return
 		}
 	}
@@ -637,7 +639,7 @@ func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, c
 	recorder := newTranscriptRecorder(meta.SessionID, cfg)
 	defer flushTranscript(recorder, sess, logger)
 	if err := proxyConn(ctx, engine, st, upstream, deps.Masker, deps.Resolver, recorder); err != nil {
-		logger.Printf("target %q session ended: %v", meta.Target, err)
+		logger.Debug(fmt.Sprintf("target %q session ended: %v", meta.Target, err))
 	}
 }
 

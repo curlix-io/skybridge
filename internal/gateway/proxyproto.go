@@ -17,7 +17,8 @@ import (
 	"bufio"
 	"encoding/binary"
 	"errors"
-	"log"
+	"fmt"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
@@ -35,7 +36,7 @@ var proxyProtoV2Sig = [12]byte{0x0D, 0x0A, 0x0D, 0x0A, 0x00, 0x0D, 0x0A, 0x51, 0
 type proxyProtoListener struct {
 	net.Listener
 	headerTimeout time.Duration
-	log           *log.Logger
+	log           *slog.Logger
 }
 
 // WrapProxyProtocol returns a listener that expects a PROXY protocol header on every accepted
@@ -48,7 +49,7 @@ func WrapProxyProtocol(ln net.Listener, headerTimeout time.Duration) net.Listene
 	if headerTimeout <= 0 {
 		headerTimeout = 5 * time.Second
 	}
-	return &proxyProtoListener{Listener: ln, headerTimeout: headerTimeout, log: log.Default()}
+	return &proxyProtoListener{Listener: ln, headerTimeout: headerTimeout, log: slog.Default()}
 }
 
 func (l *proxyProtoListener) Accept() (net.Conn, error) {
@@ -59,7 +60,7 @@ func (l *proxyProtoListener) Accept() (net.Conn, error) {
 		}
 		wrapped, err := l.handshake(conn)
 		if err != nil {
-			l.log.Printf("gateway: dropping connection from %s: proxy protocol handshake: %v", conn.RemoteAddr(), err)
+			l.log.Warn(fmt.Sprintf("dropping connection from %s: proxy protocol handshake: %v", conn.RemoteAddr(), err))
 			conn.Close()
 			continue
 		}

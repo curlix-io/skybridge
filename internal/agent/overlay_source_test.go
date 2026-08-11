@@ -6,7 +6,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -79,7 +79,7 @@ func TestOverlaySourceFetchNilColumnsDefaultsToEmptyMap(t *testing.T) {
 }
 
 func TestStartOverlaySyncDefaultsNilLogger(t *testing.T) {
-	// A nil logger must fall back to log.Default() rather than panic.
+	// A nil logger must fall back to slog.Default() rather than panic.
 	overlay := mask.NewOverlay(nil)
 	cfg := config.Agent{PIIOverlayURL: "http://127.0.0.1:0", PIIOverlayPollSeconds: -1}
 	startOverlaySync(context.Background(), cfg, overlay, nil)
@@ -98,7 +98,7 @@ func TestStartOverlaySyncPollStopsOnContextCancel(t *testing.T) {
 	overlay := mask.NewOverlay(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := config.Agent{PIIOverlayURL: srv.URL, PIIOverlayPollSeconds: 15}
-	startOverlaySync(ctx, cfg, overlay, log.Default())
+	startOverlaySync(ctx, cfg, overlay, slog.Default())
 	cancel()
 	// Give the background goroutine a moment to observe cancellation; nothing to assert beyond "no
 	// panic/hang", which the test harness itself verifies via completion.
@@ -145,7 +145,7 @@ func TestStartOverlaySyncSeedsOverlay(t *testing.T) {
 
 	overlay := mask.NewOverlay(nil)
 	cfg := config.Agent{PIIOverlayURL: srv.URL, PIIOverlayPollSeconds: -1} // fetch-once
-	startOverlaySync(context.Background(), cfg, overlay, log.Default())
+	startOverlaySync(context.Background(), cfg, overlay, slog.Default())
 
 	if !overlay.Enabled() {
 		t.Fatal("overlay should be seeded after sync")
@@ -160,7 +160,7 @@ func TestStartOverlaySyncLogsFailedInitialFetch(t *testing.T) {
 	overlay := mask.NewOverlay(map[string]string{"email": "[static]"})
 	var buf bytes.Buffer
 	cfg := config.Agent{PIIOverlayURL: "http://127.0.0.1:0", PIIOverlayPollSeconds: -1}
-	startOverlaySync(context.Background(), cfg, overlay, log.New(&buf, "", 0))
+	startOverlaySync(context.Background(), cfg, overlay, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !strings.Contains(buf.String(), "pii-overlay refresh failed") {
 		t.Fatalf("expected a refresh-failure log, got %q", buf.String())
 	}
@@ -186,7 +186,7 @@ func TestStartOverlaySyncPollsInBackground(t *testing.T) {
 	// don't want to wait a full 15s in a unit test, so just confirm the initial synchronous seed
 	// happened and the background goroutine was launched without blocking or panicking.
 	cfg := config.Agent{PIIOverlayURL: srv.URL, PIIOverlayPollSeconds: 0}
-	startOverlaySync(ctx, cfg, overlay, log.Default())
+	startOverlaySync(ctx, cfg, overlay, slog.Default())
 
 	if atomic.LoadInt32(&calls) < 1 {
 		t.Fatal("expected at least one synchronous initial fetch")
@@ -199,7 +199,7 @@ func TestStartOverlaySyncPollsInBackground(t *testing.T) {
 func TestStartOverlaySyncNoURLIsNoop(t *testing.T) {
 	overlay := mask.NewOverlay(map[string]string{"email": "[static]"})
 	// No URL → must leave the static overlay untouched and not block.
-	startOverlaySync(context.Background(), config.Agent{}, overlay, log.Default())
+	startOverlaySync(context.Background(), config.Agent{}, overlay, slog.Default())
 	out, _ := overlay.MaskRow(context.Background(), []mask.Column{{Name: "email", Text: true, FreeText: true}}, [][]byte{[]byte("a@b.com")})
 	if string(out[0]) != "[static]" {
 		t.Fatalf("static overlay should remain, got %q", out[0])
@@ -221,7 +221,7 @@ func TestBuildMaskerWithOverlayIncludesDynamic(t *testing.T) {
 
 func guardrailLog(cfg config.Agent) string {
 	var buf bytes.Buffer
-	logMaskingGuardrails(cfg, log.New(&buf, "", 0))
+	logMaskingGuardrails(cfg, slog.New(slog.NewTextHandler(&buf, nil)))
 	return buf.String()
 }
 
@@ -247,7 +247,7 @@ func TestGuardrailHalfConfiguredPresidio(t *testing.T) {
 }
 
 func TestGuardrailDefaultsNilLogger(t *testing.T) {
-	// A nil logger must fall back to log.Default() rather than panic.
+	// A nil logger must fall back to slog.Default() rather than panic.
 	logMaskingGuardrails(config.Agent{}, nil)
 }
 

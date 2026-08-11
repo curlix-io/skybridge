@@ -5,6 +5,7 @@ import (
 	"crypto/x509"
 	"encoding/pem"
 	"errors"
+	"fmt"
 	"time"
 
 	"google.golang.org/grpc"
@@ -94,7 +95,7 @@ func (c *Client) enroll(ctx context.Context) (*tlsMaterial, error) {
 	}
 	defer conn.Close()
 
-	c.logger.Printf("enrolling tenant=%s edge=%s via %s", c.cfg.TenantID, c.cfg.ConnectorID, target)
+	c.logger.Info(fmt.Sprintf("enrolling tenant=%s edge=%s via %s", c.cfg.TenantID, c.cfg.ConnectorID, target))
 	resp, err := connectorv1.NewConnectorGatewayClient(conn).Enroll(ctx, &connectorv1.EnrollRequest{
 		EnrollmentToken: c.cfg.EnrollToken,
 		TenantId:        c.cfg.TenantID,

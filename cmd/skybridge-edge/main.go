@@ -2,7 +2,6 @@ package main
 
 import (
 	"context"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +13,7 @@ import (
 	"github.com/curlix-io/skybridge/internal/edge/k8sexec"
 	"github.com/curlix-io/skybridge/internal/edge/k8stoken"
 	"github.com/curlix-io/skybridge/internal/edge/transport"
+	skylog "github.com/curlix-io/skybridge/internal/log"
 )
 
 func main() {
@@ -21,7 +21,7 @@ func main() {
 	config.NormalizeEdge(&cfg)
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
-	logger := log.Default()
+	logger := skylog.New(os.Stderr, "skybridge-edge", skylog.ParseLevel(cfg.LogLevel))
 	masker := agent.BuildMasker(cfg.WireProxy)
 
 	if cfg.WireProxyEnabled() {
@@ -35,7 +35,7 @@ func main() {
 				err = agent.RunListener(ctx, wp, logger)
 			}
 			if err != nil && ctx.Err() == nil {
-				logger.Printf("skybridge-edge: wire proxy ended: %v", err)
+				logger.Error("wire proxy ended", "error", err)
 			}
 		}()
 	}
@@ -48,7 +48,8 @@ func main() {
 			<-ctx.Done()
 			return
 		}
-		logger.Fatal("set SKYBRIDGE_EDGE_GATEWAY (or SKYBRIDGE_GATEWAY) to the Connector Gateway address")
+		logger.Error("set SKYBRIDGE_EDGE_GATEWAY (or SKYBRIDGE_GATEWAY) to the Connector Gateway address")
+		os.Exit(1)
 	}
 
 	awsexec.Register(reg, awsexec.Options{
@@ -93,6 +94,7 @@ func main() {
 	}, reg, logger)
 
 	if err := client.Run(ctx); err != nil && ctx.Err() == nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 }

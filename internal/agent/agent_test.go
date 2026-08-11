@@ -4,7 +4,7 @@ import (
 	"bytes"
 	"context"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"testing"
 	"time"
@@ -159,7 +159,7 @@ func TestDepsWithDefaultsPreservesInjectedCollaborators(t *testing.T) {
 
 func TestLogCredentialModeNoopWhenInjectionDisabled(t *testing.T) {
 	var buf bytes.Buffer
-	logCredentialMode(config.Agent{}, &fakeEngine{name: "postgres"}, nil, log.New(&buf, "", 0))
+	logCredentialMode(config.Agent{}, &fakeEngine{name: "postgres"}, nil, slog.New(slog.NewTextHandler(&buf, nil)))
 	if buf.Len() != 0 {
 		t.Fatalf("expected no log output when injection is disabled, got %q", buf.String())
 	}
@@ -167,7 +167,7 @@ func TestLogCredentialModeNoopWhenInjectionDisabled(t *testing.T) {
 
 func TestLogCredentialModeWarnsWhenResolverNil(t *testing.T) {
 	var buf bytes.Buffer
-	logCredentialMode(config.Agent{InjectCredentials: true}, &fakeEngine{name: "postgres"}, nil, log.New(&buf, "", 0))
+	logCredentialMode(config.Agent{InjectCredentials: true}, &fakeEngine{name: "postgres"}, nil, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("falling back to verbatim")) {
 		t.Fatalf("expected a fallback warning, got %q", buf.String())
 	}
@@ -175,7 +175,7 @@ func TestLogCredentialModeWarnsWhenResolverNil(t *testing.T) {
 
 func TestLogCredentialModeWarnsWhenEngineDoesNotSupportInjection(t *testing.T) {
 	var buf bytes.Buffer
-	logCredentialMode(config.Agent{InjectCredentials: true}, &fakeEngine{name: "mongodb"}, noopResolver, log.New(&buf, "", 0))
+	logCredentialMode(config.Agent{InjectCredentials: true}, &fakeEngine{name: "mongodb"}, noopResolver, slog.New(slog.NewTextHandler(&buf, nil)))
 	if !bytes.Contains(buf.Bytes(), []byte("does not support it yet")) {
 		t.Fatalf("expected an unsupported-engine warning, got %q", buf.String())
 	}
@@ -183,7 +183,7 @@ func TestLogCredentialModeWarnsWhenEngineDoesNotSupportInjection(t *testing.T) {
 
 func TestLogCredentialModeEnabledWarnsWithoutClientTLS(t *testing.T) {
 	var buf bytes.Buffer
-	logCredentialMode(config.Agent{InjectCredentials: true}, &fakeInjectingEngine{}, noopResolver, log.New(&buf, "", 0))
+	logCredentialMode(config.Agent{InjectCredentials: true}, &fakeInjectingEngine{}, noopResolver, slog.New(slog.NewTextHandler(&buf, nil)))
 	out := buf.String()
 	if !bytes.Contains(buf.Bytes(), []byte("ENABLED")) {
 		t.Fatalf("expected an enabled message, got %q", out)
@@ -195,26 +195,26 @@ func TestLogCredentialModeEnabledWarnsWithoutClientTLS(t *testing.T) {
 
 func TestLogCredentialModeEnabledSilentWarningWithClientTLS(t *testing.T) {
 	var buf bytes.Buffer
-	logCredentialMode(config.Agent{InjectCredentials: true, ClientTLSSelfSigned: true}, &fakeInjectingEngine{}, noopResolver, log.New(&buf, "", 0))
+	logCredentialMode(config.Agent{InjectCredentials: true, ClientTLSSelfSigned: true}, &fakeInjectingEngine{}, noopResolver, slog.New(slog.NewTextHandler(&buf, nil)))
 	if bytes.Contains(buf.Bytes(), []byte("client TLS is OFF")) {
 		t.Fatalf("expected no client-TLS-off warning when TLS is configured, got %q", buf.String())
 	}
 }
 
 func TestLogCredentialModeDefaultsNilLogger(t *testing.T) {
-	// A nil logger must fall back to log.Default() rather than panic, even down the warning path.
+	// A nil logger must fall back to slog.Default() rather than panic, even down the warning path.
 	logCredentialMode(config.Agent{InjectCredentials: true}, &fakeEngine{name: "postgres"}, nil, nil)
 }
 
 func TestLogClientTLSModeDefaultsNilLogger(t *testing.T) {
 	tlsCfg := agentTestTLSConfig(t)
-	// A nil logger must fall back to log.Default() rather than panic.
+	// A nil logger must fall back to slog.Default() rather than panic.
 	logClientTLSMode(config.Agent{ClientTLSSelfSigned: true}, tlsCfg, &fakeEngine{name: "postgres"}, nil)
 }
 
 func TestLogClientTLSModeNoopWhenNotConfigured(t *testing.T) {
 	var buf bytes.Buffer
-	logClientTLSMode(config.Agent{}, nil, &fakeEngine{name: "postgres"}, log.New(&buf, "", 0))
+	logClientTLSMode(config.Agent{}, nil, &fakeEngine{name: "postgres"}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if buf.Len() != 0 {
 		t.Fatalf("expected no output when client TLS is not configured, got %q", buf.String())
 	}
@@ -222,7 +222,7 @@ func TestLogClientTLSModeNoopWhenNotConfigured(t *testing.T) {
 
 func TestLogClientTLSModeNoopWhenConfigButNilTLS(t *testing.T) {
 	var buf bytes.Buffer
-	logClientTLSMode(config.Agent{ClientTLSSelfSigned: true}, nil, &fakeEngine{name: "postgres"}, log.New(&buf, "", 0))
+	logClientTLSMode(config.Agent{ClientTLSSelfSigned: true}, nil, &fakeEngine{name: "postgres"}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if buf.Len() != 0 {
 		t.Fatalf("expected no output when clientTLS is nil (builder already logged), got %q", buf.String())
 	}
@@ -233,7 +233,7 @@ func TestLogClientTLSModeReportsPerEngine(t *testing.T) {
 	cases := map[string]string{"postgres": "ENABLED", "mysql": "ENABLED for MySQL", "mongodb": "ENABLED for MongoDB", "oracle": "does not"}
 	for name, want := range cases {
 		var buf bytes.Buffer
-		logClientTLSMode(config.Agent{ClientTLSSelfSigned: true}, tlsCfg, &fakeEngine{name: name}, log.New(&buf, "", 0))
+		logClientTLSMode(config.Agent{ClientTLSSelfSigned: true}, tlsCfg, &fakeEngine{name: name}, slog.New(slog.NewTextHandler(&buf, nil)))
 		if !bytes.Contains(buf.Bytes(), []byte(want)) {
 			t.Errorf("engine %q: expected log to contain %q, got %q", name, want, buf.String())
 		}
@@ -257,7 +257,7 @@ func TestRunTunnelRequiresGatewayAddr(t *testing.T) {
 func TestBuildMaskerWithPathLabelSyncNoopWhenNothingConfigured(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	m, detector, store := BuildMaskerWithPathLabelSync(ctx, config.Agent{}, log.New(io.Discard, "", 0))
+	m, detector, store := BuildMaskerWithPathLabelSync(ctx, config.Agent{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, ok := m.(mask.Noop); !ok {
 		t.Fatalf("expected mask.Noop, got %T", m)
 	}
@@ -273,7 +273,7 @@ func TestBuildMaskerWithPathLabelSyncReturnsDetectorWhenRemoteEnabled(t *testing
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cfg := config.Agent{MaskAnalyzeURL: "http://a", MaskAnonymizeURL: "http://b"}
-	m, detector, store := BuildMaskerWithPathLabelSync(ctx, cfg, log.New(io.Discard, "", 0))
+	m, detector, store := BuildMaskerWithPathLabelSync(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if m == nil {
 		t.Fatal("expected a non-nil masker")
 	}
@@ -289,7 +289,7 @@ func TestBuildMaskerWithPathLabelSyncStartsPathLabelStore(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	cfg := config.Agent{PathLabelURL: "http://127.0.0.1:0/path-labels"}
-	m, _, store := BuildMaskerWithPathLabelSync(ctx, cfg, log.New(io.Discard, "", 0))
+	m, _, store := BuildMaskerWithPathLabelSync(ctx, cfg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if m == nil {
 		t.Fatal("expected a non-nil masker")
 	}

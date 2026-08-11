@@ -12,8 +12,9 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"sync"
@@ -109,14 +110,14 @@ type Recorder struct {
 	mu      sync.Mutex
 	pending map[bucketKey]*bucketCounts
 
-	logger *log.Logger
+	logger *slog.Logger
 }
 
 // New builds a Recorder from cfg. When cfg.URL is empty, Enabled() reports false and every record
 // method is a safe no-op (no goroutines started, no allocations beyond the zero value).
-func New(cfg Config, logger *log.Logger) *Recorder {
+func New(cfg Config, logger *slog.Logger) *Recorder {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	push := cfg.PushInterval
 	if push < minPushSeconds*time.Second {
@@ -234,7 +235,7 @@ func (r *Recorder) flush(ctx context.Context) {
 		return
 	}
 	if err := r.push(ctx, drained); err != nil {
-		r.logger.Printf("mask/metrics: push failed: %v (%d buckets retained for next flush)", err, len(drained))
+		r.logger.Warn(fmt.Sprintf("masking-metrics push failed: %v (%d buckets retained for next flush)", err, len(drained)))
 		r.restore(drained)
 	}
 }

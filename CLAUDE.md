@@ -279,6 +279,20 @@ already-live layers without altering either one's behavior.
   through unmasked — use it wherever "the query fails" is preferable to "silently pass through raw
   PII during an outage."
 
+### Logging
+- Log output must support a configurable debug level (not just info/error) so a customer running
+  their own `skybridge-agent`/`skybridge-gateway`/`skybridge-edge` binary can turn up verbosity to
+  troubleshoot a live issue without a code change or rebuild.
+- Customer-facing log lines must stay generic and skybridge-branded — never mention "Curlix" or any
+  Curlix-specific SaaS/product terminology. Skybridge is a standalone, independently open-sourced
+  module (see [What this is](#what-this-is)); a customer who clones and runs it against their own
+  database, with no control-plane integration configured, should see logs that read as coming from
+  skybridge itself, not from a Curlix-branded backend they haven't opted into.
+- This applies even when an optional control-plane integration *is* configured (pathlabel sync,
+  overlay sync, masking metrics, credential exchange, edge transport, etc.) — log the mechanism
+  (e.g. "path-label sync", "overlay pull", "edge transport dial") and, on failure, the reason, not
+  the name of the backend product behind it.
+
 ### Credential handoff
 With `SKYBRIDGE_INJECT_CREDENTIALS=true`, the client presents an opaque session token as its
 password; the agent terminates that login locally, exchanges the token with the control plane for a
@@ -295,6 +309,8 @@ falls back to verbatim passthrough (logged at startup, not silent).
 - [ ] New wire-protocol parsing forwards unparseable input unmasked rather than guessing at
   structure or corrupting bytes
 - [ ] `CONTRACT.md` updated if a wire/HTTP boundary's shape changed (see below)
+- [ ] New log lines are gated at the right level (debug vs info/error) and don't hardcode "Curlix"
+  or SaaS-specific branding into customer-facing output (see [Logging](#logging) above)
 
 ---
 

@@ -4,13 +4,13 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"log"
 	"os"
 	"os/signal"
 	"syscall"
 
 	"github.com/curlix-io/skybridge/internal/agent"
 	"github.com/curlix-io/skybridge/internal/config"
+	skylog "github.com/curlix-io/skybridge/internal/log"
 )
 
 // helpText covers the SKYBRIDGE_* env vars most demo/quick-start users need. It is intentionally a
@@ -54,17 +54,19 @@ func main() {
 	}
 
 	cfg := config.LoadAgent()
+	logger := skylog.New(os.Stderr, "skybridge-agent", skylog.ParseLevel(cfg.LogLevel))
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	var err error
 	switch cfg.Mode {
 	case config.ModeTunnel:
-		err = agent.RunTunnel(ctx, cfg, agent.Deps{}, nil)
+		err = agent.RunTunnel(ctx, cfg, agent.Deps{}, logger)
 	default:
-		err = agent.RunListener(ctx, cfg, nil)
+		err = agent.RunListener(ctx, cfg, logger)
 	}
 	if err != nil && ctx.Err() == nil {
-		log.Fatal(err)
+		logger.Error(err.Error())
+		os.Exit(1)
 	}
 }

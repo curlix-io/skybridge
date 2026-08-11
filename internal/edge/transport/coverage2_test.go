@@ -4,7 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -25,7 +25,7 @@ import (
 func TestNewDefaultsNilLogger(t *testing.T) {
 	c := New(Config{}, edge.NewRegistry(), nil)
 	if c.logger == nil {
-		t.Fatal("expected New to default a nil logger to log.Default()")
+		t.Fatal("expected New to default a nil logger to slog.Default()")
 	}
 }
 
@@ -34,7 +34,7 @@ func TestNewDefaultsNilLogger(t *testing.T) {
 // With Reconnect=false, a dial failure (bad target string that fails to even parse) should make Run
 // return that dial error directly, without ever attempting the reconnect backoff loop.
 func TestRunDialErrorNoReconnectReturnsImmediately(t *testing.T) {
-	c := New(Config{Target: "bad target\x00", Reconnect: false}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{Target: "bad target\x00", Reconnect: false}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	err := c.Run(context.Background())
 	if err == nil {
 		t.Fatal("expected dial error to propagate when Reconnect is false")
@@ -65,7 +65,7 @@ func TestServeRegisterSendFailsOnCancelledContext(t *testing.T) {
 	conn := dialBufconn(t, srv, lis)
 	defer conn.Close()
 
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 	// Give the server a moment to observe the cancellation before we try to send.
@@ -108,7 +108,7 @@ func TestServeAttachesBearerTokenMetadata(t *testing.T) {
 	conn := dialBufconn(t, srv, lis)
 	defer conn.Close()
 
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1", Token: "s3cr3t"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1", Token: "s3cr3t"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -135,7 +135,7 @@ func TestDialWithMTLSMaterialSucceeds(t *testing.T) {
 	certPEM := ca.sign(t, csrPEM, "org-1", "edge-1", time.Now().Add(24*time.Hour))
 	m := &tlsMaterial{caBundlePEM: ca.certPEM, clientCertPEM: certPEM, clientKeyPEM: keyPEM}
 
-	c := New(Config{Target: "127.0.0.1:0"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:0"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	conn, err := c.dial(m)
 	if err != nil {
 		t.Fatalf("dial with mTLS material: %v", err)
@@ -146,7 +146,7 @@ func TestDialWithMTLSMaterialSucceeds(t *testing.T) {
 // dial() with an invalid client keypair in the material should propagate mtlsTLSConfig's error.
 func TestDialWithInvalidMTLSMaterialFails(t *testing.T) {
 	m := &tlsMaterial{clientCertPEM: []byte("garbage"), clientKeyPEM: []byte("garbage")}
-	c := New(Config{Target: "127.0.0.1:0"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:0"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := c.dial(m); err == nil {
 		t.Fatal("expected error from invalid mTLS material")
 	}
@@ -192,7 +192,7 @@ func TestServeHandlesCancelWorkMessage(t *testing.T) {
 	conn := dialBufconn(t, srv, lis)
 	defer conn.Close()
 
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
@@ -249,7 +249,7 @@ func TestHandleWorkMarshalErrorFallsBackToEmptyJSON(t *testing.T) {
 	conn := dialBufconn(t, srv, lis)
 	defer conn.Close()
 
-	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, reg, log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", ConnectorID: "edge-1"}, reg, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
@@ -301,7 +301,7 @@ func TestUnmarshalableResultReallyFailsToMarshal(t *testing.T) {
 // backoff each iteration and cap it at MaxBackoff (exercising the "backoff *= 2; backoff >
 // MaxBackoff" branch), until the context is cancelled.
 func TestRunBackoffCapsAtMaxBackoff(t *testing.T) {
-	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 15 * time.Millisecond}, edge.NewRegistry(), log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 15 * time.Millisecond}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), 80*time.Millisecond)
 	defer cancel()
 	err := c.Run(ctx)
@@ -360,7 +360,7 @@ func TestEnrollServerTLSConfigErrorPropagates(t *testing.T) {
 		TenantID:    "org-1",
 		ConnectorID: "edge-1",
 		CABundlePEM: []byte("not a valid ca bundle"),
-	}, nil, log.New(io.Discard, "", 0))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := c.enroll(context.Background()); err == nil {
 		t.Fatal("expected serverTLSConfig error to propagate from enroll")
 	}
@@ -373,7 +373,7 @@ func TestEnrollGenerateKeyAndCSRErrorPropagates(t *testing.T) {
 		Target:      "127.0.0.1:0",
 		TenantID:    "org-1",
 		ConnectorID: "edge\x00bad",
-	}, nil, log.New(io.Discard, "", 0))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	if _, err := c.enroll(context.Background()); err == nil {
 		t.Fatal("expected generateKeyAndCSR error to propagate from enroll")
 	}
@@ -404,7 +404,7 @@ func TestEnsureTLSMaterialStoreLoadErrorPropagates(t *testing.T) {
 		CABundlePEM:       ca.certPEM,
 		TLSDir:            t.TempDir(),
 		IdentitySecretARN: "arn:aws:secretsmanager:us-east-1:1:secret:x",
-	}, nil, log.New(io.Discard, "", 0))
+	}, nil, slog.New(slog.NewTextHandler(io.Discard, nil)))
 
 	if _, err := c.ensureTLSMaterial(context.Background()); err == nil {
 		t.Fatal("expected store.Load error to propagate from ensureTLSMaterial")

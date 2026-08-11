@@ -9,7 +9,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
-	"log"
+	"log/slog"
 	"sort"
 	"time"
 
@@ -109,9 +109,9 @@ func sqlDriverName(dbType string) (string, error) {
 // configuration problem (bad DSN, missing required field) — a per-cycle sampling/classification
 // failure is logged and the loop continues, matching mask.Remote's best-effort philosophy
 // (docs/AI_PATH_LABELLING_DESIGN.md §5.5).
-func Run(ctx context.Context, cfg config.Labeller, logger *log.Logger) error {
+func Run(ctx context.Context, cfg config.Labeller, logger *slog.Logger) error {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if err := validate(cfg); err != nil {
 		return err
@@ -163,8 +163,8 @@ func Run(ctx context.Context, cfg config.Labeller, logger *log.Logger) error {
 		MaxSamples: cfg.MaxSamplesPerField,
 	})
 
-	logger.Printf("skybridge-labeller: starting, db_type=%s database=%s tables=%v scan_interval=%ds max_objects_per_scan=%d rescan_interval=%ds",
-		cfg.DBType, cfg.Database, cfg.Tables, cfg.ScanIntervalSeconds, cfg.MaxObjectsPerScan, cfg.RescanIntervalSeconds)
+	logger.Info(fmt.Sprintf("starting, db_type=%s database=%s tables=%v scan_interval=%ds max_objects_per_scan=%d rescan_interval=%ds",
+		cfg.DBType, cfg.Database, cfg.Tables, cfg.ScanIntervalSeconds, cfg.MaxObjectsPerScan, cfg.RescanIntervalSeconds))
 
 	sched := newScheduler()
 	runOnce(ctx, cfg, sampler, scanner, sched, logger)
@@ -204,12 +204,12 @@ func validate(cfg config.Labeller) error {
 // one classification pass over all of them. A per-table column-listing failure is logged and
 // skipped — the same "one bad object never blocks the rest of the scan" posture
 // aiclassifier.Scanner already applies per-field.
-func runOnce(ctx context.Context, cfg config.Labeller, sampler sampleLister, scanner *aiclassifier.Scanner, sched *scheduler, logger *log.Logger) {
+func runOnce(ctx context.Context, cfg config.Labeller, sampler sampleLister, scanner *aiclassifier.Scanner, sched *scheduler, logger *slog.Logger) {
 	tables := cfg.Tables
 	if len(tables) == 0 {
 		discovered, err := sampler.ListTables(ctx, cfg.Database)
 		if err != nil {
-			logger.Printf("skybridge-labeller: discovering tables for database %s: %v (skipping this cycle)", cfg.Database, err)
+			logger.Warn(fmt.Sprintf("discovering tables for database %s: %v (skipping this cycle)", cfg.Database, err))
 			return
 		}
 		tables = discovered
@@ -223,7 +223,7 @@ func runOnce(ctx context.Context, cfg config.Labeller, sampler sampleLister, sca
 		objID := fmt.Sprintf("%s:%s:%s:%s", cfg.OrgID, normalizeDriver(cfg.DBType), cfg.Database, table)
 		cols, err := sampler.ListColumns(ctx, cfg.Database, table)
 		if err != nil {
-			logger.Printf("skybridge-labeller: listing columns for %s: %v (skipping this table this cycle)", objID, err)
+			logger.Warn(fmt.Sprintf("listing columns for %s: %v (skipping this table this cycle)", objID, err))
 			continue
 		}
 		for _, col := range cols {
@@ -233,8 +233,8 @@ func runOnce(ctx context.Context, cfg config.Labeller, sampler sampleLister, sca
 	sched.markScanned(selected, now)
 
 	n := scanner.ScanFields(ctx, fields)
-	logger.Printf("skybridge-labeller: scanned %d/%d tables (%d fields), proposed %d labels (Source=%s, inert until a steward confirms)",
-		len(selected), len(tables), len(fields), n, label.SourceProposed)
+	logger.Info(fmt.Sprintf("scanned %d/%d tables (%d fields), proposed %d labels (Source=%s, inert until a steward confirms)",
+		len(selected), len(tables), len(fields), n, label.SourceProposed))
 }
 
 // normalizeDriver matches internal/edge/dbquery's objectID convention ("postgres"/"mongo", not

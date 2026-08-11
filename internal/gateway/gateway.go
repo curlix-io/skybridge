@@ -13,8 +13,9 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"strings"
 	"sync"
@@ -36,7 +37,7 @@ const storeTimeout = 5 * time.Second
 // Gateway holds the live agent registry and relays client connections over agent tunnels.
 type Gateway struct {
 	authToken    string
-	log          *log.Logger
+	log          *slog.Logger
 	store        Store
 	admitter     WireAdmitter
 	resolver     TargetResolver
@@ -55,9 +56,9 @@ type agentConn struct {
 }
 
 // New creates a Gateway. authToken (if non-empty) is required from agents at registration.
-func New(authToken string, logger *log.Logger) *Gateway {
+func New(authToken string, logger *slog.Logger) *Gateway {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	return &Gateway{
 		authToken:   authToken,
@@ -124,7 +125,7 @@ func (g *Gateway) ListenAgents(ctx context.Context, ln net.Listener) error {
 		}
 		go func() {
 			if err := g.ServeAgent(conn); err != nil {
-				g.log.Printf("agent session ended: %v", err)
+				g.log.Warn(fmt.Sprintf("agent session ended: %v", err))
 			}
 		}()
 	}
@@ -180,7 +181,7 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 	if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: true}); err != nil {
 		return err
 	}
-	g.log.Printf("agent %q registered (org=%q)", ac.id, ac.orgID)
+	g.log.Info(fmt.Sprintf("agent %q registered (org=%q)", ac.id, ac.orgID))
 
 	// The agent's readLoop enforces tunnel.IdleTimeout waiting for ANY frame; without a gateway-side
 	// heartbeat, an agent with no active client relays would see nothing but its own outbound
@@ -213,7 +214,7 @@ func (g *Gateway) handleTranscript(ac *agentConn, ctrl tunnel.Control) {
 	defer cancel()
 	chunks := TranscriptChunks{OrgID: ac.orgID, Chunks: ctrl.TranscriptChunks, Truncated: ctrl.Truncated}
 	if err := g.store.SessionTranscript(ctx, ctrl.SessionID, chunks); err != nil {
-		g.log.Printf("session transcript recording failed session=%q: %v", ctrl.SessionID, err)
+		g.log.Warn(fmt.Sprintf("session transcript recording failed session=%q: %v", ctrl.SessionID, err))
 	}
 }
 
@@ -306,7 +307,7 @@ func (g *Gateway) ListenClients(ctx context.Context, ln net.Listener, orgID, tar
 		}
 		go func() {
 			if err := g.ServeClient(conn, orgID, target); err != nil {
-				g.log.Printf("client relay for org=%q target=%q ended: %v", orgID, target, err)
+				g.log.Warn(fmt.Sprintf("client relay for org=%q target=%q ended: %v", orgID, target, err))
 			}
 		}()
 	}
@@ -380,7 +381,7 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 	}
 	sessionID := ""
 	if id, serr := g.storeStarted(rec); serr != nil {
-		g.log.Printf("session recording (start) failed: %v", serr)
+		g.log.Warn(fmt.Sprintf("session recording (start) failed: %v", serr))
 	} else {
 		sessionID = id
 	}
@@ -403,7 +404,7 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 		res.Error = rerr.Error()
 	}
 	if serr := g.storeEnded(sessionID, res); serr != nil {
-		g.log.Printf("session recording (end) failed: %v", serr)
+		g.log.Warn(fmt.Sprintf("session recording (end) failed: %v", serr))
 	}
 	return rerr
 }
@@ -415,7 +416,7 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 // at least makes the reason (no agent / missing org / rate limit / admit-denied / tunnel-open
 // failure) visible server-side instead of every rejection looking identical.
 func (g *Gateway) logRejectedClient(target, clientAddr, orgID string, err error) {
-	g.log.Printf("client relay rejected: target=%q client=%q org=%q reason=%v", target, clientAddr, orgID, err)
+	g.log.Warn(fmt.Sprintf("client relay rejected: target=%q client=%q org=%q reason=%v", target, clientAddr, orgID, err))
 }
 
 func (g *Gateway) storeStarted(rec SessionRecord) (string, error) {

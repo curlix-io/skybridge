@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strings"
 	"time"
@@ -91,12 +91,12 @@ func (s *overlaySource) fetch(ctx context.Context) (map[string]string, error) {
 // refreshed in the background, hot-swapping rules in place. It is best-effort: a failed initial
 // fetch leaves the static SKYBRIDGE_PII_OVERLAY rules intact and logs the error. Returns immediately
 // when no dynamic source is configured.
-func startOverlaySync(ctx context.Context, cfg config.Agent, overlay *mask.Overlay, logger *log.Logger) {
+func startOverlaySync(ctx context.Context, cfg config.Agent, overlay *mask.Overlay, logger *slog.Logger) {
 	if overlay == nil || strings.TrimSpace(cfg.PIIOverlayURL) == "" {
 		return
 	}
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	src := newOverlaySource(cfg)
 
@@ -105,11 +105,11 @@ func startOverlaySync(ctx context.Context, cfg config.Agent, overlay *mask.Overl
 		defer cancel()
 		rules, err := src.fetch(fctx)
 		if err != nil {
-			logger.Printf("skybridge-agent: pii-overlay refresh failed: %v", err)
+			logger.Warn(fmt.Sprintf("pii-overlay refresh failed: %v", err))
 			return false
 		}
 		overlay.Replace(rules)
-		logger.Printf("skybridge-agent: pii-overlay synced (%d columns)", len(rules))
+		logger.Debug(fmt.Sprintf("pii-overlay synced (%d columns)", len(rules)))
 		return true
 	}
 

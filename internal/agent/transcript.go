@@ -1,7 +1,8 @@
 package agent
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
 	"sync"
 
 	"github.com/curlix-io/skybridge/internal/config"
@@ -76,7 +77,7 @@ func (r *transcriptRecorder) RecordOutput(text string) {
 // flushTranscript sends a recorder's accumulated chunks to the gateway as one control message,
 // best-effort — a flush failure must never affect the already-completed database session. No-op
 // for wire.NoopRecorder{} (replay disabled) or when there is nothing to send.
-func flushTranscript(recorder wire.Recorder, sess *tunnel.Session, logger *log.Logger) {
+func flushTranscript(recorder wire.Recorder, sess *tunnel.Session, logger *slog.Logger) {
 	r, ok := recorder.(*transcriptRecorder)
 	if !ok {
 		return
@@ -95,6 +96,6 @@ func flushTranscript(recorder wire.Recorder, sess *tunnel.Session, logger *log.L
 		Truncated:        truncated,
 	})
 	if err != nil && logger != nil {
-		logger.Printf("session transcript flush failed session=%q: %v", r.sessionID, err)
+		logger.Warn(fmt.Sprintf("session transcript flush failed session=%q: %v", r.sessionID, err))
 	}
 }

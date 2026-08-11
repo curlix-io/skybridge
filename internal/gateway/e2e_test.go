@@ -6,7 +6,7 @@ import (
 	"encoding/binary"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -53,7 +53,7 @@ func (upperEngine) Proxy(_ context.Context, client, upstream net.Conn, _ mask.Ma
 	return err
 }
 
-func silent() *log.Logger { return log.New(io.Discard, "", 0) }
+func silent() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
 // stubTargetResolver is a TargetResolver test double: it resolves target names against a canned
 // map, replacing what the agent used to announce at registration.

@@ -5,7 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"strings"
@@ -114,12 +114,12 @@ func (s *recognizersSource) requestURL() (string, error) {
 // best-effort: a failed initial fetch leaves the static MaskRecognizersYAML/MaskRecognizersFile
 // recognizers intact and logs the error. Returns immediately when no dynamic source is configured
 // — orgs on the static SSM/file delivery path (PIIRecognizersURL unset) are unaffected.
-func startRecognizersSync(ctx context.Context, cfg config.Agent, remote *mask.Remote, logger *log.Logger) {
+func startRecognizersSync(ctx context.Context, cfg config.Agent, remote *mask.Remote, logger *slog.Logger) {
 	if remote == nil || strings.TrimSpace(cfg.PIIRecognizersURL) == "" {
 		return
 	}
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	src := newRecognizersSource(cfg)
 
@@ -128,14 +128,14 @@ func startRecognizersSync(ctx context.Context, cfg config.Agent, remote *mask.Re
 		defer cancel()
 		resp, err := src.fetch(fctx)
 		if err != nil {
-			logger.Printf("skybridge-agent: pii-recognizers refresh failed: %v", err)
+			logger.Warn(fmt.Sprintf("pii-recognizers refresh failed: %v", err))
 			return false
 		}
 		remote.ReplaceConfig(resp.Recognizers, resp.Entities, resp.ScoreThreshold)
-		logger.Printf(
-			"skybridge-agent: pii-recognizers synced (%d recognizers, %d entities, score_threshold=%v)",
+		logger.Debug(fmt.Sprintf(
+			"pii-recognizers synced (%d recognizers, %d entities, score_threshold=%v)",
 			len(resp.Recognizers), len(resp.Entities), resp.ScoreThreshold,
-		)
+		))
 		return true
 	}
 

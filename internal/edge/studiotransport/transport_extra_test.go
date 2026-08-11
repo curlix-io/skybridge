@@ -10,7 +10,7 @@ import (
 	"context"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"testing"
 	"time"
 
@@ -19,7 +19,7 @@ import (
 
 func TestServeLogsRegisteredAck(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{TenantID: "org-1"}, log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	go func() { _ = c.serve(context.Background(), fakeGatewayClient{connectStream: f}, false) }()
 	drainRegister(t, f)
 
@@ -31,7 +31,7 @@ func TestServeLogsRegisteredAck(t *testing.T) {
 
 func TestServeDispatchesExecuteAssignmentFromRecvLoop(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{TenantID: "org-1", MaxSessions: 5}, log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1", MaxSessions: 5}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	go func() { _ = c.serve(context.Background(), fakeGatewayClient{connectStream: f}, false) }()
 	drainRegister(t, f)
 
@@ -58,7 +58,7 @@ func TestServeDispatchesExecuteAssignmentFromRecvLoop(t *testing.T) {
 
 func TestServeDispatchesCancelSessionFromRecvLoop(t *testing.T) {
 	f := newFakeBidiStream()
-	c := New(Config{TenantID: "org-1"}, log.New(io.Discard, "", 0))
+	c := New(Config{TenantID: "org-1"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	cancelled := make(chan struct{})
 	c.runs["sess-cancel"] = func() { close(cancelled) }
 
@@ -81,7 +81,7 @@ func TestServeDispatchesCancelSessionFromRecvLoop(t *testing.T) {
 // on a failed dial) when Reconnect is left false, so Run returns the dial error directly rather than
 // looping.
 func TestRunDialFailsThenReturnsWithoutReconnect(t *testing.T) {
-	c := New(Config{Target: "http://%zz-invalid-target"}, log.New(io.Discard, "", 0))
+	c := New(Config{Target: "http://%zz-invalid-target"}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	err := c.Run(context.Background())
 	if err == nil {
 		t.Fatal("expected Run to propagate the dial error for a malformed target")
@@ -92,7 +92,7 @@ func TestRunDialFailsThenReturnsWithoutReconnect(t *testing.T) {
 // Reconnect=true, confirming the backoff-then-retry loop runs (rather than asserting only on the
 // final context error), covering the backoff-doubling branch.
 func TestRunDialFailsThenReconnectsAndBacksOff(t *testing.T) {
-	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 5 * time.Millisecond}, log.New(io.Discard, "", 0))
+	c := New(Config{Target: "127.0.0.1:1", Reconnect: true, MaxBackoff: 5 * time.Millisecond}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ctx, cancel := context.WithTimeout(context.Background(), 40*time.Millisecond)
 	defer cancel()
 	err := c.Run(ctx)
@@ -107,7 +107,7 @@ func TestRunDialFailsThenReconnectsAndBacksOff(t *testing.T) {
 // binding and control passed through to dbquery.Execute rather than short-circuiting on "no local
 // target binding".
 func TestExecuteLocallyResolvesAndSurfacesUnderlyingExecuteError(t *testing.T) {
-	c := New(Config{Targets: []Target{{DBType: "postgres", DatabaseName: "app", Host: "127.0.0.1:1"}}}, log.New(io.Discard, "", 0))
+	c := New(Config{Targets: []Target{{DBType: "postgres", DatabaseName: "app", Host: "127.0.0.1:1"}}}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	_, err := c.executeLocally(context.Background(), &studiov1.ExecuteRequest{
 		DbType:       "postgres",
 		DatabaseName: "app",
@@ -128,7 +128,7 @@ func TestHandleAssignmentSuccessPathEmitsFinishedWithEncodedPayload(t *testing.T
 	// — the counterpart already-covered "execute_error" path is TestStartAssignmentExecuteErrorEmitsErrorEvent.
 	// Here we instead confirm handleAssignment's Started+Ack sequence always precedes any outcome event.
 	f := newFakeBidiStream()
-	c := New(Config{MaxSessions: 5}, log.New(io.Discard, "", 0))
+	c := New(Config{MaxSessions: 5}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ss := &safeStream{stream: f}
 
 	c.handleAssignment(context.Background(), ss, &studiov1.ExecuteAssignment{

@@ -11,7 +11,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"io"
-	"log"
+	"log/slog"
 	"math/big"
 	"testing"
 	"time"
@@ -92,7 +92,7 @@ func TestCertValidRejectsWhenSkewExceedsRemainingLife(t *testing.T) {
 }
 
 func TestEnsureTLSMaterialNoopWhenNothingConfigured(t *testing.T) {
-	c := &Client{cfg: Config{}, logger: log.New(io.Discard, "", 0)}
+	c := &Client{cfg: Config{}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	m, err := c.ensureTLSMaterial(context.Background())
 	if err != nil || m != nil {
 		t.Fatalf("expected (nil, nil) when no CA bundle and no TLSDir are set, got %v, %v", m, err)
@@ -107,7 +107,7 @@ func TestEnsureTLSMaterialReusesValidCachedCert(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := &Client{cfg: Config{TLSDir: dir}, logger: log.New(io.Discard, "", 0)}
+	c := &Client{cfg: Config{TLSDir: dir}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	m, err := c.ensureTLSMaterial(context.Background())
 	if err != nil {
 		t.Fatal(err)
@@ -122,7 +122,7 @@ func TestEnsureTLSMaterialReusesValidCachedCert(t *testing.T) {
 
 func TestEnsureTLSMaterialNoCacheNoCANoTokenReturnsNil(t *testing.T) {
 	dir := t.TempDir()
-	c := &Client{cfg: Config{TLSDir: dir}, logger: log.New(io.Discard, "", 0)}
+	c := &Client{cfg: Config{TLSDir: dir}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	m, err := c.ensureTLSMaterial(context.Background())
 	if err != nil || m != nil {
 		t.Fatalf("expected (nil, nil) with no cached cert, no CA bundle, and no enroll token, got %v, %v", m, err)
@@ -131,7 +131,7 @@ func TestEnsureTLSMaterialNoCacheNoCANoTokenReturnsNil(t *testing.T) {
 
 func TestEnsureTLSMaterialNoCacheNoTokenErrorsWhenCAConfigured(t *testing.T) {
 	dir := t.TempDir()
-	c := &Client{cfg: Config{TLSDir: dir, CABundlePEM: []byte("ca-bundle")}, logger: log.New(io.Discard, "", 0)}
+	c := &Client{cfg: Config{TLSDir: dir, CABundlePEM: []byte("ca-bundle")}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	_, err := c.ensureTLSMaterial(context.Background())
 	if err == nil {
 		t.Fatal("expected an error when a CA bundle is configured but there is no cached cert and no enroll token")
@@ -146,7 +146,7 @@ func TestEnsureTLSMaterialExpiredCacheNoTokenReturnsCachedAnyway(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	c := &Client{cfg: Config{TLSDir: dir, CABundlePEM: []byte("ca-bundle")}, logger: log.New(io.Discard, "", 0)}
+	c := &Client{cfg: Config{TLSDir: dir, CABundlePEM: []byte("ca-bundle")}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
 	m, err := c.ensureTLSMaterial(context.Background())
 	if err != nil {
 		t.Fatal(err)

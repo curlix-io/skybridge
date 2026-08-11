@@ -8,7 +8,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"encoding/pem"
-	"log"
+	"log/slog"
 	"math/big"
 	"testing"
 	"time"
@@ -53,7 +53,7 @@ func TestBuildClientTLSConfigRejectsMismatchedCertAndKey(t *testing.T) {
 
 func TestBuildClientTLSConfigSelfSignedWarns(t *testing.T) {
 	var buf bytes.Buffer
-	cfg, err := buildClientTLSConfig(config.Agent{ClientTLSSelfSigned: true}, log.New(&buf, "", 0))
+	cfg, err := buildClientTLSConfig(config.Agent{ClientTLSSelfSigned: true}, slog.New(slog.NewTextHandler(&buf, nil)))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -135,7 +135,7 @@ func TestEngineFactoryWithPostgresCatalogResolver(t *testing.T) {
 }
 
 func TestLogPostgresCatalogModeDefaultsNilLogger(t *testing.T) {
-	// A nil logger must fall back to log.Default() rather than panic.
+	// A nil logger must fall back to slog.Default() rather than panic.
 	r, err := buildPostgresCatalogResolver(config.Agent{PostgresCatalogDSN: "postgres://db.internal:5432/postgres"})
 	if err != nil {
 		t.Fatal(err)
@@ -168,7 +168,7 @@ func TestBuildPostgresCatalogResolverFromValidDSN(t *testing.T) {
 
 func TestLogPostgresCatalogModeNoopWhenNil(t *testing.T) {
 	var buf bytes.Buffer
-	logPostgresCatalogMode(config.Agent{}, nil, log.New(&buf, "", 0))
+	logPostgresCatalogMode(config.Agent{}, nil, slog.New(slog.NewTextHandler(&buf, nil)))
 	if buf.Len() != 0 {
 		t.Fatalf("expected no output when resolver is nil, got %q", buf.String())
 	}
@@ -180,7 +180,7 @@ func TestLogPostgresCatalogModeNotesMissingPathLabelURL(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	logPostgresCatalogMode(config.Agent{}, r, log.New(&buf, "", 0))
+	logPostgresCatalogMode(config.Agent{}, r, slog.New(slog.NewTextHandler(&buf, nil)))
 	out := buf.String()
 	if !bytes.Contains(buf.Bytes(), []byte("ENABLED")) {
 		t.Fatalf("expected an enabled message, got %q", out)
@@ -196,7 +196,7 @@ func TestLogPostgresCatalogModeSilentNoteWhenPathLabelConfigured(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	logPostgresCatalogMode(config.Agent{PathLabelURL: "https://cp.example.com"}, r, log.New(&buf, "", 0))
+	logPostgresCatalogMode(config.Agent{PathLabelURL: "https://cp.example.com"}, r, slog.New(slog.NewTextHandler(&buf, nil)))
 	if bytes.Contains(buf.Bytes(), []byte("is not set")) {
 		t.Fatalf("expected no missing-path-label note, got %q", buf.String())
 	}

@@ -8,7 +8,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"strings"
 	"sync"
 	"time"
@@ -58,14 +58,14 @@ type Config struct {
 // Client maintains the Studio Gateway Connect stream.
 type Client struct {
 	cfg    Config
-	logger *log.Logger
+	logger *slog.Logger
 	mu     sync.Mutex
 	runs   map[string]context.CancelFunc
 }
 
-func New(cfg Config, logger *log.Logger) *Client {
+func New(cfg Config, logger *slog.Logger) *Client {
 	if logger == nil {
-		logger = log.Default()
+		logger = slog.Default()
 	}
 	if cfg.MaxBackoff <= 0 {
 		cfg.MaxBackoff = 30 * time.Second
@@ -91,11 +91,11 @@ func (c *Client) Run(ctx context.Context) error {
 			serveErr := c.serve(ctx, studiov1.NewStudioGatewayClient(conn), material == nil)
 			_ = conn.Close()
 			if serveErr != nil {
-				c.logger.Printf("skybridge-edge: studio call-home ended: %v", serveErr)
+				c.logger.Warn(fmt.Sprintf("studio call-home ended: %v", serveErr))
 			}
 			backoff = time.Second
 		} else {
-			c.logger.Printf("skybridge-edge: studio dial %s failed: %v", c.cfg.Target, derr)
+			c.logger.Warn(fmt.Sprintf("studio dial %s failed: %v", c.cfg.Target, derr))
 		}
 		if !c.cfg.Reconnect {
 			return derr
@@ -170,7 +170,7 @@ func (c *Client) serve(ctx context.Context, client studiov1.StudioGatewayClient,
 		}
 		switch m := gmsg.Msg.(type) {
 		case *studiov1.GatewayMessage_Registered:
-			c.logger.Printf("skybridge-edge: studio registered lease=%s tenant=%s", m.Registered.GetLeaseId(), c.cfg.TenantID)
+			c.logger.Info(fmt.Sprintf("studio registered lease=%s tenant=%s", m.Registered.GetLeaseId(), c.cfg.TenantID))
 		case *studiov1.GatewayMessage_ExecuteAssignment:
 			c.startAssignment(ctx, ss, m.ExecuteAssignment)
 		case *studiov1.GatewayMessage_CancelSession:
