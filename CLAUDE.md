@@ -364,6 +364,7 @@ documentation for anyone standing Skybridge up against their own database:
 | Need | Location |
 |------|----------|
 | Masking pipeline deep dive (with live demo GIF) | `REDACTION.md` |
+| How our redaction compares to hoop.dev/OSS DLP projects, improvement backlog | `docs/REDACTION_COMPETITIVE_ANALYSIS.md` |
 | Wire/HTTP contract reference | `CONTRACT.md` |
 | Quick start, all `SKYBRIDGE_*` vars, edge binary details | `README.md` |
 | Full env var list with defaults/behavior | `internal/config/config.go` |

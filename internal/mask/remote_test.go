@@ -63,7 +63,7 @@ func TestRemoteMaskRowNoopWhenDisabled(t *testing.T) {
 
 func TestRemoteMaskRowRedactsDetectedText(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}}})
 	}))
 	defer analyzeSrv.Close()
 	anonymizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -87,7 +87,7 @@ func TestRemoteMaskRowSkipsNonTextAndNilAndShortValues(t *testing.T) {
 	called := false
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 	r := NewRemote(RemoteConfig{AnalyzeURL: analyzeSrv.URL, AnonymizeURL: analyzeSrv.URL, MinLen: 4})
@@ -108,7 +108,7 @@ func TestRemoteMaskRowSkipsNonTextAndNilAndShortValues(t *testing.T) {
 
 func TestRemoteMaskRowKeepsOriginalWhenNoSpansDetected(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 	r := NewRemote(RemoteConfig{AnalyzeURL: analyzeSrv.URL, AnonymizeURL: analyzeSrv.URL})
@@ -156,7 +156,7 @@ func TestRemoteMaskRowKeepsOriginalOnAnalyzeNonOKStatus(t *testing.T) {
 
 func TestRemoteMaskRowKeepsOriginalOnAnonymizeFailure(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 5, Score: 0.9}})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 5, Score: 0.9}}})
 	}))
 	defer analyzeSrv.Close()
 	anonymizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -188,7 +188,7 @@ func TestRemoteStrictReturnsErrorOnAnalyzeTransportError(t *testing.T) {
 
 func TestRemoteStrictReturnsErrorOnAnonymizeFailure(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 5, Score: 0.9}})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 5, Score: 0.9}}})
 	}))
 	defer analyzeSrv.Close()
 	anonymizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -207,7 +207,7 @@ func TestRemoteStrictReturnsErrorOnAnonymizeFailure(t *testing.T) {
 
 func TestRemoteStrictNoErrorWhenNothingDetected(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer srv.Close()
 	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL, Strict: true})
@@ -224,7 +224,7 @@ func TestRemoteStrictNoErrorWhenNothingDetected(t *testing.T) {
 
 func TestRemoteStrictMasksSuccessfullyLikeBestEffort(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}}})
 	}))
 	defer analyzeSrv.Close()
 	anonymizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -280,7 +280,7 @@ func TestRemoteAnalyzeSendsConfiguredEntities(t *testing.T) {
 	var gotBody map[string]any
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 
@@ -297,7 +297,7 @@ func TestRemoteAnalyzeSendsConfiguredEntities(t *testing.T) {
 
 func TestRemoteAnonymizeSendsConfiguredAnonymizers(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{{EntityType: "US_SSN", Start: 0, End: 4, Score: 0.9}})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{{EntityType: "US_SSN", Start: 0, End: 4, Score: 0.9}}})
 	}))
 	defer analyzeSrv.Close()
 	var gotBody map[string]any
@@ -330,7 +330,7 @@ func TestRemoteAnalyzeSendsConfiguredAdHocRecognizers(t *testing.T) {
 	var gotBody map[string]any
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 
@@ -350,7 +350,7 @@ func TestRemoteAnalyzeOmitsAdHocRecognizersWhenUnset(t *testing.T) {
 	var gotBody map[string]any
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 
@@ -368,7 +368,7 @@ func TestRemoteReplaceConfigHotSwapsAdHocRecognizers(t *testing.T) {
 	var gotBody map[string]any
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 
@@ -401,7 +401,7 @@ func TestRemoteReplaceConfigHotSwapsEntitiesAndScoreThreshold(t *testing.T) {
 		// keep the previous request's stale value instead of disappearing.
 		gotBody = map[string]any{}
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 
@@ -446,7 +446,7 @@ func TestRemoteScoreThresholdFromConfigAppearsInRequest(t *testing.T) {
 	var gotBody map[string]any
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_ = json.NewDecoder(r.Body).Decode(&gotBody)
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 
@@ -481,7 +481,7 @@ func TestRemoteReplaceConfigConcurrentSwapsNeverTornRead(t *testing.T) {
 		if len(entities) == 1 && entities[0] == "B" && hasThreshold && threshold != 0.9 {
 			t.Errorf("torn read: entities=B but threshold=%v", threshold)
 		}
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 
@@ -544,7 +544,7 @@ func (f *fakeMetricsRecorder) RecordMasked(connectionKey, entityType string, byt
 
 func TestRemoteMaskRowRecordsAnalyzedAndMaskedOnRedaction(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}}})
 	}))
 	defer analyzeSrv.Close()
 	anonymizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -569,7 +569,7 @@ func TestRemoteMaskRowRecordsAnalyzedAndMaskedOnRedaction(t *testing.T) {
 
 func TestRemoteMaskRowRecordsAnalyzedOnlyWhenNoSpansDetected(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer analyzeSrv.Close()
 
@@ -600,7 +600,7 @@ func TestRemoteDetectSkipsShortText(t *testing.T) {
 	called := false
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		called = true
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer srv.Close()
 	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL, MinLen: 10})
@@ -615,11 +615,11 @@ func TestRemoteDetectSkipsShortText(t *testing.T) {
 
 func TestRemoteDetectReturnsHighestConfidenceSpan(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{
 			{EntityType: "PHONE_NUMBER", Start: 0, End: 5, Score: 0.4},
 			{EntityType: "EMAIL_ADDRESS", Start: 6, End: 20, Score: 0.9},
 			{EntityType: "US_SSN", Start: 21, End: 30, Score: 0.6},
-		})
+		}})
 	}))
 	defer srv.Close()
 	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL})
@@ -634,7 +634,7 @@ func TestRemoteDetectReturnsHighestConfidenceSpan(t *testing.T) {
 
 func TestRemoteDetectReturnsFalseWhenNothingFound(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}})
 	}))
 	defer srv.Close()
 	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL})
@@ -695,9 +695,146 @@ func TestRemotePostJSONFailsOnMalformedResponseBody(t *testing.T) {
 	}
 }
 
+func TestRemoteMaskRowBatchesMultipleColumnsIntoOneAnalyzeCall(t *testing.T) {
+	var analyzeCalls int
+	var gotTexts []string
+	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		analyzeCalls++
+		var body map[string]any
+		_ = json.NewDecoder(r.Body).Decode(&body)
+		for _, t := range body["text"].([]any) {
+			gotTexts = append(gotTexts, t.(string))
+		}
+		// Three inputs in, three (possibly empty) span lists out, in the same order.
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{}, {}, {}})
+	}))
+	defer analyzeSrv.Close()
+
+	r := NewRemote(RemoteConfig{AnalyzeURL: analyzeSrv.URL, AnonymizeURL: analyzeSrv.URL})
+	cols := []Column{
+		{Name: "a", Text: true, FreeText: true},
+		{Name: "bin", Text: false}, // excluded: not eligible
+		{Name: "b", Text: true, FreeText: true},
+		{Name: "c", Text: true, FreeText: true},
+	}
+	row := [][]byte{[]byte("first value"), []byte("skip me"), []byte("second value"), []byte("third value")}
+	if _, err := r.MaskRow(context.Background(), cols, row); err != nil {
+		t.Fatal(err)
+	}
+	if analyzeCalls != 1 {
+		t.Fatalf("expected exactly one batched analyze call for the whole row, got %d", analyzeCalls)
+	}
+	want := []string{"first value", "second value", "third value"}
+	if len(gotTexts) != len(want) {
+		t.Fatalf("expected %d texts in the batch, got %v", len(want), gotTexts)
+	}
+	for i, w := range want {
+		if gotTexts[i] != w {
+			t.Fatalf("expected batch text[%d]=%q, got %q", i, w, gotTexts[i])
+		}
+	}
+}
+
+func TestRemoteMaskRowCorrelatesBatchSpansToCorrectColumn(t *testing.T) {
+	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Column 0 (email) gets an EMAIL_ADDRESS span; column 1 (ssn) gets nothing.
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{
+			{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}},
+			{},
+		})
+	}))
+	defer analyzeSrv.Close()
+	var anonymizeCalls int
+	anonymizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		anonymizeCalls++
+		_ = json.NewEncoder(w).Encode(map[string]string{"text": "[redacted]"})
+	}))
+	defer anonymizeSrv.Close()
+
+	r := NewRemote(RemoteConfig{AnalyzeURL: analyzeSrv.URL, AnonymizeURL: anonymizeSrv.URL})
+	cols := []Column{
+		{Name: "email", Text: true, FreeText: true},
+		{Name: "ssn", Text: true, FreeText: true},
+	}
+	row := [][]byte{[]byte("alice@example.com"), []byte("not actually an ssn")}
+	out, err := r.MaskRow(context.Background(), cols, row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "[redacted]" {
+		t.Fatalf("expected column 0 (email) redacted, got %q", out[0])
+	}
+	if string(out[1]) != "not actually an ssn" {
+		t.Fatalf("expected column 1 (ssn) untouched since its batch result had no spans, got %q", out[1])
+	}
+	if anonymizeCalls != 1 {
+		t.Fatalf("expected anonymize called exactly once (only for the column with a detection), got %d", anonymizeCalls)
+	}
+}
+
+func TestRemoteMaskRowAnonymizeCalledOncePerColumnWithSpans(t *testing.T) {
+	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{
+			{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 5, Score: 0.9}},
+			{{EntityType: "US_SSN", Start: 0, End: 5, Score: 0.9}},
+			{},
+		})
+	}))
+	defer analyzeSrv.Close()
+	var anonymizeCalls int
+	anonymizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		anonymizeCalls++
+		_ = json.NewEncoder(w).Encode(map[string]string{"text": "[redacted]"})
+	}))
+	defer anonymizeSrv.Close()
+
+	r := NewRemote(RemoteConfig{AnalyzeURL: analyzeSrv.URL, AnonymizeURL: anonymizeSrv.URL})
+	cols := []Column{
+		{Name: "a", Text: true, FreeText: true},
+		{Name: "b", Text: true, FreeText: true},
+		{Name: "c", Text: true, FreeText: true},
+	}
+	row := [][]byte{[]byte("value a"), []byte("value b"), []byte("value c")}
+	if _, err := r.MaskRow(context.Background(), cols, row); err != nil {
+		t.Fatal(err)
+	}
+	if anonymizeCalls != 2 {
+		t.Fatalf("expected anonymize called once per column with spans (2), got %d", anonymizeCalls)
+	}
+}
+
+func TestRemoteMaskRowBatchAnalyzeTransportErrorLeavesRowUnchanged(t *testing.T) {
+	r := NewRemote(RemoteConfig{AnalyzeURL: "http://127.0.0.1:0", AnonymizeURL: "http://127.0.0.1:0"})
+	cols := []Column{
+		{Name: "a", Text: true, FreeText: true},
+		{Name: "b", Text: true, FreeText: true},
+	}
+	row := [][]byte{[]byte("first value stays"), []byte("second value stays")}
+	out, err := r.MaskRow(context.Background(), cols, row)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(out[0]) != "first value stays" || string(out[1]) != "second value stays" {
+		t.Fatalf("expected both values unchanged on batch analyze transport error, got %v", out)
+	}
+}
+
+func TestRemoteMaskRowBatchAnalyzeTransportErrorStrictAbortsWholeRow(t *testing.T) {
+	r := NewRemote(RemoteConfig{AnalyzeURL: "http://127.0.0.1:0", AnonymizeURL: "http://127.0.0.1:0", Strict: true})
+	cols := []Column{
+		{Name: "a", Text: true, FreeText: true},
+		{Name: "b", Text: true, FreeText: true},
+	}
+	row := [][]byte{[]byte("first value"), []byte("second value")}
+	_, err := r.MaskRow(context.Background(), cols, row)
+	if !errors.Is(err, ErrMaskerUnavailable) {
+		t.Fatalf("expected ErrMaskerUnavailable in strict mode on batch analyze failure, got %v", err)
+	}
+}
+
 func TestRemoteMaskRowNilMetricsIsNoop(t *testing.T) {
 	analyzeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		_ = json.NewEncoder(w).Encode([]detectedSpan{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}})
+		_ = json.NewEncoder(w).Encode([][]detectedSpan{{{EntityType: "EMAIL_ADDRESS", Start: 0, End: 17, Score: 0.9}}})
 	}))
 	defer analyzeSrv.Close()
 	anonymizeSrv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

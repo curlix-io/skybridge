@@ -355,4 +355,7 @@ inspect the value's internal structure.
   your own queries.
 
 See [`README.md`](./README.md#configure) for the full environment-variable reference and
-[`CLAUDE.md`](./CLAUDE.md) for the broader architecture this pipeline sits inside.
+[`CLAUDE.md`](./CLAUDE.md) for the broader architecture this pipeline sits inside. For how this
+pipeline compares to hoop.dev, `postgresql_anonymizer`, Teleport, and other OSS/DLP projects — plus
+the concrete gaps that comparison surfaced — see
+[`docs/REDACTION_COMPETITIVE_ANALYSIS.md`](./docs/REDACTION_COMPETITIVE_ANALYSIS.md).
