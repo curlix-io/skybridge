@@ -19,18 +19,22 @@
 #
 # Requires:
 #   - gh CLI authenticated (`gh auth login`), push access to origin
-#   - docker login ghcr.io done beforehand (a GitHub PAT with write:packages, or
-#     `gh auth token | docker login ghcr.io -u <user> --password-stdin`)
-#   - a docker buildx builder that supports multi-platform output (`docker buildx create --use`
-#     once if `docker buildx ls` doesn't already show one)
+#   - registry login to ghcr.io done beforehand — for docker (default), a GitHub PAT with
+#     write:packages, or `gh auth token | docker login ghcr.io -u <user> --password-stdin`; for
+#     podman (CONTAINER_ENGINE=podman), `podman login ghcr.io`
+#   - multi-platform build support: for docker, a buildx builder whose driver supports it
+#     (`docker buildx create --use` once if `docker buildx ls` doesn't already show one); for
+#     podman, qemu-based emulation for foreign platforms (see scripts/lib/container-build.sh)
 #
 # Usage:
 #   VERSION=1.2.3 ./scripts/release.sh
 #   ./scripts/release.sh 1.2.3
 #   ./scripts/release.sh v1.2.3
+#   CONTAINER_ENGINE=podman VERSION=1.2.3 ./scripts/release.sh
 set -euo pipefail
 
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
+source scripts/lib/container-build.sh
 
 RAW_VERSION="${1:-${VERSION:-}}"
 if [ -z "$RAW_VERSION" ]; then
@@ -52,6 +56,7 @@ if ! command -v gh >/dev/null 2>&1; then
   exit 1
 fi
 gh auth status >/dev/null
+require_container_engine
 
 if [ -n "$(git status --porcelain)" ]; then
   echo "error: working tree is not clean — commit or stash changes before releasing" >&2
@@ -92,23 +97,14 @@ for i in "${!CMDS[@]}"; do
   prefix="${PREFIXES[$i]}"
   dockerfile="${DOCKERFILES[$i]}"
   build_tags="${BUILD_TAGS[$i]}"
-  tag_args=(-t "${IMAGE}:${prefix}-${VERSION}" -t "${IMAGE}:${prefix}-latest")
+  tags=("${IMAGE}:${prefix}-${VERSION}" "${IMAGE}:${prefix}-latest")
   # skybridge-edge is the single-install binary most customers use (see CLAUDE.md), so it also
   # gets the bare :latest alias on top of its edge-latest tag.
   if [ "${prefix}" = "edge" ]; then
-    tag_args+=(-t "${IMAGE}:latest")
+    tags+=("${IMAGE}:latest")
   fi
-  build_arg_args=(--build-arg "SKYBRIDGE_CMD=${cmd}")
-  if [ "${dockerfile}" = "Dockerfile.edge" ]; then
-    build_arg_args+=(--build-arg "BUILD_TAGS=${build_tags}")
-  fi
-  echo "==> building+pushing ${cmd} -> ${IMAGE}:${prefix}-${VERSION} (${dockerfile}, tags=[${build_tags}], ${PLATFORMS})"
-  docker buildx build \
-    --platform "${PLATFORMS}" \
-    "${build_arg_args[@]}" \
-    "${tag_args[@]}" \
-    -f "${dockerfile}" \
-    --push .
+  echo "==> building+pushing ${cmd} -> ${IMAGE}:${prefix}-${VERSION} (${dockerfile}, tags=[${build_tags}], engine=${CONTAINER_ENGINE:-docker}, ${PLATFORMS})"
+  build_and_push_image "${cmd}" "${dockerfile}" "${build_tags}" "${PLATFORMS}" "${tags[@]}"
 done
 
 echo "==> done."
