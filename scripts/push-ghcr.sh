@@ -2,8 +2,10 @@
 # Manual/ad hoc build+push of the skybridge images to ghcr.io/curlix-io/skybridge, for pushing
 # outside of a tagged release (see .github/workflows/ghcr-publish.yml for the tag-driven path).
 #
-# Builds all three binaries (agent, gateway, edge) from the root Dockerfile's SKYBRIDGE_CMD build
-# arg and pushes each as its own tag prefix:
+# Builds agent/gateway from the root Dockerfile's SKYBRIDGE_CMD build arg, and edge from
+# Dockerfile.edge (bundles the AWS CLI edge's aws_readonly_cli tool shells out to — the root
+# Dockerfile's distroless base has no shell/package manager to add that with). Pushes each as its
+# own tag prefix:
 #   ghcr.io/curlix-io/skybridge:agent-<version>   (+ :agent-latest)
 #   ghcr.io/curlix-io/skybridge:gateway-<version> (+ :gateway-latest)
 #   ghcr.io/curlix-io/skybridge:edge-<version>    (+ :edge-latest)
@@ -28,16 +30,18 @@ IMAGE="ghcr.io/curlix-io/skybridge"
 
 CMDS=(skybridge-agent skybridge-gateway skybridge-edge)
 PREFIXES=(agent gateway edge)
+DOCKERFILES=(Dockerfile Dockerfile Dockerfile.edge)
 
 for i in "${!CMDS[@]}"; do
   cmd="${CMDS[$i]}"
   prefix="${PREFIXES[$i]}"
-  echo "==> building ${cmd} -> ${IMAGE}:${prefix}-${VERSION}"
+  dockerfile="${DOCKERFILES[$i]}"
+  echo "==> building ${cmd} -> ${IMAGE}:${prefix}-${VERSION} (${dockerfile})"
   docker build \
     --build-arg "SKYBRIDGE_CMD=${cmd}" \
     -t "${IMAGE}:${prefix}-${VERSION}" \
     -t "${IMAGE}:${prefix}-latest" \
-    -f Dockerfile .
+    -f "${dockerfile}" .
   echo "==> pushing ${IMAGE}:${prefix}-${VERSION}"
   docker push "${IMAGE}:${prefix}-${VERSION}"
   docker push "${IMAGE}:${prefix}-latest"

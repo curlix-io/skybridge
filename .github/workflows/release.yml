@@ -1,5 +1,8 @@
 # Tag-driven release: cross-compiled binaries via GoReleaser. Assumes this directory is the
-# repository root (after extraction).
+# repository root (after extraction). GoReleaser's brews: block (.goreleaser.yaml) also regenerates
+# Formula/skybridge.rb and pushes it straight to this repo's main branch using the same
+# GITHUB_TOKEN below — contents:write on this repo is enough since the tap lives here, not a
+# separate homebrew-tap repo.
 name: release
 
 on:

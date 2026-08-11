@@ -1,7 +1,10 @@
 # Tag-driven GHCR publish: builds and pushes the three skybridge binaries (agent, gateway, edge) as
-# separate tags of the single public image ghcr.io/curlix-io/skybridge, using the same root
-# Dockerfile's SKYBRIDGE_CMD build arg goreleaser/release.yml uses for the binary archives. Runs
-# alongside release.yml on the same v* tag push so binaries and images publish together.
+# separate tags of the single public image ghcr.io/curlix-io/skybridge. agent/gateway build from
+# the root Dockerfile's SKYBRIDGE_CMD build arg (same one goreleaser/release.yml uses for the
+# binary archives); edge builds from Dockerfile.edge instead, since it bundles the AWS CLI that
+# edge's aws_readonly_cli tool shells out to (internal/edge/awsexec/cli.go) — the root Dockerfile's
+# distroless base has no shell/package manager to add that with. Runs alongside release.yml on the
+# same v* tag push so binaries and images publish together.
 name: ghcr-publish
 
 on:
@@ -17,14 +20,16 @@ jobs:
     runs-on: ubuntu-latest
     strategy:
       matrix:
-        cmd: [skybridge-agent, skybridge-gateway, skybridge-edge]
         include:
           - cmd: skybridge-agent
             tag_prefix: agent
+            dockerfile: Dockerfile
           - cmd: skybridge-gateway
             tag_prefix: gateway
+            dockerfile: Dockerfile
           - cmd: skybridge-edge
             tag_prefix: edge
+            dockerfile: Dockerfile.edge
     steps:
       - uses: actions/checkout@v4
 
@@ -45,7 +50,7 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          file: Dockerfile
+          file: ${{ matrix.dockerfile }}
           build-args: |
             SKYBRIDGE_CMD=${{ matrix.cmd }}
           push: true

@@ -1,0 +1,21 @@
+# skybridge-edge, built with the AWS CLI installed. The plain root Dockerfile (distroless, no
+# shell) can't run the aws_readonly_cli tool (internal/edge/awsexec/cli.go shells out to a real
+# `aws` binary) — only edge registers that tool (skybridge-agent/gateway never do), so this is a
+# separate image rather than a variant of the root Dockerfile. Structured AWS tools
+# (cloudwatch_logs_insights, cloudwatch_metrics) use the AWS SDK directly and don't need this, but
+# aws_readonly_cli is the generic escape hatch and does. Mirrors
+# github.com/curlix-io/curlix's integrations/curlix-connector/Dockerfile, which solves the exact
+# same gap for its bundled skybridge-edge.
+FROM golang:1.26 AS build
+WORKDIR /src
+COPY go.mod go.sum ./
+COPY cmd ./cmd
+COPY internal ./internal
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/skybridge-edge ./cmd/skybridge-edge
+
+FROM python:3.13-slim
+RUN pip install --no-cache-dir awscli && rm -rf /root/.cache /tmp/*
+COPY --from=build /out/skybridge-edge /usr/local/bin/skybridge-edge
+EXPOSE 15432 13306 27018
+ENV PYTHONUNBUFFERED=1
+ENTRYPOINT ["/usr/local/bin/skybridge-edge"]

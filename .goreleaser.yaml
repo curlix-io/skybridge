@@ -44,6 +44,25 @@ archives:
 checksum:
   name_template: "checksums.txt"
 
+brews:
+  - name: skybridge
+    ids: [skybridge-agent, skybridge-gateway, skybridge-edge]
+    repository:
+      owner: curlix-io
+      name: skybridge
+      branch: main
+      token: "{{ .Env.GITHUB_TOKEN }}"
+    directory: Formula
+    homepage: "https://github.com/curlix-io/skybridge"
+    description: "Egress-only data plane for governed native database access, plus the skybridge-edge connector for Curlix."
+    license: "Apache-2.0"
+    install: |
+      bin.install "skybridge-agent"
+      bin.install "skybridge-gateway"
+      bin.install "skybridge-edge"
+    test: |
+      system "#{bin}/skybridge-agent", "--help"
+
 snapshot:
   version_template: "{{ incpatch .Version }}-next"
 
