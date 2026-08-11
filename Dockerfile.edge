@@ -6,12 +6,20 @@
 # aws_readonly_cli is the generic escape hatch and does. Mirrors
 # github.com/curlix-io/curlix's integrations/curlix-connector/Dockerfile, which solves the exact
 # same gap for its bundled skybridge-edge.
+#
+# BUILD_TAGS is empty by default, matching `make edge` (no Query Studio dispatch compiled in, per
+# CLAUDE.md's "default build has zero optional-integration code" contract). Pass
+# --build-arg BUILD_TAGS=querystudio to build the `make edge-querystudio` equivalent instead — the
+# resulting image should be tagged distinctly (e.g. edge-querystudio-<version>), never reused as
+# plain edge-<version>, since silently dropping/adding Query Studio support under the same tag is
+# exactly the bug this comment is here to prevent recurring.
 FROM golang:1.26 AS build
+ARG BUILD_TAGS=""
 WORKDIR /src
 COPY go.mod go.sum ./
 COPY cmd ./cmd
 COPY internal ./internal
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/skybridge-edge ./cmd/skybridge-edge
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -tags "${BUILD_TAGS}" -ldflags="-s -w" -o /out/skybridge-edge ./cmd/skybridge-edge
 
 FROM python:3.13-slim
 RUN pip install --no-cache-dir awscli && rm -rf /root/.cache /tmp/*
