@@ -151,7 +151,7 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 	}
 	var overlay *mask.Overlay
 	if len(cfg.PIIOverlay) > 0 || cfg.PIIOverlayURL != "" {
-		overlay = mask.NewOverlay(cfg.PIIOverlay)
+		overlay = mask.NewOverlayWithRules(cfg.PIIOverlay)
 		maskers = append(maskers, overlay)
 	}
 	var store *remotestore.Store

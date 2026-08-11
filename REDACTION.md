@@ -181,19 +181,30 @@ defers to layer 1 having already run — a field marked safe-by-default can't su
 PII-shaped value that happens to land in it (layer 1 runs first in the chain, so this is automatic,
 not a special case `PathOverlay` needs to implement).
 
+A confirmed label's `Profile` also controls *how* it redacts: `full_redact` (or an empty/unknown
+profile) replaces the value with `"[redacted]"`; `partial_mask` keeps the value's last 4 characters
+and masks the rest instead (`"555-1234"` → `"****1234"`) — useful for the "show a support agent the
+last 4 digits of an SSN/card" case without a network call to the `Remote` layer. `partial_mask` only
+has this real partial-value meaning for a free-text column; a typed column (`FreeText == false`,
+e.g. a date/numeric column resolved via `Column.TypeKind`) still falls back to the same type-valid
+placeholder `full_redact` uses, since partial masking a typed value's wire bytes has no defined
+meaning yet (see [Path-scoped labels](#path-scoped-labels-mask-pathoverlay) below).
+
 ### Layer 3 — `Overlay` (flat column-name map)
 
-`internal/mask/overlay.go`. The original, simplest layer: a case-insensitive `column name →
-replacement token` map. Configured via `SKYBRIDGE_PII_OVERLAY` (inline JSON),
-`SKYBRIDGE_PII_OVERLAY_FILE` (a YAML/JSON file — see [Quick start](./README.md#quick-start)), or
-fetched dynamically from a control-plane URL (`SKYBRIDGE_PII_OVERLAY_URL`) and hot-swapped in place
-without a restart.
+`internal/mask/overlay.go`. The original, simplest layer: a case-insensitive `column name → rule`
+map. Configured via `SKYBRIDGE_PII_OVERLAY` (inline JSON, full-value replacement tokens only),
+`SKYBRIDGE_PII_OVERLAY_FILE` (a YAML/JSON file — see [Quick start](./README.md#quick-start); the only
+form that also accepts a `partial_mask: true` rule instead of a plain replacement token, keeping a
+value's last 4 characters and masking the rest — see `examples/pii-overlay.yaml`), or fetched
+dynamically from a control-plane URL (`SKYBRIDGE_PII_OVERLAY_URL`, full-value replacement tokens
+only) and hot-swapped in place without a restart.
 
 No path awareness — `total` under `order` and `total` under `user` share one rule, whichever was
 defined last. This is intentionally kept as the *last*, most conservative layer: existing overlay
 configs keep working unchanged even as `PathOverlay` picks up more precise cases above it, and it's
 the cheapest possible check (an exact-match map lookup, no network call, no document walk) for
-anyone who just wants "always redact this column."
+anyone who just wants "always redact this column" — or, now, "always partially mask this column."
 
 **Structured vs. unstructured, in one sentence:** layer 1 (`Remote`) is what actually gives you
 unstructured-text coverage; layers 2–3 are structured-schema shortcuts that skip the network round
@@ -349,9 +360,12 @@ object keyed by entity type:
 {"US_SSN": {"type": "mask", "masking_char": "*", "chars_to_mask": 5, "from_end": false}}
 ```
 
-This only affects layer 1 (`Remote`); the column-overlay layers (2–3) always do a full-value
-replace with whatever token you configure — they have no notion of "partial" since they don't
-inspect the value's internal structure.
+This affects layer 1 (`Remote`), with Presidio's full `chars_to_mask`/`from_end` control over how
+much to keep and from which end. The column-overlay layers (2–3) have their own, simpler partial
+option — `PathOverlay`'s `Profile: "partial_mask"` and `Overlay`'s `SKYBRIDGE_PII_OVERLAY_FILE`
+`partial_mask: true` rule both apply one fixed transform (keep the last 4 characters, mask the rest
+with `*`) rather than Presidio's fully configurable version, since neither layer inspects the
+value's internal structure the way `Remote` does — see layers 2 and 3 above.
 
 ## Testing this yourself
 

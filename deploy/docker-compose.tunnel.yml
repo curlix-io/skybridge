@@ -1,0 +1,174 @@
+# Local smoke test for the TUNNEL deployment shape: skybridge-agent and skybridge-edge each dial
+# out to skybridge-gateway (internal/tunnel), which relays already-masked native-client wire
+# connections to whichever one is registered for an org. Contrast with deploy/docker-compose.yml,
+# which runs skybridge-edge in direct LISTENER mode with no gateway in front of it.
+#
+# skybridge-gateway fails closed on every client connection with no TargetResolver configured
+# (internal/gateway/httptarget.go's NoopTargetResolver) — SKYBRIDGE_GW_CONTROL_PLANE_URL is not
+# optional here, only session recording and wire-admit are best-effort without one. stub-control-
+# plane below implements just the wire-targets GET route so relaying works with no real control
+# plane. No mTLS: SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM/SKYBRIDGE_WIRE_MTLS_* are unset on both sides, so
+# gateway<->agent/edge falls back to plaintext + shared-bearer-token auth (SKYBRIDGE_GW_TOKEN /
+# SKYBRIDGE_TOKEN) — fine for a local smoke test, not for production (see CONTRACT.md).
+#
+# agent and edge each register under a different org so both can be tunneled and relayed
+# side-by-side without one's registration overwriting the other's (internal/gateway/gateway.go's
+# orgAgents map is keyed one-agent-per-org).
+#
+#   cd skybridge/deploy
+#   docker compose -f docker-compose.tunnel.yml up --build
+#   psql "postgres://user:pass@localhost:25433/appdb"   # relayed via agent  (org: org-agent)
+#   psql "postgres://user:pass@localhost:25434/appdb"   # relayed via edge   (org: org-edge)
+name: skybridge-tunnel
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: skybridge-tunnel-postgres
+    environment:
+      - POSTGRES_USER=user
+      - POSTGRES_PASSWORD=pass
+      - POSTGRES_DB=appdb
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U user -d appdb"]
+      interval: 2s
+      timeout: 3s
+      start_period: 10s
+      retries: 20
+
+  stub-control-plane:
+    build:
+      context: ./tunnel
+      dockerfile: Dockerfile.stub-control-plane
+    container_name: skybridge-tunnel-cp
+    environment:
+      - UPSTREAM_ADDR=postgres:5432
+      - UPSTREAM_DB_TYPE=postgres
+    healthcheck:
+      test: ["CMD", "python3", "-c", "import socket; socket.create_connection(('localhost', 8091), timeout=2)"]
+      interval: 2s
+      timeout: 2s
+      start_period: 5s
+      retries: 10
+
+  presidio-analyzer:
+    image: mcr.microsoft.com/presidio-analyzer:${PRESIDIO_VERSION:-latest}
+    container_name: skybridge-tunnel-presidio-analyzer
+    command: ["gunicorn", "-c", "/gunicorn.conf.py", "app:create_app()"]
+    volumes:
+      - ./presidio-analyzer-gunicorn.conf.py:/gunicorn.conf.py:ro
+    cpus: "2.5"
+    mem_limit: "2048m"
+    mem_reservation: "1024m"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+
+  presidio-anonymizer:
+    image: mcr.microsoft.com/presidio-anonymizer:${PRESIDIO_VERSION:-latest}
+    container_name: skybridge-tunnel-presidio-anonymizer
+    command: ["gunicorn", "-c", "/gunicorn.conf.py", "app:create_app()"]
+    volumes:
+      - ./presidio-anonymizer-gunicorn.conf.py:/gunicorn.conf.py:ro
+    cpus: "2.0"
+    mem_limit: "1024m"
+    mem_reservation: "512m"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 3s
+      start_period: 30s
+      retries: 3
+
+  gateway:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        SKYBRIDGE_CMD: skybridge-gateway
+    container_name: skybridge-tunnel-gateway
+    restart: unless-stopped
+    depends_on:
+      stub-control-plane:
+        condition: service_healthy
+    environment:
+      - SKYBRIDGE_GW_AGENT_LISTEN=:8010
+      - SKYBRIDGE_GW_TOKEN=${SKYBRIDGE_TOKEN:-local-tunnel-test-token}
+      - SKYBRIDGE_GW_CONTROL_PLANE_URL=http://stub-control-plane:8091
+      # Two client listeners, one per org, both routed to the same Postgres target name (resolved
+      # by stub-control-plane regardless of which org asks) — org-agent's traffic is relayed
+      # through skybridge-agent, org-edge's through skybridge-edge.
+      - SKYBRIDGE_GW_CLIENTS=[{"addr":":25433","org_id":"org-agent","target":"postgres"},{"addr":":25434","org_id":"org-edge","target":"postgres"}]
+    ports:
+      - "25433:25433"
+      - "25434:25434"
+
+  agent:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        SKYBRIDGE_CMD: skybridge-agent
+    container_name: skybridge-tunnel-agent
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_started
+      presidio-analyzer:
+        condition: service_healthy
+      presidio-anonymizer:
+        condition: service_healthy
+    environment:
+      - SKYBRIDGE_MODE=tunnel
+      - SKYBRIDGE_GATEWAY=gateway:8010
+      - SKYBRIDGE_AGENT_ID=agent-1
+      - SKYBRIDGE_ORG_ID=org-agent
+      - SKYBRIDGE_TOKEN=${SKYBRIDGE_TOKEN:-local-tunnel-test-token}
+      - SKYBRIDGE_DB_TYPE=postgres
+      - SKYBRIDGE_MASK_ANALYZE_URL=http://presidio-analyzer:3000/analyze
+      - SKYBRIDGE_MASK_ANONYMIZE_URL=http://presidio-anonymizer:3000/anonymize
+      - SKYBRIDGE_MASK_MODE=${SKYBRIDGE_MASK_MODE:-best-effort}
+
+  edge:
+    build:
+      context: ..
+      dockerfile: Dockerfile
+      args:
+        SKYBRIDGE_CMD: skybridge-edge
+    container_name: skybridge-tunnel-edge
+    restart: unless-stopped
+    depends_on:
+      gateway:
+        condition: service_started
+      presidio-analyzer:
+        condition: service_healthy
+      presidio-anonymizer:
+        condition: service_healthy
+    environment:
+      # Edge's co-located wire proxy (config.Edge.WireProxy is a full config.Agent — see
+      # internal/config/config.go) reuses the exact same SKYBRIDGE_MODE/SKYBRIDGE_GATEWAY tunnel
+      # path as the standalone agent above (cmd/skybridge-edge/main.go calls agent.RunTunnel).
+      - SKYBRIDGE_MODE=tunnel
+      - SKYBRIDGE_GATEWAY=gateway:8010
+      - SKYBRIDGE_AGENT_ID=edge-1
+      - SKYBRIDGE_ORG_ID=org-edge
+      - SKYBRIDGE_TOKEN=${SKYBRIDGE_TOKEN:-local-tunnel-test-token}
+      - SKYBRIDGE_DB_TYPE=postgres
+      - SKYBRIDGE_MASK_ANALYZE_URL=http://presidio-analyzer:3000/analyze
+      - SKYBRIDGE_MASK_ANONYMIZE_URL=http://presidio-anonymizer:3000/anonymize
+      - SKYBRIDGE_MASK_MODE=${SKYBRIDGE_MASK_MODE:-best-effort}
+      # Leave SKYBRIDGE_EDGE_GATEWAY unset: edge would otherwise also try to dial a Connector
+      # Gateway for AWS/k8s tool dispatch, which this smoke test doesn't stand up. With it unset
+      # and no AWS/k8s config, main.go's cfg.GatewayAddr=="" branch just blocks on ctx.Done() after
+      # the wire proxy starts (cmd/skybridge-edge/main.go) — the wire tunnel above is unaffected,
+      # since it reads SKYBRIDGE_GATEWAY (WireProxy.GatewayAddr), a separate field from
+      # cfg.GatewayAddr (SKYBRIDGE_EDGE_GATEWAY, defaulting to SKYBRIDGE_GATEWAY only when
+      # SKYBRIDGE_EDGE_GATEWAY itself is unset — see LoadEdge in internal/config/config.go). Since
+      # SKYBRIDGE_GATEWAY is set here for the wire proxy, edge WILL also try to dial it as a
+      # Connector Gateway; that dial will just sit retrying harmlessly (Insecure/CABundle unset),
+      # since this smoke test has no real Connector Gateway listening on :8010 for edge protocol —
+      # only skybridge-gateway's agent registration protocol. Set SKYBRIDGE_EDGE_INSECURE=true and
+      # point SKYBRIDGE_EDGE_GATEWAY at a real Connector Gateway to exercise AWS/k8s dispatch too.

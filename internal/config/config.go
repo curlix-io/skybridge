@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/curlix-io/skybridge/internal/gateway"
+	"github.com/curlix-io/skybridge/internal/mask"
 	"github.com/curlix-io/skybridge/internal/tunnel"
 	"gopkg.in/yaml.v3"
 )
@@ -125,11 +126,13 @@ type Agent struct {
 	// resolution entirely: PathOverlay then behaves exactly as it does today for Postgres (empty
 	// ObjectID, safe no-op, falls through to layer 3).
 	PostgresCatalogDSN string // SKYBRIDGE_POSTGRES_CATALOG_DSN
-	// PIIOverlay is the column->token overlay you define (off by default): from SKYBRIDGE_PII_OVERLAY
-	// (inline JSON) or SKYBRIDGE_PII_OVERLAY_FILE (a path to a YAML or JSON file — easier to author,
-	// diff, and commit than one-line JSON in an env var). The file takes priority when both are set;
-	// an unreadable/invalid file falls back to the inline env var rather than failing startup.
-	PIIOverlay map[string]string
+	// PIIOverlay is the column->rule overlay you define (off by default): from SKYBRIDGE_PII_OVERLAY
+	// (inline JSON, full-value replacement tokens only — see parseOverlay) or SKYBRIDGE_PII_OVERLAY_FILE
+	// (a path to a YAML or JSON file — easier to author, diff, and commit than one-line JSON in an env
+	// var; also the only form that accepts a partial-mask rule, e.g. {"credit_card": {"partial_mask":
+	// true}} — see loadPIIOverlay). The file takes priority when both are set; an unreadable/invalid
+	// file falls back to the inline env var rather than failing startup.
+	PIIOverlay map[string]mask.OverlayRule
 
 	// Dynamic overlay source (optional). When PIIOverlayURL is set the agent fetches the org's
 	// projected column->token overlay from the control plane at startup and re-fetches on an
@@ -745,22 +748,51 @@ func parseAnonymizers(raw string) map[string]any {
 	return m
 }
 
-func parseOverlay(raw string) map[string]string {
+// parseOverlay parses the inline SKYBRIDGE_PII_OVERLAY env var — string values (full-value
+// replacement tokens) only, matching its shape from before OverlayRule existed. Only
+// SKYBRIDGE_PII_OVERLAY_FILE (see loadPIIOverlay) accepts the richer partial-mask rule shape; a
+// value in the inline JSON that isn't a plain string is skipped with a warning rather than
+// silently coerced or failing the whole overlay.
+func parseOverlay(raw string) map[string]mask.OverlayRule {
 	raw = strings.TrimSpace(raw)
 	if raw == "" {
 		return nil
 	}
 	var m map[string]string
 	if err := json.Unmarshal([]byte(raw), &m); err != nil {
+		log.Printf("skybridge: invalid SKYBRIDGE_PII_OVERLAY (ignoring): %v", err)
 		return nil
 	}
-	return m
+	out := make(map[string]mask.OverlayRule, len(m))
+	for k, v := range m {
+		out[k] = mask.OverlayRule{Token: v}
+	}
+	return out
 }
 
-// loadPIIOverlay resolves the column->token overlay from SKYBRIDGE_PII_OVERLAY_FILE (a YAML or JSON
-// file — friendlier to author/review/commit than one-line JSON in an env var) when set, otherwise
-// from the inline SKYBRIDGE_PII_OVERLAY env var. The file path wins if both are set.
-func loadPIIOverlay() map[string]string {
+// overlayRuleFromAny interprets one SKYBRIDGE_PII_OVERLAY_FILE value: a plain string is a
+// full-value replacement token (OverlayRule.Token, unchanged from before OverlayRule existed); a
+// mapping with partial_mask: true opts that column into partial masking (OverlayRule.Partial) —
+// keep the value's last few characters, mask the rest (see mask.partialMask's fixed default). Any
+// other shape (a number, a list, a mapping without partial_mask: true) has ok=false so the caller
+// can skip just that key rather than discard the whole file over one bad rule.
+func overlayRuleFromAny(v any) (mask.OverlayRule, bool) {
+	switch val := v.(type) {
+	case string:
+		return mask.OverlayRule{Token: val}, true
+	case map[string]any:
+		if partial, _ := val["partial_mask"].(bool); partial {
+			return mask.OverlayRule{Partial: true}, true
+		}
+	}
+	return mask.OverlayRule{}, false
+}
+
+// loadPIIOverlay resolves the column->rule overlay from SKYBRIDGE_PII_OVERLAY_FILE (a YAML or JSON
+// file — friendlier to author/review/commit than one-line JSON in an env var, and the only form
+// that accepts a partial-mask rule — see overlayRuleFromAny) when set, otherwise from the inline
+// SKYBRIDGE_PII_OVERLAY env var (see parseOverlay). The file path wins if both are set.
+func loadPIIOverlay() map[string]mask.OverlayRule {
 	path := strings.TrimSpace(os.Getenv("SKYBRIDGE_PII_OVERLAY_FILE"))
 	if path == "" {
 		return parseOverlay(env("SKYBRIDGE_PII_OVERLAY", ""))
@@ -770,12 +802,21 @@ func loadPIIOverlay() map[string]string {
 		log.Printf("skybridge: SKYBRIDGE_PII_OVERLAY_FILE %q: %v (ignoring)", path, err)
 		return parseOverlay(env("SKYBRIDGE_PII_OVERLAY", ""))
 	}
-	var m map[string]string
+	var m map[string]any
 	if err := yaml.Unmarshal(raw, &m); err != nil {
 		log.Printf("skybridge: SKYBRIDGE_PII_OVERLAY_FILE %q: invalid YAML/JSON: %v (ignoring)", path, err)
 		return parseOverlay(env("SKYBRIDGE_PII_OVERLAY", ""))
 	}
-	return m
+	out := make(map[string]mask.OverlayRule, len(m))
+	for k, v := range m {
+		rule, ok := overlayRuleFromAny(v)
+		if !ok {
+			log.Printf("skybridge: SKYBRIDGE_PII_OVERLAY_FILE %q: column %q has an unrecognized rule shape (skipping)", path, k)
+			continue
+		}
+		out[k] = rule
+	}
+	return out
 }
 
 func env(key, def string) string {

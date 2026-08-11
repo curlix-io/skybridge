@@ -15,12 +15,13 @@ repos, docs, and code — cited inline so claims can be re-verified as these pro
   recordings (Teleport), or has no masking surface at all (pgbouncer/pgcat/ProxySQL, Vault).
 - We are **on par or ahead** on: wire-protocol coverage (3 real proxies vs. hoop's closed one),
   path-scoped labels for nested documents (nothing comparable found anywhere else), fail-open/fail-
-  closed transparency, and "never persist raw PII" as a first-class guarantee (contrast Teleport's
-  session recordings, hoop's audit sink defaults).
-- We are **behind** on: partial/format-preserving masking (postgresql_anonymizer's `anon.partial()`,
-  Presidio's own `mask` operator), and cheap per-row round-trip cost for the `Remote` layer (Presidio
-  now ships batch/structured analyze endpoints we don't use yet). Both are concrete, scoped
-  follow-ups — see [Backlog](#improvement-backlog) below.
+  closed transparency, "never persist raw PII" as a first-class guarantee (contrast Teleport's
+  session recordings, hoop's audit sink defaults), batched content-detection analyze calls, an
+  allow-list for known-safe false positives, and a fixed partial-mask primitive on both column-name
+  layers (matching `postgresql_anonymizer`'s `anon.partial()`/Presidio's `mask` operator for the
+  common case, though without their full per-rule configurability yet) — see
+  [Backlog](#improvement-backlog) below for exactly what shipped and what's still a smaller,
+  optional follow-up (e.g. per-rule partial-mask parameters, `regex_flags` passthrough).
 
 ## hoop.dev (`hoophq/hoop`)
 
@@ -165,15 +166,22 @@ contract or any layer ordering — both are additive.
    `/anonymize` round trip entirely) were both considered and explicitly left out of scope — the
    former conflicts with the wire engines' one-row-at-a-time streaming model, the latter risks
    correctness drift from Presidio's own anonymizer operator semantics.
-2. **Partial/format-preserving masking as a first-class `Overlay`/`PathOverlay` mode.** Right now
-   layers 2–3 only do full-value token replacement (`REDACTION.md`: "the column-overlay layers
-   (2–3) always do a full-value replace... they have no notion of partial"). Presidio's `mask`
-   operator, `postgresql_anonymizer`'s `anon.partial()`, and hoop's `alcatraz` `partial` strategy all
-   converge on the same primitive: keep N chars (usually from one end), mask the rest. Adding this to
-   `PathOverlay`/`Overlay` (not just the `Remote` layer, which already gets it indirectly via
-   `SKYBRIDGE_MASK_ANONYMIZERS`) would close a real, cheap-to-close gap for the common
-   "show last 4 digits of an SSN/card to a support agent" case that currently requires going through
-   Presidio at all just to get partial masking on a *known* column.
+2. **Partial/format-preserving masking as a first-class `Overlay`/`PathOverlay` mode — done.**
+   Both layers now support a fixed "keep the last 4 characters, mask the rest" transform
+   (`mask.partialMask`, shared by both), matching the common "show last 4 digits of an SSN/card to a
+   support agent" case without a Presidio round trip. `PathOverlay`: a confirmed label with
+   `Profile: "partial_mask"` now applies the real transform to free-text columns (previously it just
+   substituted the fixed string `"[masked]"` — a full-value replace with a different label, not an
+   actual partial transform); typed (non-free-text) columns are unaffected, per
+   `docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md`'s explicit non-goal — they still fall back to the same
+   type-valid placeholder `full_redact` uses. `Overlay`: only the `SKYBRIDGE_PII_OVERLAY_FILE`
+   YAML/JSON form accepts a `{"partial_mask": true}` rule per column (see
+   `examples/pii-overlay.yaml`) — the inline `SKYBRIDGE_PII_OVERLAY` env var and the dynamic
+   control-plane overlay source (`SKYBRIDGE_PII_OVERLAY_URL`) both stay full-value-token-only, a
+   deliberate scoping decision to avoid widening those two config surfaces in this pass. No
+   per-rule parameters (keep-count, mask character, from-start-vs-end) — one fixed default, unlike
+   Presidio's fully configurable `chars_to_mask`/`from_end`; a per-rule version is a natural
+   follow-up if the fixed default proves too rigid in practice.
 
 3. **Allow-list support (`allow_list`/`allow_list_match`) in the `Remote` layer — done.**
    `mask.RemoteConfig` now carries `AllowList`/`AllowListMatch` (`SKYBRIDGE_MASK_ALLOW_LIST` /

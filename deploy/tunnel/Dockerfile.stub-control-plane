@@ -1,0 +1,6 @@
+# Stub control-plane server for the local tunnel smoke test (see stub_control_plane.py).
+FROM python:3.12-slim
+COPY stub_control_plane.py /app/stub_control_plane.py
+EXPOSE 8091
+USER nobody
+ENTRYPOINT ["python3", "/app/stub_control_plane.py"]

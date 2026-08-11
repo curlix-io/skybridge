@@ -83,6 +83,38 @@ type Masker interface {
 	MaskRow(ctx context.Context, cols []Column, row [][]byte) ([][]byte, error)
 }
 
+// partialKeepChars/partialMaskChar are the fixed parameters for partialMask — no per-rule override
+// in this pass (see docs/REDACTION_COMPETITIVE_ANALYSIS.md's backlog item 2): a single sensible
+// default ("keep the last 4 characters") covers the common "show last 4 digits of an SSN/card to a
+// support agent" case this feature targets.
+const (
+	partialKeepChars = 4
+	partialMaskChar  = '*'
+)
+
+// partialMask keeps the last partialKeepChars bytes of value and replaces everything before them
+// with partialMaskChar, e.g. "123-45-6789" -> "*******6789". Operates on raw bytes, not runes —
+// matches every other layer's byte-oriented value handling (callers only ever reach this after
+// mask.Column.Text/FreeText have already gated out non-text/binary values). A value shorter than or
+// equal to partialKeepChars is masked in full — "reveal the whole thing because it happened to be
+// short" is a worse default than "mask all of it."
+func partialMask(value []byte) []byte {
+	if len(value) <= partialKeepChars {
+		out := make([]byte, len(value))
+		for i := range out {
+			out[i] = partialMaskChar
+		}
+		return out
+	}
+	out := make([]byte, len(value))
+	maskLen := len(value) - partialKeepChars
+	for i := 0; i < maskLen; i++ {
+		out[i] = partialMaskChar
+	}
+	copy(out[maskLen:], value[maskLen:])
+	return out
+}
+
 // Noop returns rows unchanged. It is the default when no masking is configured.
 type Noop struct{}
 

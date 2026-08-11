@@ -388,7 +388,7 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_DB_TYPE` | `postgres` | `postgres`, `mysql`, or `mongodb` |
 | `SKYBRIDGE_LISTEN` | `:15432` / `:13306` / `:27018` | local address clients connect to |
 | `SKYBRIDGE_PII_OVERLAY` | — | JSON `{ "column": "[redacted]" }` map you define (static) |
-| `SKYBRIDGE_PII_OVERLAY_FILE` | — | path to a YAML or JSON file with the same column->token map (see [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml)) — easier to author/diff/commit than inline JSON; takes priority over `SKYBRIDGE_PII_OVERLAY` when both are set, falling back to it if the file is missing/invalid |
+| `SKYBRIDGE_PII_OVERLAY_FILE` | — | path to a YAML or JSON file with the same column->token map (see [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml)) — easier to author/diff/commit than inline JSON; takes priority over `SKYBRIDGE_PII_OVERLAY` when both are set, falling back to it if the file is missing/invalid. Also the only form that accepts a `partial_mask: true` rule per column (keep the last 4 characters, mask the rest) instead of a plain replacement token — `SKYBRIDGE_PII_OVERLAY` stays token-only |
 | `SKYBRIDGE_PII_OVERLAY_URL` | — | control-plane endpoint to fetch the org's projected overlay (`GET /your-control-plane/pii-overlay`); enables dynamic, hot-swapped masking |
 | `SKYBRIDGE_PII_OVERLAY_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token for the overlay fetch |
 | `SKYBRIDGE_PII_OVERLAY_POLL_SECONDS` | `60` | overlay refresh interval (min 15s; `-1` = fetch once at startup) |

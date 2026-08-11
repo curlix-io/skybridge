@@ -7,7 +7,13 @@
 #
 # No Presidio, no Docker, no network calls — this layer only matches by column name (see the
 # masking pipeline in README.md for how it composes with the content-detection layer).
+#
+# Each column's value is either a plain string (full-value replacement, as below) or a mapping
+# with partial_mask: true, which keeps the value's last 4 characters and masks the rest instead of
+# replacing it outright — e.g. a card number comes back as "************1234". Only this file form
+# supports partial_mask; the inline SKYBRIDGE_PII_OVERLAY env var stays string-only.
 email: "[redacted]"
 ssn: "[redacted]"
 phone: "[redacted]"
-credit_card: "[redacted]"
+credit_card:
+  partial_mask: true

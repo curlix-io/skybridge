@@ -114,8 +114,19 @@ func TestLoadAgentTargetsInvalidJSONReturnsNil(t *testing.T) {
 func TestLoadAgentParsesPIIOverlayJSON(t *testing.T) {
 	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[EMAIL]"}`)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[EMAIL]" {
+	if a.PIIOverlay["email"].Token != "[EMAIL]" {
 		t.Fatalf("unexpected overlay: %v", a.PIIOverlay)
+	}
+}
+
+func TestLoadAgentPIIOverlayInlineJSONNeverPartial(t *testing.T) {
+	// The inline env var only ever supports a plain string (full-value replacement); a mapping
+	// value there isn't a valid string, so json.Unmarshal into map[string]string fails and the
+	// whole overlay comes back nil, per parseOverlay's contract.
+	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"credit_card":{"partial_mask":true}}`)
+	a := LoadAgent()
+	if a.PIIOverlay != nil {
+		t.Fatalf("expected nil overlay for a non-string inline value, got %v", a.PIIOverlay)
 	}
 }
 
@@ -136,8 +147,42 @@ func TestLoadAgentParsesPIIOverlayFileYAML(t *testing.T) {
 	}
 	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[EMAIL]" || a.PIIOverlay["ssn"] != "[SSN]" {
+	if a.PIIOverlay["email"].Token != "[EMAIL]" || a.PIIOverlay["ssn"].Token != "[SSN]" {
 		t.Fatalf("unexpected overlay: %v", a.PIIOverlay)
+	}
+}
+
+func TestLoadAgentParsesPIIOverlayFilePartialMaskRule(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlay.yaml")
+	yaml := "email: \"[EMAIL]\"\ncredit_card:\n  partial_mask: true\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
+	a := LoadAgent()
+	if a.PIIOverlay["email"].Token != "[EMAIL]" || a.PIIOverlay["email"].Partial {
+		t.Fatalf("expected email to be a plain token rule, got %+v", a.PIIOverlay["email"])
+	}
+	if !a.PIIOverlay["credit_card"].Partial {
+		t.Fatalf("expected credit_card to be a partial-mask rule, got %+v", a.PIIOverlay["credit_card"])
+	}
+}
+
+func TestLoadAgentPIIOverlayFileSkipsUnrecognizedRuleShapeButKeepsOthers(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "overlay.yaml")
+	yaml := "email: \"[EMAIL]\"\nbad_column:\n  something_else: true\n"
+	if err := os.WriteFile(path, []byte(yaml), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
+	a := LoadAgent()
+	if a.PIIOverlay["email"].Token != "[EMAIL]" {
+		t.Fatalf("expected valid rule to survive alongside a bad one, got %v", a.PIIOverlay)
+	}
+	if _, ok := a.PIIOverlay["bad_column"]; ok {
+		t.Fatalf("expected unrecognized rule shape to be skipped, got %v", a.PIIOverlay["bad_column"])
 	}
 }
 
@@ -150,7 +195,7 @@ func TestLoadAgentPIIOverlayFileTakesPriorityOverInline(t *testing.T) {
 	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
 	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[FROM-FILE]" {
+	if a.PIIOverlay["email"].Token != "[FROM-FILE]" {
 		t.Fatalf("expected overlay file to take priority, got %v", a.PIIOverlay)
 	}
 }
@@ -159,7 +204,7 @@ func TestLoadAgentPIIOverlayFileMissingFallsBackToInline(t *testing.T) {
 	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", filepath.Join(t.TempDir(), "missing.yaml"))
 	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[FROM-ENV]" {
+	if a.PIIOverlay["email"].Token != "[FROM-ENV]" {
 		t.Fatalf("expected fallback to inline overlay, got %v", a.PIIOverlay)
 	}
 }
@@ -173,7 +218,7 @@ func TestLoadAgentPIIOverlayFileInvalidYAMLFallsBackToInline(t *testing.T) {
 	t.Setenv("SKYBRIDGE_PII_OVERLAY_FILE", path)
 	t.Setenv("SKYBRIDGE_PII_OVERLAY", `{"email":"[FROM-ENV]"}`)
 	a := LoadAgent()
-	if a.PIIOverlay["email"] != "[FROM-ENV]" {
+	if a.PIIOverlay["email"].Token != "[FROM-ENV]" {
 		t.Fatalf("expected fallback to inline overlay, got %v", a.PIIOverlay)
 	}
 }
