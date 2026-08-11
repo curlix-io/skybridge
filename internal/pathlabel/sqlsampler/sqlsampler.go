@@ -1,4 +1,7 @@
-// Package sqlsampler implements aiclassifier.Sampler over database/sql for Postgres and MySQL —
+// Package sqlsampler implements aiclassifier.Sampler over database/sql for Postgres, MySQL, and
+// Snowflake (Snowflake needs no dedicated logic here — its SQL dialect already matches Postgres's
+// double-quoted identifiers and its driver falls back to "?" placeholders the same way MySQL's
+// does, so New's existing driver switch covers it without a third case) —
 // the read-only, off-the-hot-path row sampling docs/AI_PATH_LABELLING_DESIGN.md §5.2 describes.
 // This is a sampling connection, not a wire-proxy or client-session connection: it exists purely to
 // feed the periodic classification scan (cmd/skybridge-labeller) and never touches live query
@@ -115,6 +118,35 @@ func (s *Sampler) ListColumns(ctx context.Context, schema, table string) ([]stri
 			return nil, err
 		}
 		out = append(out, col)
+	}
+	return out, rows.Err()
+}
+
+// ListTables returns schema's table names via information_schema.tables, the same catalog view
+// ListColumns already reads one level down — used by the scan job to discover which tables to scan
+// when the caller doesn't supply an explicit table list. Same placeholder-fallback shape and
+// no-caching rationale as ListColumns (see its doc comment).
+func (s *Sampler) ListTables(ctx context.Context, schema string) ([]string, error) {
+	rows, err := s.db.QueryContext(ctx,
+		"SELECT table_name FROM information_schema.tables WHERE table_schema = $1", schema)
+	if err != nil {
+		// MySQL's driver doesn't support $1 placeholders — retry with ? placeholders rather than
+		// branching on driver name a second time in this method.
+		rows, err = s.db.QueryContext(ctx,
+			"SELECT table_name FROM information_schema.tables WHERE table_schema = ?", schema)
+		if err != nil {
+			return nil, err
+		}
+	}
+	defer rows.Close()
+
+	var out []string
+	for rows.Next() {
+		var table string
+		if err := rows.Scan(&table); err != nil {
+			return nil, err
+		}
+		out = append(out, table)
 	}
 	return out, rows.Err()
 }

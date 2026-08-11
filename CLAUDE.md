@@ -112,8 +112,11 @@ internal/pathlabel/remotestore  label.Store backed by the control plane's pii-pa
 internal/pathlabel/aiclassifier  AI-based path labeller: Classifier/Scanner interfaces + an
                          LLM-API-backed implementation, proposing SourceProposed labels independent
                          of live query traffic — see docs/AI_PATH_LABELLING_DESIGN.md
-internal/pathlabel/sqlsampler    database/sql-based aiclassifier.Sampler for Postgres/MySQL, used by
-                         cmd/skybridge-labeller
+internal/pathlabel/sqlsampler    database/sql-based aiclassifier.Sampler for Postgres/MySQL/Snowflake,
+                         used by cmd/skybridge-labeller
+internal/pathlabel/mongosampler  mongo-driver-based aiclassifier.Sampler for MongoDB — discovers
+                         fields by sampling documents and walking them with docpath (no fixed schema
+                         to query), also used by cmd/skybridge-labeller
 internal/labeller        cmd/skybridge-labeller's run loop: validates config, wires
                          aiclassifier.Scanner + sqlsampler.Sampler + remotestore.Store together
 internal/tunnel          egress multiplexed transport (agent <-> gateway)

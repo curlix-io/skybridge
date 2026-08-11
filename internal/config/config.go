@@ -567,9 +567,10 @@ type Labeller struct {
 	Token string // bearer token (defaults to SKYBRIDGE_TOKEN)
 
 	// DBType/DSN identify the one database this run samples — SKYBRIDGE_LABELLER_DB_TYPE (postgres |
-	// mysql) and SKYBRIDGE_LABELLER_DSN (a read-only credential's connection string, analogous to
-	// SKYBRIDGE_POSTGRES_CATALOG_DSN's "dedicated, read-only, independent of any client session"
-	// posture — this DSN is never the same credential a native client's session uses).
+	// mysql | snowflake | mongo) and SKYBRIDGE_LABELLER_DSN (a read-only credential's connection
+	// string — a database/sql DSN for postgres/mysql/snowflake, a mongodb:// URI for mongo —
+	// analogous to SKYBRIDGE_POSTGRES_CATALOG_DSN's "dedicated, read-only, independent of any client
+	// session" posture; this DSN is never the same credential a native client's session uses).
 	DBType string
 	DSN    string
 	// Database is the logical database name embedded in the resulting ObjectID
@@ -577,14 +578,35 @@ type Labeller struct {
 	// since a DSN's own embedded database name isn't reliably recoverable from every driver's DSN
 	// syntax.
 	Database string
-	// Tables is the set of tables to scan every run (SKYBRIDGE_LABELLER_TABLES, comma-separated).
-	// This job does not discover the schema itself — see docs/AI_PATH_LABELLING_DESIGN.md §8 for why
-	// starting with an explicit list, rather than an automatic information_schema crawl, is the
-	// simpler first cut.
+	// Tables is the set of tables (or, for DBType=mongo, collections) to scan every run
+	// (SKYBRIDGE_LABELLER_TABLES, comma-separated). Optional — when empty, Run discovers every
+	// table/collection in Database itself (sqlsampler.ListTables' information_schema.tables query,
+	// or mongosampler.ListTables' ListCollectionNames), so this job doesn't need an
+	// operator-maintained list to notice a newly-created table. An explicit list still takes
+	// priority when set, e.g. to scope this job to a known-sensitive subset. For Mongo, which has no
+	// fixed schema at all for field discovery (only for the collection list itself),
+	// internal/pathlabel/mongosampler.ListColumns discovers each named collection's observed fields
+	// per scan rather than reading a catalog.
 	Tables []string
 	// MaxSamplesPerField bounds how many non-null values are read per table column per scan —
 	// SKYBRIDGE_LABELLER_MAX_SAMPLES (default aiclassifier.defaultMaxSamples via 0).
 	MaxSamplesPerField int
+	// MaxObjectsPerScan bounds how many tables/collections one scan cycle actually samples —
+	// SKYBRIDGE_LABELLER_MAX_OBJECTS_PER_SCAN (default 50; <= 0 means unlimited). Without this, a
+	// schema with tens of thousands of tables would fan out into a proportional number of LLM
+	// Classify calls every single cycle — see docs/AI_PATH_LABELLING_DESIGN.md §5.5's "bound sample
+	// count and scan frequency" note, extended here to bound scan *breadth* the same way. Combined
+	// with RescanIntervalSeconds, internal/labeller's scheduler round-robins: each cycle picks the
+	// least-recently-scanned eligible tables first, so a large schema is covered incrementally
+	// across many cycles rather than needing one cycle to cover it all.
+	MaxObjectsPerScan int
+	// RescanIntervalSeconds skips a table/collection this cycle if it was already scanned within
+	// this many seconds — SKYBRIDGE_LABELLER_RESCAN_INTERVAL_SECONDS (default 86400; <= 0 disables
+	// skipping, rescanning every eligible object every cycle same as before this field existed). A
+	// table's column shape and PII classification rarely change hour to hour, so there's little
+	// value in re-running a full LLM classification pass on it every ScanIntervalSeconds once it's
+	// been covered recently — this frees MaxObjectsPerScan's budget for tables not yet seen.
+	RescanIntervalSeconds int
 	// ScanIntervalSeconds is how often the full table list is rescanned — SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS
 	// (floored, see labellerMinScanIntervalSeconds — this is a periodic background job, not a
 	// once-per-second poll).
@@ -617,14 +639,16 @@ const labellerMinScanIntervalSeconds = 300
 // LoadLabeller reads skybridge-labeller's config from the environment.
 func LoadLabeller() Labeller {
 	return Labeller{
-		OrgID:               env("SKYBRIDGE_ORG_ID", ""),
-		Token:               env("SKYBRIDGE_TOKEN", ""),
-		DBType:              strings.ToLower(env("SKYBRIDGE_LABELLER_DB_TYPE", "postgres")),
-		DSN:                 env("SKYBRIDGE_LABELLER_DSN", ""),
-		Database:            env("SKYBRIDGE_LABELLER_DATABASE", ""),
-		Tables:              splitCSV(env("SKYBRIDGE_LABELLER_TABLES", "")),
-		MaxSamplesPerField:  atoiDefault(env("SKYBRIDGE_LABELLER_MAX_SAMPLES", ""), 0),
-		ScanIntervalSeconds: max(atoiDefault(env("SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS", ""), 3600), labellerMinScanIntervalSeconds),
+		OrgID:                 env("SKYBRIDGE_ORG_ID", ""),
+		Token:                 env("SKYBRIDGE_TOKEN", ""),
+		DBType:                strings.ToLower(env("SKYBRIDGE_LABELLER_DB_TYPE", "postgres")),
+		DSN:                   env("SKYBRIDGE_LABELLER_DSN", ""),
+		Database:              env("SKYBRIDGE_LABELLER_DATABASE", ""),
+		Tables:                splitCSV(env("SKYBRIDGE_LABELLER_TABLES", "")),
+		MaxSamplesPerField:    atoiDefault(env("SKYBRIDGE_LABELLER_MAX_SAMPLES", ""), 0),
+		MaxObjectsPerScan:     atoiDefault(env("SKYBRIDGE_LABELLER_MAX_OBJECTS_PER_SCAN", ""), 50),
+		RescanIntervalSeconds: atoiDefault(env("SKYBRIDGE_LABELLER_RESCAN_INTERVAL_SECONDS", ""), 86400),
+		ScanIntervalSeconds:   max(atoiDefault(env("SKYBRIDGE_LABELLER_SCAN_INTERVAL_SECONDS", ""), 3600), labellerMinScanIntervalSeconds),
 
 		LLMEndpoint:      env("SKYBRIDGE_LABELLER_LLM_ENDPOINT", ""),
 		LLMAPIKey:        env("SKYBRIDGE_LABELLER_LLM_API_KEY", ""),

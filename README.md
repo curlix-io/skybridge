@@ -74,6 +74,22 @@ dials out, nothing dials in):
 
 Put the agent in front of your database and point a native client at it.
 
+### Install via Homebrew
+
+```sh
+brew tap curlix-io/skybridge https://github.com/curlix-io/skybridge
+brew install skybridge
+```
+
+Installs `skybridge-agent`, `skybridge-gateway`, and `skybridge-edge` (macOS/Linux, amd64/arm64).
+The formula (`Formula/skybridge.rb`) is regenerated and pushed to this repo's `main` branch on
+every tagged release by `.goreleaser.yaml`'s `brews:` block, installing from that release's tar.gz
+archives — see the repo's [Releases](https://github.com/curlix-io/skybridge/releases) page (prebuilt
+container images are published separately to
+[github.com/curlix-io/skybridge/packages](https://github.com/curlix-io/skybridge/packages), see
+[`scripts/push-ghcr.sh`](./scripts/push-ghcr.sh)). `skybridge-edge` is the single binary most
+customers run to connect to Curlix — see [The `skybridge-edge` binary](#the-skybridge-edge-binary).
+
 ### Fastest path: column redaction, no external services
 
 Needs only Go ≥ 1.26 — no Docker, no Presidio, no network calls. This uses the column-name
