@@ -117,7 +117,35 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	return &Client{cfg: cfg, logger: logger, runs: map[string]context.CancelFunc{}}
 }
 
+// Mirrors internal/edge/transport's equivalent renewal constants/loop -- see that package's
+// comments and docs/design/skybridge-masking-architecture.md §10.8 in curlix/curlix.
+var proactiveRenewalSkew = 24 * time.Hour
+var proactiveRenewalCheckInterval = time.Hour
+
+func (c *Client) renewalLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(jitteredBackoff(proactiveRenewalCheckInterval)):
+		}
+		material, err := c.ensureTLSMaterial(ctx)
+		if err != nil || material == nil {
+			continue
+		}
+		if certValid(material.clientCertPEM, proactiveRenewalSkew) {
+			continue
+		}
+		if _, err := c.renewCert(ctx, material); err != nil {
+			c.logger.Warn(fmt.Sprintf("studio proactive cert renewal failed: %v", err))
+			continue
+		}
+		c.logger.Info("studio cert proactively renewed")
+	}
+}
+
 func (c *Client) Run(ctx context.Context) error {
+	go c.renewalLoop(ctx)
 	backoff := time.Second
 	for {
 		material, err := c.ensureTLSMaterial(ctx)

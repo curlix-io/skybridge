@@ -127,6 +127,46 @@ func (c *Client) enrollWithToken(ctx context.Context, enrollToken string) (*tlsM
 	}, nil
 }
 
+// renewCert proactively refreshes the client cert using the CURRENT still-valid cert as proof of
+// identity on the mTLS channel -- mirrors internal/edge/transport's renewCert. No enrollment token
+// is involved; the calling cert on the channel IS the identity proof.
+func (c *Client) renewCert(ctx context.Context, current *tlsMaterial) (*tlsMaterial, error) {
+	keyPEM, csrPEM, err := generateKeyAndCSR(c.cfg.TrustDomain, c.cfg.TenantID, c.cfg.AgentID)
+	if err != nil {
+		return nil, err
+	}
+	tlsCfg, err := mtlsTLSConfig(current)
+	if err != nil {
+		return nil, err
+	}
+	conn, err := grpc.NewClient(c.cfg.Target, grpc.WithTransportCredentials(credentials.NewTLS(tlsCfg)))
+	if err != nil {
+		return nil, err
+	}
+	defer conn.Close()
+
+	resp, err := studiov1.NewStudioGatewayClient(conn).Renew(ctx, &studiov1.RenewRequest{
+		CsrPem: string(csrPEM),
+	})
+	if err != nil {
+		return nil, err
+	}
+	caOut := []byte(resp.GetCaBundlePem())
+	if len(caOut) == 0 {
+		caOut = current.caBundlePEM
+	}
+	m := &tlsMaterial{
+		caBundlePEM:   caOut,
+		clientCertPEM: []byte(resp.GetClientCertPem()),
+		clientKeyPEM:  keyPEM,
+	}
+	store := certstore.FromEnv(c.tlsDir(), c.cfg.IdentitySecretARN)
+	if err := store.Save(ctx, &certstore.Material{CABundlePEM: m.caBundlePEM, ClientCertPEM: m.clientCertPEM, ClientKeyPEM: m.clientKeyPEM}); err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
 func (c *Client) tlsDir() string {
 	if c.cfg.TLSDir != "" {
 		return c.cfg.TLSDir
