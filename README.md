@@ -745,14 +745,18 @@ until it's actually close to expiry.
 
 #### Keeping mTLS identity alive across redeploys
 
-⚠️ **On ECS/Fargate, a plain `SKYBRIDGE_TLS_DIR` cache does not survive a redeploy.** Any task
-replacement (new image, new task definition, a CPU/memory bump — anything that spins up a fresh
-task) wipes that disk. Since `SKYBRIDGE_ENROLLMENT_TOKEN` is **single-use**, the new task can't just
-re-enroll: the token was already consumed by the task it replaced, and the deploy fails.
+⚠️ **On any platform that gives you ephemeral local disk — ECS/Fargate, EKS/Kubernetes pods, or
+similar — a plain `SKYBRIDGE_TLS_DIR` cache does not survive a redeploy.** Any replacement (a new
+ECS task from a new image/task definition or a CPU/memory bump, or a Kubernetes pod rescheduled by a
+rollout, node drain, or eviction — anything that spins up a fresh instance) wipes that disk. Since
+`SKYBRIDGE_ENROLLMENT_TOKEN` is **single-use**, the replacement can't just re-enroll: the token was
+already consumed by the instance it replaced, and the deploy fails.
 
 **Fix 1 (cache the cert):** point the edge at an AWS Secrets Manager secret and it will keep its
-identity there too, so a replacement task picks up right where the old one left off — no new token
-required.
+identity there too, so a replacement task/pod picks up right where the old one left off — no new
+token required. This works the same way on EKS as on ECS/Fargate, as long as the pod's IAM role
+(e.g. via IRSA/Pod Identity) can reach Secrets Manager — `SKYBRIDGE_TLS_DIR` itself can stay
+ephemeral (`emptyDir` or container-local disk) either way.
 
 | Identity | Env var |
 |---|---|
@@ -766,10 +770,11 @@ on every subsequent start.
 
 **Fix 2 (skip the static token entirely — AWS IAM auth, 2026-08-12).** This is the stronger fix:
 instead of a human-minted, single-use `SKYBRIDGE_ENROLLMENT_TOKEN`, the edge presigns its own
-`sts:GetCallerIdentity` call with whatever ambient AWS credentials it already has (the ECS task
-role) and exchanges that for a fresh enroll token from your control plane. Nothing is consumed by
-minting it, so it's safe to call on *every* restart — a redeployed task with a wiped disk just
-mints a new one instead of hitting the "token already used by the task I'm replacing" failure.
+`sts:GetCallerIdentity` call with whatever ambient AWS credentials it already has — an ECS task
+role, or an EKS pod's IRSA/Pod Identity role — and exchanges that for a fresh enroll token from your
+control plane. Nothing is consumed by minting it, so it's safe to call on *every* restart — a
+redeployed task or rescheduled pod with a wiped disk just mints a new one instead of hitting the
+"token already used by the instance I'm replacing" failure.
 This is the same pattern behind Teleport's `iam` join method, HashiCorp Vault's `aws` auth method,
 and HashiCorp Boundary's KMS-registered workers: re-prove identity from a platform-native source on
 every boot rather than persisting a bootstrap secret.

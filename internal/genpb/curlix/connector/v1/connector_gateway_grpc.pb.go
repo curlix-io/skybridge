@@ -47,6 +47,7 @@ const (
 	ConnectorGateway_Connect_FullMethodName    = "/curlix.connector.v1.ConnectorGateway/Connect"
 	ConnectorGateway_Enroll_FullMethodName     = "/curlix.connector.v1.ConnectorGateway/Enroll"
 	ConnectorGateway_PreConnect_FullMethodName = "/curlix.connector.v1.ConnectorGateway/PreConnect"
+	ConnectorGateway_Renew_FullMethodName      = "/curlix.connector.v1.ConnectorGateway/Renew"
 )
 
 // ConnectorGatewayClient is the client API for ConnectorGateway service.
@@ -69,6 +70,14 @@ type ConnectorGatewayClient interface {
 	// straight to Connect — the gateway still enforces revocation etc. there regardless. See
 	// docs/design/skybridge-masking-architecture.md §10.
 	PreConnect(ctx context.Context, in *PreConnectRequest, opts ...grpc.CallOption) (*PreConnectResponse, error)
+	// Proactively refresh the client cert BEFORE it expires, authenticated by the current
+	// still-valid cert on the mTLS channel — unlike Enroll, no enrollment token is needed. Callers
+	// should invoke this well ahead of expiry (independent of the Connect stream's own lifecycle,
+	// since a long-lived process may never actually reconnect) so the connector's identity never
+	// lapses to the point where it needs a human to mint a fresh one-time token. Requires mTLS
+	// (the caller's client cert on the channel IS the identity proof); bearer-mode connectors have
+	// nothing to renew this way. See docs/design/skybridge-masking-architecture.md §10.8.
+	Renew(ctx context.Context, in *RenewRequest, opts ...grpc.CallOption) (*RenewResponse, error)
 }
 
 type connectorGatewayClient struct {
@@ -112,6 +121,16 @@ func (c *connectorGatewayClient) PreConnect(ctx context.Context, in *PreConnectR
 	return out, nil
 }
 
+func (c *connectorGatewayClient) Renew(ctx context.Context, in *RenewRequest, opts ...grpc.CallOption) (*RenewResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewResponse)
+	err := c.cc.Invoke(ctx, ConnectorGateway_Renew_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ConnectorGatewayServer is the server API for ConnectorGateway service.
 // All implementations must embed UnimplementedConnectorGatewayServer
 // for forward compatibility.
@@ -132,6 +151,14 @@ type ConnectorGatewayServer interface {
 	// straight to Connect — the gateway still enforces revocation etc. there regardless. See
 	// docs/design/skybridge-masking-architecture.md §10.
 	PreConnect(context.Context, *PreConnectRequest) (*PreConnectResponse, error)
+	// Proactively refresh the client cert BEFORE it expires, authenticated by the current
+	// still-valid cert on the mTLS channel — unlike Enroll, no enrollment token is needed. Callers
+	// should invoke this well ahead of expiry (independent of the Connect stream's own lifecycle,
+	// since a long-lived process may never actually reconnect) so the connector's identity never
+	// lapses to the point where it needs a human to mint a fresh one-time token. Requires mTLS
+	// (the caller's client cert on the channel IS the identity proof); bearer-mode connectors have
+	// nothing to renew this way. See docs/design/skybridge-masking-architecture.md §10.8.
+	Renew(context.Context, *RenewRequest) (*RenewResponse, error)
 	mustEmbedUnimplementedConnectorGatewayServer()
 }
 
@@ -150,6 +177,9 @@ func (UnimplementedConnectorGatewayServer) Enroll(context.Context, *EnrollReques
 }
 func (UnimplementedConnectorGatewayServer) PreConnect(context.Context, *PreConnectRequest) (*PreConnectResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PreConnect not implemented")
+}
+func (UnimplementedConnectorGatewayServer) Renew(context.Context, *RenewRequest) (*RenewResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Renew not implemented")
 }
 func (UnimplementedConnectorGatewayServer) mustEmbedUnimplementedConnectorGatewayServer() {}
 func (UnimplementedConnectorGatewayServer) testEmbeddedByValue()                          {}
@@ -215,6 +245,24 @@ func _ConnectorGateway_PreConnect_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ConnectorGateway_Renew_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConnectorGatewayServer).Renew(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConnectorGateway_Renew_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConnectorGatewayServer).Renew(ctx, req.(*RenewRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ConnectorGateway_ServiceDesc is the grpc.ServiceDesc for ConnectorGateway service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -229,6 +277,10 @@ var ConnectorGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PreConnect",
 			Handler:    _ConnectorGateway_PreConnect_Handler,
+		},
+		{
+			MethodName: "Renew",
+			Handler:    _ConnectorGateway_Renew_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

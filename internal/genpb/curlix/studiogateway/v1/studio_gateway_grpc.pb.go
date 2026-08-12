@@ -50,6 +50,7 @@ const (
 	StudioGateway_Connect_FullMethodName    = "/curlix.studiogateway.v1.StudioGateway/Connect"
 	StudioGateway_Enroll_FullMethodName     = "/curlix.studiogateway.v1.StudioGateway/Enroll"
 	StudioGateway_PreConnect_FullMethodName = "/curlix.studiogateway.v1.StudioGateway/PreConnect"
+	StudioGateway_Renew_FullMethodName      = "/curlix.studiogateway.v1.StudioGateway/Renew"
 )
 
 // StudioGatewayClient is the client API for StudioGateway service.
@@ -69,6 +70,12 @@ type StudioGatewayClient interface {
 	// curlix.connector.v1.ConnectorGateway.PreConnect — see that RPC's comment and
 	// docs/design/skybridge-masking-architecture.md §10.
 	PreConnect(ctx context.Context, in *PreConnectRequest, opts ...grpc.CallOption) (*PreConnectResponse, error)
+	// Proactively refresh the client cert BEFORE it expires, authenticated by the current
+	// still-valid cert on the mTLS channel — mirrors curlix.connector.v1.ConnectorGateway.Renew.
+	// No client currently calls this (the Python reference studiogateway agent has no
+	// disk-persisted identity to renew — see docs/design/skybridge-masking-architecture.md §10.8),
+	// but the server implements it for parity with the connector gateway.
+	Renew(ctx context.Context, in *RenewRequest, opts ...grpc.CallOption) (*RenewResponse, error)
 }
 
 type studioGatewayClient struct {
@@ -112,6 +119,16 @@ func (c *studioGatewayClient) PreConnect(ctx context.Context, in *PreConnectRequ
 	return out, nil
 }
 
+func (c *studioGatewayClient) Renew(ctx context.Context, in *RenewRequest, opts ...grpc.CallOption) (*RenewResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(RenewResponse)
+	err := c.cc.Invoke(ctx, StudioGateway_Renew_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StudioGatewayServer is the server API for StudioGateway service.
 // All implementations must embed UnimplementedStudioGatewayServer
 // for forward compatibility.
@@ -129,6 +146,12 @@ type StudioGatewayServer interface {
 	// curlix.connector.v1.ConnectorGateway.PreConnect — see that RPC's comment and
 	// docs/design/skybridge-masking-architecture.md §10.
 	PreConnect(context.Context, *PreConnectRequest) (*PreConnectResponse, error)
+	// Proactively refresh the client cert BEFORE it expires, authenticated by the current
+	// still-valid cert on the mTLS channel — mirrors curlix.connector.v1.ConnectorGateway.Renew.
+	// No client currently calls this (the Python reference studiogateway agent has no
+	// disk-persisted identity to renew — see docs/design/skybridge-masking-architecture.md §10.8),
+	// but the server implements it for parity with the connector gateway.
+	Renew(context.Context, *RenewRequest) (*RenewResponse, error)
 	mustEmbedUnimplementedStudioGatewayServer()
 }
 
@@ -147,6 +170,9 @@ func (UnimplementedStudioGatewayServer) Enroll(context.Context, *EnrollRequest) 
 }
 func (UnimplementedStudioGatewayServer) PreConnect(context.Context, *PreConnectRequest) (*PreConnectResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PreConnect not implemented")
+}
+func (UnimplementedStudioGatewayServer) Renew(context.Context, *RenewRequest) (*RenewResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method Renew not implemented")
 }
 func (UnimplementedStudioGatewayServer) mustEmbedUnimplementedStudioGatewayServer() {}
 func (UnimplementedStudioGatewayServer) testEmbeddedByValue()                       {}
@@ -212,6 +238,24 @@ func _StudioGateway_PreConnect_Handler(srv interface{}, ctx context.Context, dec
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StudioGateway_Renew_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(RenewRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StudioGatewayServer).Renew(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StudioGateway_Renew_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StudioGatewayServer).Renew(ctx, req.(*RenewRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StudioGateway_ServiceDesc is the grpc.ServiceDesc for StudioGateway service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -226,6 +270,10 @@ var StudioGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PreConnect",
 			Handler:    _StudioGateway_PreConnect_Handler,
+		},
+		{
+			MethodName: "Renew",
+			Handler:    _StudioGateway_Renew_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{
