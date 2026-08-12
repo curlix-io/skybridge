@@ -57,6 +57,14 @@ const (
 	// PROTOCOL_41 HandshakeResponse (4 caps + 4 max-packet + 1 charset + 23 reserved), with no
 	// username/auth — it tells the server to start TLS now.
 	sslRequestLen = 32
+
+	// maxResultColumns bounds the column count read from a result-set header (a lenenc int, up to a
+	// full uint64 by encoding, with no correlation to how many column-definition packets actually
+	// follow). MySQL's own hard limit is a few thousand columns per table; this is a generous upper
+	// bound well above any real query, just tight enough that a corrupted or malicious upstream
+	// can't turn one 9-byte header packet into an oversized make([]mask.Column, ...) allocation
+	// attempt (worst case with no cap: colCount = 0xFFFFFFFFFFFFFFFF panics makeslice immediately).
+	maxResultColumns = 1 << 16
 )
 
 // Engine is the MySQL wire-proxy engine.
@@ -177,8 +185,8 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	s := &state{caps: caps, queries: make(chan struct{}, 64), orgID: e.orgID}
 	s.offset.Store(offset)
 	errc := make(chan error, 2)
-	go func() { errc <- s.clientToServer(cb, upstream, recorder) }()
-	go func() { errc <- s.serverToClient(ctx, sb, client, masker, recorder) }()
+	wire.SafeGo(errc, func() error { return s.clientToServer(cb, upstream, recorder) })
+	wire.SafeGo(errc, func() error { return s.serverToClient(ctx, sb, client, masker, recorder) })
 	err = <-errc
 	_ = client.Close()
 	_ = upstream.Close()
@@ -386,6 +394,9 @@ func (s *state) handleOneResultSet(ctx context.Context, sb *bufio.Reader, bw *bu
 	colCount, _, ok := readLenEncInt(payload, 0)
 	if !ok {
 		return false, true, writePacket(bw, seq, payload)
+	}
+	if colCount > maxResultColumns {
+		return false, false, fmt.Errorf("mysql: result set column count %d exceeds limit %d", colCount, maxResultColumns)
 	}
 	if err := writePacket(bw, seq, payload); err != nil {
 		return false, false, err

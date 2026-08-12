@@ -169,12 +169,12 @@ func (e *Engine) pump(ctx context.Context, client, upstream net.Conn, masker mas
 	}
 	tracker := newRequestTracker()
 	errc := make(chan error, 2)
-	go func() {
-		errc <- proxyClientRequests(bufio.NewReaderSize(client, 1<<16), upstream, recorder, tracker)
-	}()
-	go func() {
-		errc <- maskServer(ctx, bufio.NewReaderSize(upstream, 1<<16), client, masker, recorder, tracker, e.orgID)
-	}()
+	wire.SafeGo(errc, func() error {
+		return proxyClientRequests(bufio.NewReaderSize(client, 1<<16), upstream, recorder, tracker)
+	})
+	wire.SafeGo(errc, func() error {
+		return maskServer(ctx, bufio.NewReaderSize(upstream, 1<<16), client, masker, recorder, tracker, e.orgID)
+	})
 	err := <-errc
 	_ = client.Close()
 	_ = upstream.Close()

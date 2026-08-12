@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/curlix-io/skybridge/internal/edge"
+	"gopkg.in/yaml.v3"
 )
 
 // ToolKubectl is the control-plane-side tool name this package handles — MUST match whatever
@@ -112,10 +113,45 @@ func (e Executor) run(ctx context.Context, args map[string]any) (edge.Result, er
 	}
 	if payload := maskedJSONOutput(stdout.String()); payload != nil {
 		result["output"] = payload
+	} else if wantsYAMLOutput(kubectlArgs) {
+		// -o yaml has no self-describing prefix the way JSON's leading '{'/'[' is, so unlike the
+		// JSON path this only runs when the command explicitly requested YAML — content-sniffing
+		// arbitrary stdout as YAML risks misinterpreting plain-text table output (kubectl's default
+		// format) as structured data. See maskedYAMLOutput's doc comment for why this matters: a
+		// `kubectl get secret -o yaml` used to bypass maskedJSONOutput entirely (YAML doesn't start
+		// with '{'/'[') and return raw, unredacted secret material.
+		if payload := maskedYAMLOutput(stdout.String()); payload != nil {
+			result["output"] = payload
+		} else {
+			result["output"] = clip(stdout.String(), e.opts.MaxStdout)
+		}
 	} else {
 		result["output"] = clip(stdout.String(), e.opts.MaxStdout)
 	}
 	return result, nil
+}
+
+// wantsYAMLOutput reports whether argv (the kubectl args, minus the "kubectl" argv[0] itself)
+// requested YAML output via -o/--output, in any of kubectl's accepted forms: "-o yaml",
+// "-o=yaml", "--output yaml", "--output=yaml".
+func wantsYAMLOutput(argv []string) bool {
+	for i, a := range argv {
+		switch {
+		case a == "-o" || a == "--output":
+			if i+1 < len(argv) && strings.EqualFold(argv[i+1], "yaml") {
+				return true
+			}
+		case strings.HasPrefix(a, "-o="):
+			if strings.EqualFold(strings.TrimPrefix(a, "-o="), "yaml") {
+				return true
+			}
+		case strings.HasPrefix(a, "--output="):
+			if strings.EqualFold(strings.TrimPrefix(a, "--output="), "yaml") {
+				return true
+			}
+		}
+	}
+	return false
 }
 
 // maskedJSONOutput decodes stdout as JSON and redacts Secret data/stringData fields when the
@@ -133,6 +169,33 @@ func maskedJSONOutput(raw string) any {
 		return nil
 	}
 	return maskSecretFields(payload)
+}
+
+// maskedYAMLOutput is maskedJSONOutput's counterpart for `kubectl ... -o yaml`. Before this
+// existed, `-o yaml` was the one output format that bypassed Secret redaction entirely: the same
+// "read-only" broker that correctly redacted `-o json`'s "data"/"stringData" fields returned raw,
+// unredacted base64 secret material for the identical resource under `-o yaml`, since
+// maskedJSONOutput only recognizes JSON's leading '{'/'[' and YAML has no equivalent tell. Only
+// called when the command explicitly asked for YAML (see wantsYAMLOutput) — never by sniffing
+// arbitrary stdout — so plain-text table output is never misparsed as structured data.
+func maskedYAMLOutput(raw string) any {
+	trimmed := strings.TrimSpace(raw)
+	if trimmed == "" {
+		return nil
+	}
+	var payload any
+	if err := yaml.Unmarshal([]byte(trimmed), &payload); err != nil {
+		return nil
+	}
+	switch payload.(type) {
+	case map[string]any, []any:
+		return maskSecretFields(payload)
+	default:
+		// Requested YAML but got something that didn't decode to a real document shape (e.g. an
+		// empty/odd response) — fall back to the plain-text path rather than returning a bare
+		// scalar as "output".
+		return nil
+	}
 }
 
 const redacted = "***redacted***"

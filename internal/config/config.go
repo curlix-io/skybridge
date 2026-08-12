@@ -510,6 +510,12 @@ type Gateway struct {
 	RequireOrgID      bool   // reject agent registration / client relay without organization_id
 	ClientConnPerMin  int    // max new native client connections per client IP per minute (0 = unlimited)
 	OrgConnPerMin     int    // max new native client connections per organization_id per minute (0 = unlimited)
+	// OrgMaxConcurrentClients caps how many client connections one organization_id can have
+	// relayed *simultaneously* through this gateway (0 = unlimited). ClientConnPerMin/OrgConnPerMin
+	// above only throttle the *rate* of new connections — nothing stops one org from opening that
+	// many connections and simply never closing them, holding goroutines/fds/tunnel-stream slots
+	// indefinitely at every other org's expense. This bounds the standing total instead.
+	OrgMaxConcurrentClients int
 
 	// ClientProxyProtocol: when true, every native-client listener expects a PROXY protocol v1/v2
 	// header on each accepted connection (as sent by an AWS NLB target group with proxy_protocol_v2
@@ -554,26 +560,35 @@ func LoadGateway() Gateway {
 	}
 	clientConnPerMin := atoiDefault(env("SKYBRIDGE_GW_CLIENT_CONN_PER_MIN", ""), 0)
 	orgConnPerMin := atoiDefault(env("SKYBRIDGE_GW_ORG_CONN_PER_MIN", ""), 0)
+	orgMaxConcurrentClients := atoiDefault(env("SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS", ""), 0)
 	if env("SKYBRIDGE_GW_CLIENT_CONN_PER_MIN", "") == "" && cpURL != "" {
 		clientConnPerMin = 60
 	}
+	// Same auto-default posture as ClientConnPerMin above: a stock deployment with a control plane
+	// configured gets a sane, generous ceiling (well above any legitimate single org's real
+	// concurrent-connection count) rather than staying fully unlimited; a bare/self-hosted gateway
+	// with no control plane stays unlimited unless the operator opts in explicitly.
+	if env("SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS", "") == "" && cpURL != "" {
+		orgMaxConcurrentClients = 1000
+	}
 	return Gateway{
-		LogLevel:            env("SKYBRIDGE_LOG_LEVEL", ""),
-		AgentListen:         env("SKYBRIDGE_GW_AGENT_LISTEN", ":8010"),
-		AuthToken:           env("SKYBRIDGE_GW_TOKEN", ""),
-		Clients:             parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
-		ControlPlaneURL:     cpURL,
-		ControlPlaneToken:   env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
-		SessionPath:         env("SKYBRIDGE_GW_SESSION_PATH", gateway.DefaultSessionPath),
-		WireAdmitPath:       env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", gateway.DefaultWireAdmitPath),
-		WireTargetPath:      env("SKYBRIDGE_GW_WIRE_TARGET_PATH", gateway.DefaultWireTargetPath),
-		RequireOrgID:        requireOrgID,
-		ClientConnPerMin:    clientConnPerMin,
-		OrgConnPerMin:       orgConnPerMin,
-		ClientProxyProtocol: truthy(env("SKYBRIDGE_GW_CLIENT_PROXY_PROTOCOL", "")),
-		WireMtlsCABundlePEM: pemFromEnv("SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_GW_MTLS_CA_BUNDLE_FILE"),
-		WireMtlsServerCert:  pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM", "SKYBRIDGE_GW_MTLS_SERVER_CERT_FILE"),
-		WireMtlsServerKey:   pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM", "SKYBRIDGE_GW_MTLS_SERVER_KEY_FILE"),
+		LogLevel:                env("SKYBRIDGE_LOG_LEVEL", ""),
+		AgentListen:             env("SKYBRIDGE_GW_AGENT_LISTEN", ":8010"),
+		AuthToken:               env("SKYBRIDGE_GW_TOKEN", ""),
+		Clients:                 parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
+		ControlPlaneURL:         cpURL,
+		ControlPlaneToken:       env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),
+		SessionPath:             env("SKYBRIDGE_GW_SESSION_PATH", gateway.DefaultSessionPath),
+		WireAdmitPath:           env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", gateway.DefaultWireAdmitPath),
+		WireTargetPath:          env("SKYBRIDGE_GW_WIRE_TARGET_PATH", gateway.DefaultWireTargetPath),
+		RequireOrgID:            requireOrgID,
+		ClientConnPerMin:        clientConnPerMin,
+		OrgConnPerMin:           orgConnPerMin,
+		OrgMaxConcurrentClients: orgMaxConcurrentClients,
+		ClientProxyProtocol:     truthy(env("SKYBRIDGE_GW_CLIENT_PROXY_PROTOCOL", "")),
+		WireMtlsCABundlePEM:     pemFromEnv("SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_GW_MTLS_CA_BUNDLE_FILE"),
+		WireMtlsServerCert:      pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM", "SKYBRIDGE_GW_MTLS_SERVER_CERT_FILE"),
+		WireMtlsServerKey:       pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM", "SKYBRIDGE_GW_MTLS_SERVER_KEY_FILE"),
 	}
 }
 

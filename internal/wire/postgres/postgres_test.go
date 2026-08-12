@@ -645,6 +645,27 @@ func TestPipeBackendReader_ShortHeaderLength(t *testing.T) {
 	}
 }
 
+// TestPipeBackendReader_OversizedLengthRejectedNotAllocated is the regression test for
+// maxBackendMessageBytes: before it existed, a message header declaring a length near the uint32
+// max (up to ~4 GiB) would drive `make([]byte, int(length)-4)` straight into a multi-GiB allocation
+// attempt — from a single 5-byte header, before io.ReadFull ever got a chance to fail on the short
+// read that would follow. A corrupted or compromised upstream sending this once is enough to
+// exhaust memory for the whole agent process, degrading every other tenant's connection sharing it.
+// It must now be rejected immediately as a protocol error instead.
+func TestPipeBackendReader_OversizedLengthRejectedNotAllocated(t *testing.T) {
+	server := new(bytes.Buffer)
+	server.WriteByte('D')
+	var l [4]byte
+	binary.BigEndian.PutUint32(l[:], 0xFFFFFFFF) // ~4 GiB claimed length
+	server.Write(l[:])
+
+	client := new(bytes.Buffer)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil)
+	if !errors.Is(err, errProtocol) {
+		t.Fatalf("expected errProtocol for an oversized message length, got %v", err)
+	}
+}
+
 // TestPipeBackendReader_FlushesOnBufferDrain exercises the "flush whenever the read buffer is
 // drained" branch (as opposed to only flushing at ReadyForQuery), by feeding a single non-'Z' message
 // that leaves br.Buffered() == 0.

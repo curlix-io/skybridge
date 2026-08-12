@@ -17,6 +17,7 @@ import (
 	"log/slog"
 	"math/rand/v2"
 	"net"
+	"runtime/debug"
 	"time"
 
 	"strings"
@@ -321,6 +322,11 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *slog.Logger) err
 		}
 		logger.Debug(fmt.Sprintf("accepted client connection from %s", client.RemoteAddr()))
 		go func() {
+			// A panic anywhere in this connection's handling (dial, TLS handshake, or a wire-engine
+			// parsing bug wire.SafeGo didn't already convert to an error) must only drop this one
+			// connection, never the whole process — every other tenant's connection runs in this
+			// same agent, so an unrecovered panic here would take all of them down too.
+			defer recoverConn(logger, client.RemoteAddr())
 			defer client.Close()
 			rawUpstream, err := dialer.DialContext(ctx, "tcp", cfg.UpstreamAddr)
 			if err != nil {
@@ -644,6 +650,10 @@ func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps 
 }
 
 func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, cfg config.Agent, deps Deps, logger *slog.Logger) {
+	// See RunListener's per-connection goroutine for why this matters: one stream's panic must
+	// never take down the whole agent process, which would drop every other org/session tunneled
+	// through this same gateway connection.
+	defer recoverConn(logger, nil)
 	defer st.Close()
 	meta, err := tunnel.DecodeOpenMeta(st.Meta())
 	if err != nil {
@@ -707,6 +717,25 @@ func heartbeatLoop(ctx context.Context, sess *tunnel.Session) {
 				return
 			}
 		}
+	}
+}
+
+// recoverConn stops a panic from propagating out of a per-connection goroutine, logging it instead
+// of crashing the process. remote is the client's address for the log line when known (nil when not
+// applicable, e.g. serveStream); both call sites defer this before any other per-connection defer,
+// so it runs last during unwind — after client/upstream Close() has already happened.
+func recoverConn(logger *slog.Logger, remote net.Addr) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if remote != nil {
+		logger.Error(fmt.Sprintf("recovered from panic in connection from %s: %v\n%s", remote, r, debug.Stack()))
+	} else {
+		logger.Error(fmt.Sprintf("recovered from panic in connection handler: %v\n%s", r, debug.Stack()))
 	}
 }
 

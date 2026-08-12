@@ -411,17 +411,36 @@ func renderTopLevelDoc(doc []byte) string {
 	return b.String()
 }
 
+// maxBSONNestingDepth caps how many levels deep result recurses into nested docs/arrays, matching
+// MongoDB's own server-side BSON depth limit. Without this, a document nesting a near-empty
+// sub-document (~8 bytes) recursively fits millions of levels inside the wire message's own
+// maxMessageBytes cap — each level costs Go stack frames in rewriteDoc/result, so an unbounded depth
+// drives a stack-overflow *fatal error* well before that byte budget is exhausted. Unlike a panic,
+// Go's runtime cannot recover from a stack overflow (see wire.SafeGo's doc comment), so this has to
+// be prevented by construction rather than caught after the fact.
+const maxBSONNestingDepth = 100
+
+// errBSONTooDeep is returned when a document nests more than maxBSONNestingDepth levels deep.
+var errBSONTooDeep = errors.New("mongo: bson document nesting exceeds limit")
+
 // result masks every string field in a result document, recursing into nested docs/arrays. path is
 // the dotted, index-erased resolved path to doc itself ("" at the top level, then e.g. "profile" for
 // a nested doc under it), matching internal/pathlabel/docpath's path convention so PathOverlay's
 // (ObjectID, Path) lookups behave the same for the wire proxy as for the dbquery exec path.
 func (m *bsonMasker) result(doc []byte, path string) ([]byte, error) {
+	return m.resultDepth(doc, path, 0)
+}
+
+func (m *bsonMasker) resultDepth(doc []byte, path string, depth int) ([]byte, error) {
+	if depth > maxBSONNestingDepth {
+		return nil, errBSONTooDeep
+	}
 	return rewriteDoc(doc, func(typ byte, name string, value []byte) ([]byte, error) {
 		switch typ {
 		case bsonString:
 			return m.maskString(name, joinPath(path, name), value)
 		case bsonDoc, bsonArray:
-			return m.result(value, joinPath(path, name))
+			return m.resultDepth(value, joinPath(path, name), depth+1)
 		default:
 			if _, ok := bsonTypeKind[typ]; ok {
 				return m.maskScalar(name, joinPath(path, name), typ, value)

@@ -4,6 +4,7 @@ import (
 	"context"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -22,6 +23,12 @@ func writeFakeKubectl(t *testing.T) string {
 case "$*" in
   *secretout*)
     echo '{"kind":"Secret","data":{"password":"cGFzcw=="},"stringData":{"note":"hi"}}'
+    ;;
+  *secretyaml*)
+    printf 'apiVersion: v1\nkind: Secret\ndata:\n  password: cGFzcw==\nstringData:\n  note: hi\n'
+    ;;
+  *plaintable*)
+    printf 'NAME    READY   STATUS    RESTARTS   AGE\nmypod   1/1     Running   0          5d\n'
     ;;
   *plainjson*)
     echo '{"kind":"ConfigMap","data":{"k":"v"}}'
@@ -77,6 +84,66 @@ func TestKubectlExecMasksSecretJSONOutput(t *testing.T) {
 	stringData, ok := out["stringData"].(map[string]any)
 	if !ok || stringData["note"] != redacted {
 		t.Fatalf("expected stringData redacted, got %v", out["stringData"])
+	}
+}
+
+// TestKubectlExecMasksSecretYAMLOutput is the regression test for the "-o yaml bypasses secret
+// redaction" gap: before wantsYAMLOutput/maskedYAMLOutput existed, the exact same Secret resource
+// that got its data/stringData redacted under -o json came back with raw, unredacted base64 secret
+// material under -o yaml — the same "read-only" broker, one output flag away from a full bypass.
+func TestKubectlExecMasksSecretYAMLOutput(t *testing.T) {
+	bin := writeFakeKubectl(t)
+	res := runKubectl(t, Options{KubectlBin: bin}, "kubectl get secretyaml -o yaml")
+	if res["ok"] != true {
+		t.Fatalf("expected ok=true: %+v", res)
+	}
+	out, ok := res["output"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structured output, got %T: %v", res["output"], res["output"])
+	}
+	data, ok := out["data"].(map[string]any)
+	if !ok || data["password"] != redacted {
+		t.Fatalf("expected password redacted, got %v", out["data"])
+	}
+	stringData, ok := out["stringData"].(map[string]any)
+	if !ok || stringData["note"] != redacted {
+		t.Fatalf("expected stringData redacted, got %v", out["stringData"])
+	}
+}
+
+// TestKubectlExecMasksSecretYAMLOutputShorthandFlag confirms the "-o=yaml" and "--output=yaml"
+// single-token spellings are recognized too, not just the two-token "-o yaml" form.
+func TestKubectlExecMasksSecretYAMLOutputShorthandFlag(t *testing.T) {
+	bin := writeFakeKubectl(t)
+	res := runKubectl(t, Options{KubectlBin: bin}, "kubectl get secretyaml --output=yaml")
+	if res["ok"] != true {
+		t.Fatalf("expected ok=true: %+v", res)
+	}
+	out, ok := res["output"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected structured output, got %T: %v", res["output"], res["output"])
+	}
+	if data, ok := out["data"].(map[string]any); !ok || data["password"] != redacted {
+		t.Fatalf("expected password redacted, got %v", out["data"])
+	}
+}
+
+// TestKubectlExecPlainTableOutputNotMisparsedAsYAML confirms kubectl's default table format (no -o
+// flag at all) is never fed to the YAML masker — wantsYAMLOutput must gate strictly on the command
+// actually requesting YAML, not on sniffing stdout content, since arbitrary text can coincidentally
+// look YAML-ish.
+func TestKubectlExecPlainTableOutputNotMisparsedAsYAML(t *testing.T) {
+	bin := writeFakeKubectl(t)
+	res := runKubectl(t, Options{KubectlBin: bin}, "kubectl get plaintable")
+	if res["ok"] != true {
+		t.Fatalf("expected ok=true: %+v", res)
+	}
+	out, ok := res["output"].(string)
+	if !ok {
+		t.Fatalf("expected raw table text to pass through as a string, got %T: %v", res["output"], res["output"])
+	}
+	if !strings.Contains(out, "mypod") {
+		t.Fatalf("expected table output preserved, got %q", out)
 	}
 }
 

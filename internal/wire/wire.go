@@ -6,8 +6,10 @@ package wire
 
 import (
 	"context"
+	"fmt"
 	"io"
 	"net"
+	"runtime/debug"
 
 	"github.com/curlix-io/skybridge/internal/mask"
 )
@@ -81,6 +83,25 @@ type CredentialResolver func(ctx context.Context, startup map[string]string, sec
 type InjectingEngine interface {
 	Engine
 	ProxyInject(ctx context.Context, client, upstream net.Conn, masker mask.Masker, resolve CredentialResolver, recorder Recorder) error
+}
+
+// SafeGo runs fn in a new goroutine and sends its result to errc — the same shape as
+// `go func() { errc <- fn() }()`, which is how every engine's two per-connection directions
+// (client->upstream, upstream->client) are spawned. The difference: a panic inside fn (a malformed
+// or adversarial wire message hitting an unhandled parsing edge case) is recovered here and turned
+// into an error sent to errc instead of crashing the whole process — one tenant's bad packet must
+// never take down every other tenant's connection sharing this agent. Callers' existing `<-errc`
+// drain-and-close pattern handles the resulting error exactly like any other connection-ending
+// error (EOF, reset, protocol error).
+func SafeGo(errc chan<- error, fn func() error) {
+	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				errc <- fmt.Errorf("wire: recovered from panic: %v\n%s", r, debug.Stack())
+			}
+		}()
+		errc <- fn()
+	}()
 }
 
 // Passthrough is a transparent bidirectional copy with no inspection or masking. Engines that do

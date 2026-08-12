@@ -111,3 +111,32 @@ func TestPassthroughClosesBothConnsOnReturn(t *testing.T) {
 		t.Fatal("expected upstream-side conn to be closed by Passthrough")
 	}
 }
+
+func TestSafeGoReturnsFnResult(t *testing.T) {
+	errc := make(chan error, 1)
+	SafeGo(errc, func() error { return io.EOF })
+	if err := <-errc; err != io.EOF {
+		t.Fatalf("expected io.EOF, got %v", err)
+	}
+}
+
+// TestSafeGoRecoversPanic is the regression test for the core fix: every wire engine's two
+// per-connection goroutines (client->upstream, upstream->client) must survive a panic triggered by
+// malformed/adversarial wire data — one tenant's bad packet must never crash the whole agent
+// process and take down every other tenant's connection sharing it. Before SafeGo existed, this
+// would have crashed the test binary itself (Go's default behavior for an unrecovered panic in any
+// goroutine), not just failed an assertion.
+func TestSafeGoRecoversPanic(t *testing.T) {
+	errc := make(chan error, 1)
+	SafeGo(errc, func() error {
+		panic("simulated parser panic on malformed wire data")
+	})
+	select {
+	case err := <-errc:
+		if err == nil {
+			t.Fatal("expected a non-nil error recovered from the panic")
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("SafeGo did not deliver a recovered-panic error in time")
+	}
+}

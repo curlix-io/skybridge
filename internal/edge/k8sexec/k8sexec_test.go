@@ -82,3 +82,55 @@ func TestMaskSecretFieldsHandlesListOfSecrets(t *testing.T) {
 		t.Fatalf("expected ConfigMap item data untouched, got %v", cmData["k"])
 	}
 }
+
+func TestWantsYAMLOutput(t *testing.T) {
+	cases := []struct {
+		name string
+		argv []string
+		want bool
+	}{
+		{"two-token -o yaml", []string{"get", "secret", "app-secret", "-o", "yaml"}, true},
+		{"two-token --output yaml", []string{"get", "secret", "-o", "json"}, false},
+		{"single-token -o=yaml", []string{"get", "secret", "-o=yaml"}, true},
+		{"single-token --output=yaml", []string{"get", "secret", "--output=yaml"}, true},
+		{"case insensitive YAML", []string{"get", "secret", "-o", "YAML"}, true},
+		{"json requested, not yaml", []string{"get", "secret", "-o", "json"}, false},
+		{"no output flag at all", []string{"get", "pods"}, false},
+		{"-o with nothing after it", []string{"get", "secret", "-o"}, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := wantsYAMLOutput(c.argv); got != c.want {
+				t.Fatalf("wantsYAMLOutput(%v) = %v, want %v", c.argv, got, c.want)
+			}
+		})
+	}
+}
+
+func TestMaskedYAMLOutputRedactsSecretData(t *testing.T) {
+	yamlDoc := "apiVersion: v1\nkind: Secret\ndata:\n  password: cGFzcw==\n"
+	got := maskedYAMLOutput(yamlDoc)
+	out, ok := got.(map[string]any)
+	if !ok {
+		t.Fatalf("expected structured output, got %T", got)
+	}
+	data, ok := out["data"].(map[string]any)
+	if !ok || data["password"] != redacted {
+		t.Fatalf("expected password redacted, got %v", out["data"])
+	}
+}
+
+func TestMaskedYAMLOutputReturnsNilForNonDocumentScalar(t *testing.T) {
+	// A bare scalar ("just a string") is not what a real kubectl -o yaml document ever produces
+	// (always a map or a list) — maskedYAMLOutput must fall back to nil (plain-text path) rather
+	// than surfacing an unmasked bare scalar as "output".
+	if got := maskedYAMLOutput("just a string, not a document"); got != nil {
+		t.Fatalf("expected nil for a non-document scalar, got %v", got)
+	}
+}
+
+func TestMaskedYAMLOutputReturnsNilForInvalidYAML(t *testing.T) {
+	if got := maskedYAMLOutput("{not: valid: yaml: [["); got != nil {
+		t.Fatalf("expected nil for invalid YAML, got %v", got)
+	}
+}

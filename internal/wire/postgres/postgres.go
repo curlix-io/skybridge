@@ -35,6 +35,15 @@ const (
 	sslRequestCode    = 80877103
 	gssRequestCode    = 80877104
 	cancelRequestCode = 80877102
+
+	// maxBackendMessageBytes bounds a single server->client message's payload. Postgres itself caps
+	// any one field at 1 GiB ("invalid memory alloc request size"), so no legitimate row/column-
+	// definition message can exceed this by much — but the wire length prefix is a raw uint32
+	// (up to ~4 GiB) read directly off a connection to a real, trusted-in-network upstream that
+	// could still be corrupted, buggy, or (via SKYBRIDGE_UPSTREAM_TLS/verify-*) a MITM'd/compromised
+	// endpoint. Without this cap, a single garbage length field triggers a multi-GiB allocation
+	// attempt before io.ReadFull ever gets a chance to fail on the short read.
+	maxBackendMessageBytes = 1 << 30
 )
 
 var errProtocol = errors.New("postgres: malformed message")
@@ -103,14 +112,14 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	errc := make(chan error, 2)
 	// client -> server: forward verbatim (the StartupMessage and everything after are buffered in
 	// cr), teeing raw bytes into the recorder for replay (opaque/best-effort — not re-parsed here).
-	go func() {
+	wire.SafeGo(errc, func() error {
 		_, err := io.Copy(upstream, io.TeeReader(cr, wire.RecorderInputWriter(recorder)))
-		errc <- err
-	}()
+		return err
+	})
 	// server -> client: parse + mask DataRows.
-	go func() {
-		errc <- pipeBackend(ctx, upstream, client, masker, recorder, e.objectIDFor(database))
-	}()
+	wire.SafeGo(errc, func() error {
+		return pipeBackend(ctx, upstream, client, masker, recorder, e.objectIDFor(database))
+	})
 
 	err = <-errc
 	_ = client.Close()
@@ -233,14 +242,14 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 
 	errc := make(chan error, 2)
 	// client -> upstream: forward queries verbatim (startup + auth already consumed from cr).
-	go func() {
+	wire.SafeGo(errc, func() error {
 		_, err := io.Copy(upstream, io.TeeReader(cr, wire.RecorderInputWriter(recorder)))
-		errc <- err
-	}()
+		return err
+	})
 	// upstream -> client: parse + mask DataRows, reusing the reader that buffered the post-auth tail.
-	go func() {
-		errc <- pipeBackendReader(ctx, ur, client, masker, recorder, e.objectIDFor(database))
-	}()
+	wire.SafeGo(errc, func() error {
+		return pipeBackendReader(ctx, ur, client, masker, recorder, e.objectIDFor(database))
+	})
 
 	err = <-errc
 	_ = client.Close()
@@ -331,7 +340,7 @@ func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, 
 		}
 		typ := header[0]
 		length := binary.BigEndian.Uint32(header[1:5]) // length includes itself (4), excludes type
-		if length < 4 {
+		if length < 4 || length > maxBackendMessageBytes {
 			return errProtocol
 		}
 		payload := make([]byte, int(length)-4)

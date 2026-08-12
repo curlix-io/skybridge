@@ -544,6 +544,19 @@ func TestReadBackendMessage_LengthTooShort(t *testing.T) {
 	}
 }
 
+// TestReadBackendMessage_LengthTooLong is the regression test for maxAuthMessageBytes: before it
+// existed, a header declaring a length near the uint32 max would drive `make([]byte, int(length)-4)`
+// into a multi-GiB allocation attempt from a single 5-byte header on the upstream-auth-origination
+// path — reachable even before a client has sent a single query. It must be rejected immediately.
+func TestReadBackendMessage_LengthTooLong(t *testing.T) {
+	hdr := make([]byte, 5)
+	hdr[0] = msgAuthentication
+	binary.BigEndian.PutUint32(hdr[1:5], 0xFFFFFFFF)
+	if _, _, err := readBackendMessage(bufio.NewReader(bytes.NewReader(hdr))); !errors.Is(err, errProtocol) {
+		t.Fatalf("got %v, want errProtocol", err)
+	}
+}
+
 // ---- ProxyInject: rejection and error-return paths ----
 
 func TestProxyInject_ResolveFailureSendsClientError(t *testing.T) {

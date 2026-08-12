@@ -609,6 +609,37 @@ func TestResult_MaskerErrorPropagates(t *testing.T) {
 	}
 }
 
+// TestResult_DeeplyNestedDocumentRejectedNotStackOverflow is the regression test for
+// maxBSONNestingDepth. result recurses once per nesting level (bsonDoc/bsonArray); before the depth
+// cap existed, a document nesting a near-empty sub-document recursively — well within the wire
+// message's own 64 MiB size budget — would drive Go's goroutine stack past its limit and crash the
+// whole process with an unrecoverable "fatal error: stack overflow" (recover() cannot catch this,
+// unlike an ordinary panic — see wire.SafeGo's doc comment). It must now be rejected as an ordinary
+// error, well before the stack has any chance to overflow.
+func TestResult_DeeplyNestedDocumentRejectedNotStackOverflow(t *testing.T) {
+	doc := bdoc(eint32("leaf", 1))
+	for i := 0; i < maxBSONNestingDepth+10; i++ {
+		doc = bdoc(enested(bsonDoc, "n", doc))
+	}
+	bm := &bsonMasker{ctx: context.Background(), masker: mask.Noop{}}
+	if _, err := bm.result(doc, ""); !errors.Is(err, errBSONTooDeep) {
+		t.Fatalf("expected errBSONTooDeep, got %v", err)
+	}
+}
+
+// TestResult_NestingAtLimitStillWorks confirms the depth cap doesn't reject legitimate, merely
+// deep (not adversarial) documents right at the boundary.
+func TestResult_NestingAtLimitStillWorks(t *testing.T) {
+	doc := bdoc(estring("leaf", "hello"))
+	for i := 0; i < maxBSONNestingDepth; i++ {
+		doc = bdoc(enested(bsonDoc, "n", doc))
+	}
+	bm := &bsonMasker{ctx: context.Background(), masker: mask.Noop{}}
+	if _, err := bm.result(doc, ""); err != nil {
+		t.Fatalf("expected a document exactly at the depth limit to succeed, got %v", err)
+	}
+}
+
 func TestMaskString_MalformedValuePassesThrough(t *testing.T) {
 	bm := &bsonMasker{ctx: context.Background(), masker: mask.NewOverlay(map[string]string{"x": "y"})}
 	short := []byte{1, 2}

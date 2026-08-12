@@ -374,6 +374,74 @@ func TestServeClientRejectsRateLimit(t *testing.T) {
 	}
 }
 
+// TestServeClientRejectsOrgConnLimitReached is the regression test for the concurrent-connection
+// ceiling: unlike TestServeClientRejectsRateLimit above (which throttles the *rate* of new
+// connections and lets the first one close before trying again), this keeps the first connection
+// open throughout — proving the org is blocked by its *standing* connection count, not by how fast
+// it opens new ones. Without OrgConnLimiter, an org could hold arbitrarily many connections open
+// simultaneously (rate limiting alone never catches this), exhausting gateway/agent goroutines and
+// file descriptors at every other org's expense.
+func TestServeClientRejectsOrgConnLimitReached(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	g := gateway.New("tok", silent())
+	g.SetOrgConnLimiter(gateway.NewOrgConnLimiter(1))
+	g.SetTargetResolver(stubTargetResolver{"db": {Name: "db", Addr: "upstream:0", DBType: "upper"}})
+	rec := &recordingStore{}
+	g.SetStore(rec)
+
+	agentGW, agentLocal := net.Pipe()
+	go func() { _ = g.ServeAgent(agentGW) }()
+
+	cfg := config.Agent{
+		Mode:    config.ModeTunnel,
+		AgentID: "a1",
+		OrgID:   "org-1",
+		Token:   "tok",
+	}
+	deps := agent.Deps{
+		Dial:   echoDialer,
+		Engine: func(string) (wire.Engine, error) { return upperEngine{}, nil },
+		Masker: mask.Noop{},
+	}
+	go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
+
+	if !waitForOrgAgent(g, "org-1", 2*time.Second) {
+		t.Fatal("agent did not register in time")
+	}
+
+	clientGW1, client1 := net.Pipe()
+	firstDone := make(chan error, 1)
+	go func() { firstDone <- g.ServeClient(clientGW1, "org-1", "db") }()
+	time.Sleep(20 * time.Millisecond) // let the first ServeClient acquire its slot and start relaying
+
+	// The first connection is still open — a second must be rejected on the standing-count ceiling,
+	// not a rate limiter (none is configured on this Gateway).
+	clientGW2, client2 := net.Pipe()
+	err := g.ServeClient(clientGW2, "org-1", "db")
+	_ = client2.Close()
+	if !errors.Is(err, gateway.ErrOrgConnLimitReached) {
+		t.Fatalf("want ErrOrgConnLimitReached while the first connection is still open, got %v", err)
+	}
+
+	// Closing the first connection must free its slot — a third attempt should now succeed.
+	_ = client1.Close()
+	select {
+	case <-firstDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("first ServeClient did not return after its client closed")
+	}
+
+	clientGW3, client3 := net.Pipe()
+	go func() { _ = g.ServeClient(clientGW3, "org-1", "db") }()
+	time.Sleep(20 * time.Millisecond)
+	if _, err := client3.Write([]byte("ping")); err != nil {
+		t.Fatalf("expected the third connection to be admitted after the slot freed up, write failed: %v", err)
+	}
+	_ = client3.Close()
+}
+
 func TestServeAgentRejectsBadToken(t *testing.T) {
 	g := gateway.New("right", silent())
 	gw, local := net.Pipe()

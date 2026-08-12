@@ -43,8 +43,11 @@ flags). Common ones:
                                        SKYBRIDGE_GW_CONTROL_PLANE_URL is set)
 
   Rate limits
-    SKYBRIDGE_GW_CLIENT_CONN_PER_MIN  per-client-IP connections/min
-    SKYBRIDGE_GW_ORG_CONN_PER_MIN     per-org connections/min
+    SKYBRIDGE_GW_CLIENT_CONN_PER_MIN         per-client-IP new connections/min
+    SKYBRIDGE_GW_ORG_CONN_PER_MIN            per-org new connections/min
+    SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS  per-org standing connection ceiling (default: 1000
+                                              when SKYBRIDGE_GW_CONTROL_PLANE_URL is set, else
+                                              unlimited) — bounds the total, not just the rate
 
 Exhaustive list, including wire-mTLS options: internal/config/config.go (Gateway struct).
 `
@@ -52,6 +55,18 @@ Exhaustive list, including wire-mTLS options: internal/config/config.go (Gateway
 func gatewayFatal(logger *slog.Logger, msg string) {
 	logger.Error(msg)
 	os.Exit(1)
+}
+
+// distinctClientOrgs counts the distinct non-empty organization_id values across clients, used to
+// size the bearer-token-mode startup warning to how exposed this particular deployment actually is.
+func distinctClientOrgs(clients []config.ClientListener) int {
+	seen := make(map[string]bool, len(clients))
+	for _, c := range clients {
+		if c.OrgID != "" {
+			seen[c.OrgID] = true
+		}
+	}
+	return len(seen)
 }
 
 func runGateway(args []string) {
@@ -73,6 +88,10 @@ func runGateway(args []string) {
 	if lim := gateway.NewConnRateLimiter(cfg.ClientConnPerMin, cfg.OrgConnPerMin); lim != nil {
 		gw.SetConnRateLimiter(lim)
 		logger.Info(fmt.Sprintf("client conn limits ip=%d/min org=%d/min", cfg.ClientConnPerMin, cfg.OrgConnPerMin))
+	}
+	if lim := gateway.NewOrgConnLimiter(cfg.OrgMaxConcurrentClients); lim != nil {
+		gw.SetOrgConnLimiter(lim)
+		logger.Info(fmt.Sprintf("org concurrent connection ceiling=%d", cfg.OrgMaxConcurrentClients))
 	}
 	if cfg.ControlPlaneURL != "" {
 		gw.SetStore(gateway.NewHTTPStore(cfg.ControlPlaneURL, cfg.SessionPath, cfg.ControlPlaneToken))
@@ -113,7 +132,21 @@ func runGateway(args []string) {
 		agentLn = tls.NewListener(agentLn, tlsCfg)
 		logger.Info(fmt.Sprintf("agent endpoint %s (mTLS: agent client certs required)", cfg.AgentListen))
 	} else {
-		logger.Info(fmt.Sprintf("agent endpoint %s (bearer-token mode — no SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM configured)", cfg.AgentListen))
+		// Bearer-token mode has no cryptographic binding between organization_id and the connecting
+		// agent — reg.OrgID is trusted as self-reported (see internal/gateway/gateway.go's
+		// ServeAgent), so any agent holding the one shared SKYBRIDGE_GW_TOKEN can register as ANY
+		// org and silently take over that org's client traffic (orgAgents is last-writer-wins).
+		// This is a real risk specifically because it's easy to reach with the simplest possible
+		// setup — warn loudly rather than let it read as just an informational mode note.
+		msg := fmt.Sprintf("agent endpoint %s: bearer-token mode (no SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM configured) — "+
+			"organization_id is self-reported by the connecting agent, not cryptographically bound to "+
+			"the shared SKYBRIDGE_GW_TOKEN; any agent holding that token can register as any org and "+
+			"take over its client traffic.", cfg.AgentListen)
+		if n := distinctClientOrgs(cfg.Clients); n > 1 {
+			msg += fmt.Sprintf(" This gateway serves %d distinct organizations — configure wire mTLS "+
+				"(SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM) to close this gap before running multi-tenant.", n)
+		}
+		logger.Warn(msg)
 	}
 	go func() { errs <- gw.ListenAgents(ctx, agentLn) }()
 

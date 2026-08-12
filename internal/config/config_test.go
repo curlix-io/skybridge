@@ -515,6 +515,9 @@ func TestLoadGatewayDefaults(t *testing.T) {
 	if g.ClientConnPerMin != 0 {
 		t.Fatalf("expected default 0 conn/min, got %d", g.ClientConnPerMin)
 	}
+	if g.OrgMaxConcurrentClients != 0 {
+		t.Fatalf("expected default 0 (unlimited) concurrent-connection ceiling without a control plane URL, got %d", g.OrgMaxConcurrentClients)
+	}
 	if g.WireMtlsConfigured() {
 		t.Fatal("expected WireMtlsConfigured false without a CA bundle")
 	}
@@ -528,6 +531,21 @@ func TestLoadGatewayControlPlaneURLDefaultsRequireOrgIDAndRateLimit(t *testing.T
 	}
 	if g.ClientConnPerMin != 60 {
 		t.Fatalf("expected default rate limit 60 once a control plane URL is set, got %d", g.ClientConnPerMin)
+	}
+	if g.OrgMaxConcurrentClients != 1000 {
+		t.Fatalf("expected default concurrent-connection ceiling 1000 once a control plane URL is set, got %d", g.OrgMaxConcurrentClients)
+	}
+}
+
+// TestLoadGatewayExplicitOrgMaxConcurrentClientsOverridesDefault confirms an operator-set value
+// takes priority over the control-plane-URL auto-default, matching ClientConnPerMin's own
+// override behavior.
+func TestLoadGatewayExplicitOrgMaxConcurrentClientsOverridesDefault(t *testing.T) {
+	t.Setenv("SKYBRIDGE_GW_CONTROL_PLANE_URL", "https://app.example.com")
+	t.Setenv("SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS", "5")
+	g := LoadGateway()
+	if g.OrgMaxConcurrentClients != 5 {
+		t.Fatalf("expected explicit override 5, got %d", g.OrgMaxConcurrentClients)
 	}
 }
 

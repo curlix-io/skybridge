@@ -342,3 +342,58 @@ func TestNextBackoffDoublesUntilCap(t *testing.T) {
 		t.Fatalf("nextBackoff(reconnectMaxBackoff) = %v, want %v (stay capped)", got, reconnectMaxBackoff)
 	}
 }
+
+// TestRecoverConnStopsPanicAndLogs is the regression test for RunListener's/serveStream's panic
+// safety net: a panic inside a per-connection goroutine (e.g. a wire-engine parsing bug wire.SafeGo
+// didn't already turn into an error) must stop right here, not crash the whole agent process and
+// take down every other tenant's connection sharing it. Before recoverConn existed, calling this
+// function's body directly (a bare panic with nothing deferred above it) would have crashed the
+// test binary itself.
+func TestRecoverConnStopsPanicAndLogs(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	func() {
+		defer recoverConn(logger, nil)
+		panic("simulated parsing bug on malformed wire data")
+	}()
+
+	if !bytes.Contains(buf.Bytes(), []byte("recovered from panic")) {
+		t.Fatalf("expected a recovered-panic log line, got %q", buf.String())
+	}
+}
+
+// TestRecoverConnIncludesRemoteAddrWhenGiven confirms the client address is attributable in the
+// log line when the caller has one (RunListener's accept-loop goroutine does; serveStream doesn't).
+func TestRecoverConnIncludesRemoteAddrWhenGiven(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+	addr, err := net.ResolveTCPAddr("tcp", "203.0.113.5:12345")
+	if err != nil {
+		t.Fatalf("ResolveTCPAddr: %v", err)
+	}
+
+	func() {
+		defer recoverConn(logger, addr)
+		panic("simulated parsing bug")
+	}()
+
+	if !bytes.Contains(buf.Bytes(), []byte("203.0.113.5:12345")) {
+		t.Fatalf("expected the remote address in the log line, got %q", buf.String())
+	}
+}
+
+// TestRecoverConnNoopWithoutPanic confirms recoverConn is a harmless no-op on the normal,
+// non-panicking path — it must never itself log or otherwise misbehave absent a real panic.
+func TestRecoverConnNoopWithoutPanic(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	func() {
+		defer recoverConn(logger, nil)
+	}()
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no log output absent a panic, got %q", buf.String())
+	}
+}

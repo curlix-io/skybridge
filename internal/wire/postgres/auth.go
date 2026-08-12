@@ -87,6 +87,13 @@ func readStartupParams(cr *bufio.Reader) (map[string]string, error) {
 // sniffStartupCap bounds the StartupMessage size we will buffer (defensive; real ones are tiny).
 const sniffStartupCap = 64 << 10
 
+// maxAuthMessageBytes bounds a single upstream-auth-handshake message's payload (defensive; real
+// AuthenticationX/ErrorResponse/SASL-challenge messages during origination are at most a few KB).
+// Without this, a corrupted or malicious upstream sending a garbage length field in the 4-byte
+// header (up to ~4 GiB, since it's a raw uint32 off the wire) would trigger an allocation of that
+// size before io.ReadFull ever gets a chance to fail on the short read.
+const maxAuthMessageBytes = 1 << 20
+
 // requestClientPassword asks the connected client for a cleartext password and returns it. It reads
 // the client's reply from br (the same buffered reader negotiateStartup/readStartupParams already use
 // on the client connection) so no buffered bytes are dropped. The returned value is the opaque
@@ -228,7 +235,7 @@ func readBackendMessage(br *bufio.Reader) (byte, []byte, error) {
 		return 0, nil, err
 	}
 	length := binary.BigEndian.Uint32(hdr[1:5])
-	if length < 4 {
+	if length < 4 || length > maxAuthMessageBytes {
 		return 0, nil, errProtocol
 	}
 	payload := make([]byte, int(length)-4)

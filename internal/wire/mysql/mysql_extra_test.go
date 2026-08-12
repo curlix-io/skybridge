@@ -274,6 +274,29 @@ func TestServerToClient_ColumnCountParseFailureForwardsRaw(t *testing.T) {
 	}
 }
 
+// TestServerToClient_HugeColumnCountRejectedNotAllocated is the regression test for the
+// maxResultColumns cap: before it existed, a single 9-byte lenenc-encoded column-count packet
+// claiming close to the full uint64 range would drive `make([]mask.Column, 0, colCount)` straight
+// into a runtime "makeslice: cap out of range" panic — one malicious/compromised upstream sending
+// this once would have crashed the whole agent process for every tenant sharing it (there was no
+// recover() anywhere on this path either, before wire.SafeGo). It must now surface as a returned
+// error instead.
+func TestServerToClient_HugeColumnCountRejectedNotAllocated(t *testing.T) {
+	s := &state{caps: 0, queries: make(chan struct{}, 1)}
+	s.queries <- struct{}{}
+
+	var stream bytes.Buffer
+	hugeColCount := appendLenEncInt(nil, ^uint64(0)) // 0xFFFFFFFFFFFFFFFF, the worst case
+	stream.Write(pkt(1, hugeColCount))
+
+	var out bytes.Buffer
+	sb := bufio.NewReader(&stream)
+	err := s.serverToClient(context.Background(), sb, &out, mask.Noop{}, wire.NoopRecorder{})
+	if err == nil {
+		t.Fatal("expected an error for a column count over maxResultColumns, got nil")
+	}
+}
+
 // capturingMasker records the mask.Column slice it was called with, for asserting what identity a
 // caller actually resolved (as opposed to what MaskRow does with it).
 type capturingMasker struct {

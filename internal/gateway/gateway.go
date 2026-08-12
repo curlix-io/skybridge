@@ -36,13 +36,14 @@ const storeTimeout = 5 * time.Second
 
 // Gateway holds the live agent registry and relays client connections over agent tunnels.
 type Gateway struct {
-	authToken    string
-	log          *slog.Logger
-	store        Store
-	admitter     WireAdmitter
-	resolver     TargetResolver
-	requireOrgID bool
-	connLimiter  ConnRateLimiter
+	authToken      string
+	log            *slog.Logger
+	store          Store
+	admitter       WireAdmitter
+	resolver       TargetResolver
+	requireOrgID   bool
+	connLimiter    ConnRateLimiter
+	orgConnLimiter OrgConnLimiter
 
 	mu        sync.RWMutex
 	agents    map[string]*agentConn // agent id -> connection
@@ -61,14 +62,15 @@ func New(authToken string, logger *slog.Logger) *Gateway {
 		logger = slog.Default()
 	}
 	return &Gateway{
-		authToken:   authToken,
-		log:         logger,
-		store:       NoopStore{},
-		admitter:    NoopWireAdmitter{},
-		resolver:    NoopTargetResolver{},
-		connLimiter: NoopConnRateLimiter{},
-		agents:      make(map[string]*agentConn),
-		orgAgents:   make(map[string]*agentConn),
+		authToken:      authToken,
+		log:            logger,
+		store:          NoopStore{},
+		admitter:       NoopWireAdmitter{},
+		resolver:       NoopTargetResolver{},
+		connLimiter:    NoopConnRateLimiter{},
+		orgConnLimiter: NoopOrgConnLimiter{},
+		agents:         make(map[string]*agentConn),
+		orgAgents:      make(map[string]*agentConn),
 	}
 }
 
@@ -109,6 +111,15 @@ func (g *Gateway) SetConnRateLimiter(l ConnRateLimiter) {
 		l = NoopConnRateLimiter{}
 	}
 	g.connLimiter = l
+}
+
+// SetOrgConnLimiter installs a per-org concurrent-connection ceiling (defaults to unlimited) — see
+// OrgConnLimiter's doc comment for why this is a distinct control from SetConnRateLimiter.
+func (g *Gateway) SetOrgConnLimiter(l OrgConnLimiter) {
+	if l == nil {
+		l = NoopOrgConnLimiter{}
+	}
+	g.orgConnLimiter = l
 }
 
 // ListenAgents accepts agent (egress) connections until ctx is cancelled. Pass a tls.Config-wrapped
@@ -337,6 +348,13 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 			g.logRejectedClient(target, clientAddr, orgID, err)
 			return err
 		}
+	}
+	if g.orgConnLimiter != nil {
+		if !g.orgConnLimiter.Acquire(orgID) {
+			g.logRejectedClient(target, clientAddr, orgID, ErrOrgConnLimitReached)
+			return ErrOrgConnLimitReached
+		}
+		defer g.orgConnLimiter.Release(orgID)
 	}
 	if g.admitter != nil {
 		actx, cancel := context.WithTimeout(context.Background(), storeTimeout)
