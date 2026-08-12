@@ -447,6 +447,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		}
 	}
 
+	wireMtlsEnrollHintLogged := false
 	for ctx.Err() == nil {
 		if cfg.WireMtlsIamAuthEnabled {
 			material, merr := wiremtls.EnsureMaterialViaIAM(ctx,
@@ -506,6 +507,14 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 				IdentitySecretARN: cfg.WireMtlsIdentitySecretARN,
 			})
 			if merr != nil {
+				if !wireMtlsEnrollHintLogged && cfg.WireMtlsIdentitySecretARN == "" {
+					wireMtlsEnrollHintLogged = true
+					logger.Warn("wire mTLS enroll: SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN is not set — if " +
+						"this task just replaced a previous one, the enrollment token was likely already " +
+						"consumed by that earlier task and (with no identity secret to persist the issued " +
+						"cert) this one has no way to reuse it; see " +
+						"README.md#keeping-mtls-identity-alive-across-redeploys")
+				}
 				logger.Warn(fmt.Sprintf("wire mTLS enroll: %v (retrying)", merr))
 				if !sleep(ctx, 3*time.Second) {
 					return nil
