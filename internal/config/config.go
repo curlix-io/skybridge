@@ -190,7 +190,12 @@ type Agent struct {
 	WireMtlsEnrollToken string // SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN (one-time token to bootstrap the first cert)
 	WireMtlsTLSDir      string // SKYBRIDGE_WIRE_MTLS_TLS_DIR (persists ca.pem/client.crt/client.key)
 	WireMtlsCABundlePEM []byte // SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM / _FILE (pins the enroll call's server TLS)
-	WireMtlsTrustDomain string // SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN (cosmetic; default wiremtls.DefaultTrustDomain)
+	// WireMtlsTrustDomain is cosmetic (placed in the CSR SAN; the gateway's CA sets the
+	// authoritative identity on signing) — sourced from the single SKYBRIDGE_TRUST_DOMAIN env var
+	// shared with Edge.TrustDomain/StudioTrustDomain below. Empty falls back to this identity's own
+	// default (wiremtls.DefaultTrustDomain) rather than one shared literal, so the three identities
+	// stay distinguishable when nobody sets SKYBRIDGE_TRUST_DOMAIN at all.
+	WireMtlsTrustDomain string
 	// WireMtlsIdentitySecretARN mirrors the issued cert to this AWS Secrets Manager secret (see
 	// certstore package) so a replaced task recovers its identity without a fresh enroll token.
 	// WireMtlsIamAuthEnabled below is a stronger alternative for this same problem — no static
@@ -304,7 +309,7 @@ func LoadAgent() Agent {
 		WireMtlsEnrollToken:       env("SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN", ""),
 		WireMtlsTLSDir:            env("SKYBRIDGE_WIRE_MTLS_TLS_DIR", ""),
 		WireMtlsCABundlePEM:       pemFromEnv("SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_FILE"),
-		WireMtlsTrustDomain:       env("SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN", ""),
+		WireMtlsTrustDomain:       env("SKYBRIDGE_TRUST_DOMAIN", ""),
 		WireMtlsIdentitySecretARN: env("SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN", ""),
 
 		WireMtlsClientCertPEM: pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_FILE"),
@@ -380,7 +385,11 @@ type Edge struct {
 	TLSDir       string // directory holding/persisting ca.pem, client.crt, client.key
 	EnrollTarget string // Enroll endpoint host:port (defaults to GatewayAddr)
 	EnrollToken  string // one-time enrollment token
-	TrustDomain  string // SPIFFE trust domain placed in the CSR SAN (cosmetic)
+	// TrustDomain is cosmetic (placed in the CSR SAN only; the gateway's CA sets the authoritative
+	// identity on signing) — sourced from the single SKYBRIDGE_TRUST_DOMAIN env var, shared with
+	// StudioTrustDomain/WireProxy.WireMtlsTrustDomain below. Empty falls back to this identity's own
+	// default (transport.DefaultTrustDomain) rather than one shared literal.
+	TrustDomain string
 	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a
 	// replaced ECS task recovers its identity instead of re-enrolling with an already-used one-time
 	// token. See SKYBRIDGE_IDENTITY_SECRET_ARN.
@@ -407,7 +416,9 @@ type Edge struct {
 	StudioDBUser          string
 	StudioDBPassword      string
 	StudioTLSDir          string
-	StudioTrustDomain     string
+	// StudioTrustDomain is cosmetic (see TrustDomain above) — also sourced from SKYBRIDGE_TRUST_DOMAIN.
+	// Empty falls back to studiotransport's own default rather than one shared literal.
+	StudioTrustDomain string
 	// StudioIdentitySecretARN mirrors StudioTLSDir's cert to Secrets Manager. See
 	// SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN.
 	StudioIdentitySecretARN string
@@ -441,7 +452,7 @@ func LoadEdge() Edge {
 		TLSDir:                  env("SKYBRIDGE_TLS_DIR", ""),
 		EnrollTarget:            env("SKYBRIDGE_ENROLL_GATEWAY", hostPort(key.GatewayHost, "7101")),
 		EnrollToken:             env("SKYBRIDGE_ENROLLMENT_TOKEN", key.EnrollmentToken),
-		TrustDomain:             env("SKYBRIDGE_SPIFFE_TRUST_DOMAIN", ""),
+		TrustDomain:             env("SKYBRIDGE_TRUST_DOMAIN", ""),
 		IdentitySecretARN:       env("SKYBRIDGE_IDENTITY_SECRET_ARN", ""),
 		AWSRegion:               env("SKYBRIDGE_AWS_REGION", key.AWSRegion),
 		AWSAssumeRoleARN:        env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
@@ -459,7 +470,7 @@ func LoadEdge() Edge {
 		StudioDBUser:            env("SKYBRIDGE_STUDIO_DB_USER", ""),
 		StudioDBPassword:        env("SKYBRIDGE_STUDIO_DB_PASSWORD", ""),
 		StudioTLSDir:            env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
-		StudioTrustDomain:       env("SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN", "skybridge.studio-agent"),
+		StudioTrustDomain:       env("SKYBRIDGE_TRUST_DOMAIN", ""),
 		StudioIdentitySecretARN: env("SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN", ""),
 		WireProxy:               LoadAgent(),
 	}

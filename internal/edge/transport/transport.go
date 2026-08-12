@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"sync"
 	"time"
 
@@ -26,6 +27,16 @@ import (
 
 	"github.com/curlix-io/skybridge/internal/edge"
 )
+
+// jitteredBackoff returns a random duration in [d/2, d) so many edges losing the same gateway at
+// once don't all reconnect in lockstep (thundering herd).
+func jitteredBackoff(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int64N(int64(half+1)))
+}
 
 // Version reported to the gateway on Register.
 const Version = "0.1.0"
@@ -114,7 +125,7 @@ func (c *Client) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(backoff):
+		case <-time.After(jitteredBackoff(backoff)):
 		}
 		if backoff *= 2; backoff > c.cfg.MaxBackoff {
 			backoff = c.cfg.MaxBackoff

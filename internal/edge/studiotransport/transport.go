@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"math/rand/v2"
 	"strings"
 	"sync"
 	"time"
@@ -17,8 +18,19 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
+	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
 )
+
+// jitteredBackoff returns a random duration in [d/2, d) so many edges losing the same Studio
+// Gateway at once don't all reconnect in lockstep (thundering herd).
+func jitteredBackoff(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int64N(int64(half+1)))
+}
 
 const Version = "0.2.0"
 
@@ -30,13 +42,21 @@ type tlsMaterial struct {
 
 // Config is the Studio Gateway call-home client configuration.
 type Config struct {
-	Target      string
-	TenantID    string
-	AgentID     string
-	Token       string
-	Insecure    bool
-	Reconnect   bool
-	MaxBackoff  time.Duration
+	Target     string
+	TenantID   string
+	AgentID    string
+	Token      string
+	Insecure   bool
+	Reconnect  bool
+	MaxBackoff time.Duration
+
+	// gRPC keepalive: detects a dead/killed Studio Gateway (crash, task replacement) without
+	// waiting on OS TCP keepalive or an incidental LB idle-timeout reset. Mirrors
+	// internal/edge/transport.Config's fields — keep both in sync with the gateway's server-side
+	// keepalive policy.
+	KeepaliveTime    time.Duration // ping interval when the stream is idle (default 20s)
+	KeepaliveTimeout time.Duration // time to wait for a ping ack before declaring the peer dead (default 10s)
+
 	MaxSessions int
 	Targets     []Target
 	DBUser      string // fallback when target.user empty
@@ -67,6 +87,12 @@ func New(cfg Config, logger *slog.Logger) *Client {
 	}
 	if cfg.MaxBackoff <= 0 {
 		cfg.MaxBackoff = 30 * time.Second
+	}
+	if cfg.KeepaliveTime <= 0 {
+		cfg.KeepaliveTime = 20 * time.Second
+	}
+	if cfg.KeepaliveTimeout <= 0 {
+		cfg.KeepaliveTimeout = 10 * time.Second
 	}
 	if cfg.AgentID == "" {
 		cfg.AgentID = "studio-agent"
@@ -101,7 +127,7 @@ func (c *Client) Run(ctx context.Context) error {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(backoff):
+		case <-time.After(jitteredBackoff(backoff)):
 		}
 		if backoff *= 2; backoff > c.cfg.MaxBackoff {
 			backoff = c.cfg.MaxBackoff
@@ -123,7 +149,14 @@ func (c *Client) dial(material *tlsMaterial) (*grpc.ClientConn, error) {
 	default:
 		creds = credentials.NewTLS(nil)
 	}
-	return grpc.NewClient(c.cfg.Target, grpc.WithTransportCredentials(creds))
+	return grpc.NewClient(c.cfg.Target,
+		grpc.WithTransportCredentials(creds),
+		grpc.WithKeepaliveParams(keepalive.ClientParameters{
+			Time:                c.cfg.KeepaliveTime,
+			Timeout:             c.cfg.KeepaliveTimeout,
+			PermitWithoutStream: true, // Connect is a single long-lived, often-idle stream
+		}),
+	)
 }
 
 func (c *Client) serve(ctx context.Context, client studiov1.StudioGatewayClient, useBearer bool) error {

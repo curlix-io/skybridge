@@ -1,22 +1,63 @@
 # Skybridge
 
-**Skybridge** is a small Go data plane for **governed native database access**. An egress-only agent
-sits in front of your database, speaks the native client protocols (`psql`, `mysql`, `mongosh`, app
-drivers), and **masks PII at the source** — so raw rows never leave your network.
+[![CI](https://github.com/curlix-io/skybridge/actions/workflows/ci.yml/badge.svg)](https://github.com/curlix-io/skybridge/actions/workflows/ci.yml)
+[![Go Report Card](https://goreportcard.com/badge/github.com/curlix-io/skybridge)](https://goreportcard.com/report/github.com/curlix-io/skybridge)
+[![Latest release](https://img.shields.io/github/v/release/curlix-io/skybridge)](https://github.com/curlix-io/skybridge/releases)
+[![License](https://img.shields.io/github/license/curlix-io/skybridge)](./LICENSE)
 
-- Stdlib-only wire-proxy core — manual protocol parsing + masking, no third-party deps.
-- Content-aware masking — pluggable remote masker + a column overlay you define.
-- Anything an engine can't parse is forwarded **unmasked, never corrupted**.
-- One binary (`skybridge`, roles picked by the first argument) also dials home for **live read-only
-  AWS reads** in its `edge` role, so everything that must run inside your network is a single
-  install.
+**Jump to:** [1. What is Skybridge?](#1-what-is-skybridge) ·
+[2. How it works & how to run it](#2-how-it-works--how-to-run-it) ·
+[Quick start](#quick-start) · [How masking works](#how-masking-works) · [Configure](#configure) ·
+[Performance and tuning](#performance-and-tuning) · [The `edge` role](#the-edge-role) ·
+[Layout](#layout) · [REDACTION.md](./REDACTION.md) (deep dive, with a live demo GIF)
 
-**Jump to:** [How it works](#how-it-works) · [Quick start](#quick-start) ·
-[How masking works](#how-masking-works) · [Configure](#configure) ·
-[Performance and tuning](#performance-and-tuning) ·
-[The `edge` role](#the-edge-role) · [Layout](#layout) ·
-[Database support](#database-support-at-a-glance) ·
-[REDACTION.md](./REDACTION.md) (deep dive, with a live demo GIF)
+---
+
+## 1. What is Skybridge?
+
+**TL;DR:** Skybridge sits between your apps/tools and your database. People and tools still connect
+to it exactly like they would to the real database — but before any row of data leaves your network,
+Skybridge blacks out things like emails, phone numbers, and SSNs. Nothing that isn't already inside
+your network ever gets a direct line to your raw data.
+
+Think of it as a one-way mirror in front of your database: everyone on the outside still sees rows
+of data come back when they run a query — they just don't see the sensitive parts.
+
+```mermaid
+flowchart LR
+    person["👤 Person or app<br/>running a normal query"]
+    sb["🛡️ Skybridge<br/>(lives inside your network)"]
+    db[("🗄️ Your database")]
+
+    person -->|"query"| sb
+    sb -->|"query"| db
+    db -->|"raw rows"| sb
+    sb -->|"same rows,<br/>sensitive fields blacked out"| person
+```
+
+**Why teams run this in front of a database:**
+
+- **Nobody has to trust every tool/person to handle raw PII carefully.** The masking happens once,
+  in one place, automatically — not by convention, not by hoping every script/dashboard/analyst
+  redacts things correctly on their own.
+- **It doesn't dial in from the outside.** Skybridge only ever calls *out* from inside your network
+  — nothing external is ever given a door into your database. That egress-only property is true no
+  matter which of the three setups (below) you use.
+- **It doesn't touch the database itself.** No proxy driver to install, no schema changes, no
+  extension to load — it's a small program that sits in front of the database and speaks the same
+  protocol a normal client would.
+- **If something goes wrong, it fails safe.** If Skybridge can't understand a piece of data, it
+  passes it through untouched rather than guessing, corrupting it, or crashing the connection.
+
+**Who this is for:** security/compliance-minded teams who need a real answer to "who can see raw
+customer PII", and engineers who want that answer to require zero changes to how people already
+query the database (same tools, same drivers, same queries — `psql`, `mysql`, `mongosh`, your app's
+existing DB driver).
+
+Read on for the technical detail — how it's deployed, how the masking actually works layer by layer,
+and how to run it yourself.
+
+## 2. How it works & how to run it
 
 ### Database support at a glance
 
@@ -32,7 +73,7 @@ driver) straight at the agent and it masks rows in flight. Snowflake speaks HTTP
 TCP protocol, so there's no handshake to transparently proxy — it's supported only via the
 one-shot query-exec path (`edge` role), sharing the same masking pipeline.
 
-## How it works
+### Deployment shapes
 
 ```mermaid
 flowchart LR
@@ -71,11 +112,11 @@ dials out, nothing dials in):
   wire proxy in the same process. One install for everything that must run inside your network. See
   [The `edge` role](#the-edge-role) below.
 
-## Quick start
+### Quick start
 
 Put the agent in front of your database and point a native client at it.
 
-### Install via Homebrew
+#### Install via Homebrew
 
 ```sh
 brew tap curlix-io/skybridge https://github.com/curlix-io/skybridge
@@ -92,7 +133,7 @@ container image is published separately to
 [`scripts/push-ghcr.sh`](./scripts/push-ghcr.sh)). `skybridge edge` is the role most
 customers run to connect to Curlix — see [The `edge` role](#the-edge-role).
 
-### Fastest path: column redaction, no external services
+#### Fastest path: column redaction, no external services
 
 Needs only Go ≥ 1.26 — no Docker, no Presidio, no network calls. This uses the column-name
 `Overlay` layer only (see [How masking works](#how-masking-works)); it won't catch PII embedded in
@@ -116,7 +157,7 @@ Then connect a native client through the agent (listening on `:15432` by default
 psql "postgres://user:pass@localhost:15432/appdb"
 ```
 
-### Full path: add content-detection masking (catches PII in free text too)
+#### Full path: add content-detection masking (catches PII in free text too)
 
 The column overlay above only matches by column *name*. To also catch PII-shaped values wherever
 they appear — free-text notes, JSON blobs, unlisted columns — layer on the `Remote` masker, a thin
@@ -147,7 +188,7 @@ the wire proxy alone, no outbound gateway dial. That keeps a full-featured insta
 by default since it needs external services this repo doesn't ship (an LLM endpoint + control-plane
 `pii-path-labels` URL). Bring it in with `docker compose --profile labeller up -d`.
 
-### Test data for Postgres, MySQL, and MongoDB
+#### Test data for Postgres, MySQL, and MongoDB
 
 [`examples/demo/`](./examples/demo/) ships the same small, fabricated customer dataset — name,
 email, SSN, a free-text note, a JSON blob — seeded identically into Postgres
@@ -165,7 +206,7 @@ Skybridge. Verify its current license/schema on the dataset page before using it
 built-in loader for it in this repo, so you'd write a small script to convert its rows into
 `INSERT`/`insertMany` statements for whichever database you're testing against.
 
-### Docker-based end-to-end demos
+#### Docker-based end-to-end demos
 
 Two standalone Docker Compose setups exercise real code paths against real containers — each is
 self-contained (its own `docker-compose.yml`, no shared state with the demos above):
@@ -199,7 +240,7 @@ docker compose up --build      # watch the `runner` container's logs for PASS/FA
 docker compose down
 ```
 
-## How masking works
+### How masking works
 
 > For a deeper dive — including a live demo GIF, the anonymizer-strategy config, and exactly what's
 > live vs. groundwork in the path-scoped labels layer — see [REDACTION.md](./REDACTION.md).
@@ -256,7 +297,7 @@ token` map (`SKYBRIDGE_PII_OVERLAY`, or fetched dynamically from the control pla
 [Dynamic PII overlay](#dynamic-pii-overlay-fetched-from-your-control-plane)). No path awareness: `total`
 under `order` and `total` under `user` share one rule.
 
-### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`)
+#### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`)
 
 `mask.PathOverlay` (`internal/mask/pathoverlay.go`) is wired into the live chain in
 `buildMaskerWithOverlay` (`internal/agent/agent.go`) whenever `SKYBRIDGE_PATH_LABEL_URL` is set,
@@ -288,7 +329,7 @@ column name — that skips the network round trip for fields a human has already
 layers run on **every** row/document by default; there's no separate "structured mode" vs.
 "unstructured mode" to configure.
 
-### Redaction in action: SQL rows, JSON, BSON, and free text
+#### Redaction in action: SQL rows, JSON, BSON, and free text
 
 Same masking chain, four shapes of data. Left is what the database returns; right is what the
 client actually receives.
@@ -332,7 +373,7 @@ one-shot exec path and all three wire proxies today, Postgres's requiring
 Only `profile.email` is redacted — `order.total` and `profile.name` carry no label, so they fall
 through every layer untouched, exactly as the fallthrough-on-miss contract guarantees.
 
-### Roadmap: AI-based path labelling (proposed)
+#### Roadmap: AI-based path labelling (proposed)
 
 Today, a `PathOverlay` label only exists if a human sets it, or if Presidio's content detector
 happens to fire on a sampled leaf value during live query traffic (`internal/edge/dbquery/mask.go`'s
@@ -396,7 +437,7 @@ See the design doc for the full rationale, vendor/OSS landscape survey, and how 
 groundwork for a streaming/CDC masking extension (a schema-registry-keyed `ObjectID` instead of a
 live wire-protocol one).
 
-## Configure
+### Configure
 
 Set these as environment variables (full list in `internal/config/config.go`):
 
@@ -432,7 +473,7 @@ Set these as environment variables (full list in `internal/config/config.go`):
 
 Switch databases by changing `SKYBRIDGE_DB_TYPE`; everything else is identical.
 
-### Credential handoff (the client never holds a database password)
+#### Credential handoff (the client never holds a database password)
 
 By default the agent forwards the client's authentication to the database verbatim, so the native
 client presents a real database credential. With **credential injection** enabled, the client instead
@@ -496,7 +537,7 @@ For production provide a real cert via `SKYBRIDGE_CLIENT_TLS_CERT_FILE` / `SKYBR
 so clients can `sslmode=verify-full`. With client TLS off the agent logs a warning that the token is
 sent in the client's cleartext password — keep that link on a trusted hop.
 
-### Upstream TLS (encrypt the agent → database hop)
+#### Upstream TLS (encrypt the agent → database hop)
 
 By default the agent speaks plaintext to the upstream over the trusted in-network path. Set
 `SKYBRIDGE_UPSTREAM_TLS` to negotiate TLS with the database after dialing (Postgres `SSLRequest`),
@@ -536,7 +577,7 @@ differently:
   while `prefer` falls back to a plaintext upstream. If the *client* itself speaks TLS to the agent,
   that connection drops to transparent passthrough (no masking, no upstream-TLS interception).
 
-### Dynamic PII overlay (fetched from your control plane)
+#### Dynamic PII overlay (fetched from your control plane)
 
 `SKYBRIDGE_PII_OVERLAY` / `SKYBRIDGE_PII_OVERLAY_FILE` are static. To keep native-client masking in
 sync with column rules your own admin surface manages, point the agent at an HTTP endpoint instead:
@@ -557,9 +598,9 @@ failed fetch leaves the last-known (or static `SKYBRIDGE_PII_OVERLAY`) rules int
 `SKYBRIDGE_PII_OVERLAY_ORG_HEADER` if you need a header name other than the default
 `X-Organization-Id`.
 
-## Performance and tuning
+### Performance and tuning
 
-### Benchmarks
+#### Benchmarks
 
 The masking chain (`internal/mask`) is the only per-row work the agent does beyond copying bytes —
 wire parsing itself is a single pass over the protocol frame. `internal/mask/bench_test.go` benchmarks
@@ -586,7 +627,7 @@ per-query latency is dominated by the upstream database round trip and, if confi
 local masking overhead per row is sub-microsecond and not the bottleneck in any realistic deployment;
 size the remote masker (Presidio) and the database itself for throughput, not this layer.
 
-### Tuning environment variables
+#### Tuning environment variables
 
 All of the following are optional; every one has a working default. See
 `internal/config/config.go` for the authoritative list (this repo's docstrings are the source of
@@ -608,7 +649,7 @@ truth — the table below is a summary, not a replacement).
 Everything else in `internal/config/config.go` (TLS, credential exchange, enrollment) is
 correctness/security configuration, not a performance knob.
 
-## Layout
+### Layout
 
 ```
 cmd/skybridge           single binary; role picked by the first argument — agent (listener OR
@@ -690,7 +731,7 @@ Point one of these at a secret ARN the task's IAM role can `GetSecretValue`/`Put
 (`internal/certstore`), and the edge mirrors its cert there on first enrollment, then loads from it
 on every subsequent start.
 
-## Docs
+### Docs
 
 - [`CONTRACT.md`](./CONTRACT.md) — the tunnel wire format and the gateway → control-plane HTTP
   session contract.
@@ -698,6 +739,12 @@ on every subsequent start.
   shape locally and exposing it via ngrok for an external tester.
 - All `SKYBRIDGE_*` settings are documented inline in `internal/config/config.go`.
 
-## License
+### Contributing
+
+Bug reports, feature requests, and PRs are welcome — see [`CONTRIBUTING.md`](./CONTRIBUTING.md) for
+dev setup and guidelines, and [`SECURITY.md`](./SECURITY.md) to report a vulnerability privately.
+This project follows the [Contributor Covenant](./CODE_OF_CONDUCT.md).
+
+### License
 
 Apache-2.0 — see [`LICENSE`](./LICENSE).

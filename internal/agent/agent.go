@@ -15,6 +15,7 @@ import (
 	"crypto/tls"
 	"fmt"
 	"log/slog"
+	"math/rand/v2"
 	"net"
 	"time"
 
@@ -32,7 +33,33 @@ import (
 const (
 	dialTimeout       = 10 * time.Second
 	heartbeatInterval = 15 * time.Second
+
+	// RunTunnel's reconnect/retry backoff: starts at reconnectBaseBackoff, doubles on every
+	// consecutive failure (wire-mTLS enroll, gateway dial), resets once a gateway connection is
+	// actually established. Capped at reconnectMaxBackoff so a sustained outage settles into a
+	// steady retry cadence instead of escalating forever.
+	reconnectBaseBackoff = 1 * time.Second
+	reconnectMaxBackoff  = 30 * time.Second
 )
+
+// jitteredBackoff returns a random duration in [d/2, d) — full-ish jitter so many agents hitting the
+// same dead gateway/enroll endpoint at once don't all retry in lockstep (thundering herd).
+func jitteredBackoff(d time.Duration) time.Duration {
+	if d <= 0 {
+		return 0
+	}
+	half := d / 2
+	return half + time.Duration(rand.Int64N(int64(half+1)))
+}
+
+// nextBackoff doubles d, capped at reconnectMaxBackoff.
+func nextBackoff(d time.Duration) time.Duration {
+	d *= 2
+	if d > reconnectMaxBackoff {
+		return reconnectMaxBackoff
+	}
+	return d
+}
 
 // Deps are injectable collaborators (overridable in tests); zero values fall back to real defaults.
 type Deps struct {
@@ -448,6 +475,16 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 	}
 
 	wireMtlsEnrollHintLogged := false
+	backoff := reconnectBaseBackoff
+	// retryAfterFailure sleeps a jittered backoff (escalating on each consecutive failure) and
+	// reports whether ctx is still alive. Every failure branch below (wire-mTLS enroll, gateway
+	// dial) routes through this instead of a fixed sleep, so a sustained outage settles into a
+	// bounded retry cadence rather than hammering the endpoint every few seconds forever.
+	retryAfterFailure := func() bool {
+		ok := sleep(ctx, jitteredBackoff(backoff))
+		backoff = nextBackoff(backoff)
+		return ok
+	}
 	for ctx.Err() == nil {
 		if cfg.WireMtlsIamAuthEnabled {
 			material, merr := wiremtls.EnsureMaterialViaIAM(ctx,
@@ -464,7 +501,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 			)
 			if merr != nil {
 				logger.Warn(fmt.Sprintf("wire mTLS IAM enroll: %v (retrying)", merr))
-				if !sleep(ctx, 3*time.Second) {
+				if !retryAfterFailure() {
 					return nil
 				}
 				continue
@@ -473,7 +510,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 				tlsCfg, terr := material.ClientTLSConfig()
 				if terr != nil {
 					logger.Warn(fmt.Sprintf("wire mTLS material invalid: %v (retrying)", terr))
-					if !sleep(ctx, 3*time.Second) {
+					if !retryAfterFailure() {
 						return nil
 					}
 					continue
@@ -489,7 +526,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 			tlsCfg, terr := material.ClientTLSConfig()
 			if terr != nil {
 				logger.Warn(fmt.Sprintf("wire mTLS preset cert invalid: %v (retrying)", terr))
-				if !sleep(ctx, 3*time.Second) {
+				if !retryAfterFailure() {
 					return nil
 				}
 				continue
@@ -516,7 +553,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 						"README.md#keeping-mtls-identity-alive-across-redeploys")
 				}
 				logger.Warn(fmt.Sprintf("wire mTLS enroll: %v (retrying)", merr))
-				if !sleep(ctx, 3*time.Second) {
+				if !retryAfterFailure() {
 					return nil
 				}
 				continue
@@ -525,7 +562,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 				tlsCfg, terr := material.ClientTLSConfig()
 				if terr != nil {
 					logger.Warn(fmt.Sprintf("wire mTLS material invalid: %v (retrying)", terr))
-					if !sleep(ctx, 3*time.Second) {
+					if !retryAfterFailure() {
 						return nil
 					}
 					continue
@@ -537,11 +574,15 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		conn, err := dialer.DialContext(ctx, "tcp", cfg.GatewayAddr)
 		if err != nil {
 			logger.Warn(fmt.Sprintf("dial gateway %s: %v (retrying)", cfg.GatewayAddr, err))
-			if !sleep(ctx, 3*time.Second) {
+			if !retryAfterFailure() {
 				return nil
 			}
 			continue
 		}
+		// A successful dial means the gateway is reachable again — reset the backoff clock so the
+		// next *actual* failure starts escalating from the base again, rather than staying stuck at
+		// whatever it climbed to during the outage that just ended.
+		backoff = reconnectBaseBackoff
 		mode := "bearer-token"
 		if wireTLS != nil {
 			conn = tls.Client(conn, wireTLS)
@@ -551,7 +592,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		if err := ServeTunnelConn(ctx, conn, cfg, deps, logger); err != nil && ctx.Err() == nil {
 			logger.Warn(fmt.Sprintf("tunnel session ended: %v (reconnecting)", err))
 		}
-		if !sleep(ctx, 2*time.Second) {
+		if !sleep(ctx, jitteredBackoff(reconnectBaseBackoff)) {
 			return nil
 		}
 	}

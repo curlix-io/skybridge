@@ -307,3 +307,38 @@ func TestSleepReturnsFalseOnCancelledContext(t *testing.T) {
 		t.Fatal("expected sleep to report false on an already-cancelled context")
 	}
 }
+
+func TestJitteredBackoffStaysInHalfOpenRange(t *testing.T) {
+	d := 10 * time.Second
+	for i := 0; i < 200; i++ {
+		got := jitteredBackoff(d)
+		if got < d/2 || got >= d {
+			t.Fatalf("jitteredBackoff(%v) = %v, want in [%v, %v)", d, got, d/2, d)
+		}
+	}
+}
+
+func TestJitteredBackoffZeroIsZero(t *testing.T) {
+	if got := jitteredBackoff(0); got != 0 {
+		t.Fatalf("jitteredBackoff(0) = %v, want 0", got)
+	}
+}
+
+func TestNextBackoffDoublesUntilCap(t *testing.T) {
+	d := reconnectBaseBackoff
+	for d < reconnectMaxBackoff {
+		next := nextBackoff(d)
+		want := d * 2
+		if want > reconnectMaxBackoff {
+			want = reconnectMaxBackoff
+		}
+		if next != want {
+			t.Fatalf("nextBackoff(%v) = %v, want %v", d, next, want)
+		}
+		d = next
+	}
+	// Once at the cap, it must stay there rather than overflow past it.
+	if got := nextBackoff(reconnectMaxBackoff); got != reconnectMaxBackoff {
+		t.Fatalf("nextBackoff(reconnectMaxBackoff) = %v, want %v (stay capped)", got, reconnectMaxBackoff)
+	}
+}

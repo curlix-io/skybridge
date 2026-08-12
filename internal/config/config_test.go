@@ -434,8 +434,29 @@ func TestLoadEdgeDefaultsAndFallbacks(t *testing.T) {
 	if e.StudioMaxSessions != 8 {
 		t.Fatalf("expected default StudioMaxSessions 8, got %d", e.StudioMaxSessions)
 	}
-	if e.StudioTrustDomain != "skybridge.studio-agent" {
-		t.Fatalf("expected default studio trust domain, got %q", e.StudioTrustDomain)
+	// StudioTrustDomain is cosmetic and shared with TrustDomain/WireMtlsTrustDomain via the single
+	// SKYBRIDGE_TRUST_DOMAIN env var — LoadEdge leaves it empty when unset rather than hardcoding a
+	// default here; studiotransport.spiffeID applies its own default when given "".
+	if e.StudioTrustDomain != "" {
+		t.Fatalf("expected empty studio trust domain when SKYBRIDGE_TRUST_DOMAIN is unset, got %q", e.StudioTrustDomain)
+	}
+}
+
+// TestLoadEdgeTrustDomainSharedAcrossIdentities verifies SKYBRIDGE_TRUST_DOMAIN feeds
+// TrustDomain, StudioTrustDomain, and WireProxy.WireMtlsTrustDomain identically — the single knob
+// that replaced SKYBRIDGE_SPIFFE_TRUST_DOMAIN / SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN /
+// SKYBRIDGE_WIRE_MTLS_TRUST_DOMAIN.
+func TestLoadEdgeTrustDomainSharedAcrossIdentities(t *testing.T) {
+	t.Setenv("SKYBRIDGE_TRUST_DOMAIN", "acme.example")
+	e := LoadEdge()
+	if e.TrustDomain != "acme.example" {
+		t.Fatalf("expected TrustDomain %q, got %q", "acme.example", e.TrustDomain)
+	}
+	if e.StudioTrustDomain != "acme.example" {
+		t.Fatalf("expected StudioTrustDomain %q, got %q", "acme.example", e.StudioTrustDomain)
+	}
+	if e.WireProxy.WireMtlsTrustDomain != "acme.example" {
+		t.Fatalf("expected WireProxy.WireMtlsTrustDomain %q, got %q", "acme.example", e.WireProxy.WireMtlsTrustDomain)
 	}
 }
 
