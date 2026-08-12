@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"errors"
+	"flag"
 	"fmt"
 	"log/slog"
 	"net"
@@ -17,12 +18,53 @@ import (
 	"github.com/curlix-io/skybridge/internal/wiremtls"
 )
 
+// gatewayHelpText covers the SKYBRIDGE_GW_* env vars most operators need. It is intentionally a
+// curated subset, not the exhaustive list — see internal/config/config.go's Gateway struct for
+// wire-mTLS, control-plane, and rate-limit options not covered here.
+const gatewayHelpText = `skybridge gateway — relay gateway: agent endpoint + client listeners.
+
+All configuration is via SKYBRIDGE_GW_* (plus SKYBRIDGE_LOG_LEVEL) environment variables (no other
+flags). Common ones:
+
+  Agent endpoint (edges/agents dial in here to register)
+    SKYBRIDGE_GW_AGENT_LISTEN     agent listen address (default :8010)
+    SKYBRIDGE_GW_TOKEN            bearer token, when not using wire-mTLS
+
+  Client listeners (native db clients connect here; relayed to a registered agent)
+    SKYBRIDGE_GW_CLIENTS          JSON [{"addr":":15432","org_id":"...","target":"postgres"},...]
+                                   — a "no agent registered for target" warning at relay time means
+                                   nothing has dialed in and registered for this addr's org_id+target
+                                   yet (see "skybridge agent"/"skybridge edge --help"'s SKYBRIDGE_UPSTREAM)
+
+  Control plane (session recording, wire-IP admission, live target resolution)
+    SKYBRIDGE_GW_CONTROL_PLANE_URL    base URL; unset fails closed for all client connections
+    SKYBRIDGE_GW_CONTROL_PLANE_TOKEN  bearer token for the above
+    SKYBRIDGE_GW_REQUIRE_ORG_ID       require org_id on every agent registration (default: on when
+                                       SKYBRIDGE_GW_CONTROL_PLANE_URL is set)
+
+  Rate limits
+    SKYBRIDGE_GW_CLIENT_CONN_PER_MIN  per-client-IP connections/min
+    SKYBRIDGE_GW_ORG_CONN_PER_MIN     per-org connections/min
+
+Exhaustive list, including wire-mTLS options: internal/config/config.go (Gateway struct).
+`
+
 func gatewayFatal(logger *slog.Logger, msg string) {
 	logger.Error(msg)
 	os.Exit(1)
 }
 
 func runGateway(args []string) {
+	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
+	help := false
+	fs.BoolVar(&help, "help", false, "print SKYBRIDGE_GW_* configuration options and exit")
+	fs.BoolVar(&help, "h", false, "alias for -help")
+	fs.Parse(args)
+	if help {
+		fmt.Print(gatewayHelpText)
+		return
+	}
+
 	cfg := config.LoadGateway()
 	logger := skylog.New(os.Stderr, "skybridge-gateway", skylog.ParseLevel(cfg.LogLevel))
 
