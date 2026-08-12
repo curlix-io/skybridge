@@ -16,10 +16,12 @@ import (
 	studiov1 "github.com/curlix-io/skybridge/internal/genpb/curlix/studiogateway/v1"
 	"github.com/curlix-io/skybridge/internal/mask"
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 )
 
 // jitteredBackoff returns a random duration in [d/2, d) so many edges losing the same Studio
@@ -31,6 +33,12 @@ func jitteredBackoff(d time.Duration) time.Duration {
 	half := d / 2
 	return half + time.Duration(rand.Int64N(int64(half+1)))
 }
+
+// Mirrors internal/edge/transport's equivalent constants -- see that package's comments and
+// docs/design/skybridge-masking-architecture.md §10.3 in curlix/curlix.
+var backoffResetAfter = 60 * time.Second
+var authFailureBackoffFloor = 120 * time.Second
+var preConnectTimeout = 10 * time.Second
 
 const Version = "0.2.0"
 
@@ -111,28 +119,84 @@ func (c *Client) Run(ctx context.Context) error {
 			return err
 		}
 		conn, derr := c.dial(material)
+		authFailure := false
 		if derr == nil {
-			serveErr := c.serve(ctx, studiov1.NewStudioGatewayClient(conn), material == nil)
-			_ = conn.Close()
-			if serveErr != nil {
-				c.logger.Warn(fmt.Sprintf("studio call-home ended: %v", serveErr))
+			client := studiov1.NewStudioGatewayClient(conn)
+			useBearer := material == nil
+			ok, retryAfter, reason := c.preConnect(ctx, client, useBearer)
+			if !ok {
+				_ = conn.Close()
+				c.logger.Info(fmt.Sprintf("studio pre-connect: gateway says wait (%s), retrying in ~%s", reason, retryAfter))
+				if !c.cfg.Reconnect {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(jitteredBackoff(retryAfter)):
+				}
+				continue // don't touch the reconnect backoff state -- this wasn't a failure
 			}
-			backoff = time.Second
+
+			started := time.Now()
+			serveErr := c.serve(ctx, client, useBearer)
+			_ = conn.Close()
+			authFailure = status.Code(serveErr) == codes.Unauthenticated
+			switch {
+			case authFailure:
+				c.logger.Error(fmt.Sprintf(
+					"studio call-home authentication rejected (credential expired or revoked?) -- "+
+						"this agent needs a fresh enrollment/bearer credential; will keep retrying "+
+						"at a reduced rate: %v", serveErr))
+			case serveErr != nil:
+				c.logger.Warn(fmt.Sprintf("studio call-home ended: %v", serveErr))
+			case time.Since(started) >= backoffResetAfter:
+				backoff = time.Second // clean close of a connection that was actually stable
+			}
 		} else {
 			c.logger.Warn(fmt.Sprintf("studio dial %s failed: %v", c.cfg.Target, derr))
 		}
 		if !c.cfg.Reconnect {
 			return derr
 		}
+		sleepFor := backoff
+		if authFailure && sleepFor < authFailureBackoffFloor {
+			sleepFor = authFailureBackoffFloor
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(jitteredBackoff(backoff)):
+		case <-time.After(jitteredBackoff(sleepFor)):
 		}
 		if backoff *= 2; backoff > c.cfg.MaxBackoff {
 			backoff = c.cfg.MaxBackoff
 		}
 	}
+}
+
+// preConnect mirrors internal/edge/transport.Client.preConnect -- see that method's comment.
+func (c *Client) preConnect(ctx context.Context, client studiov1.StudioGatewayClient, useBearer bool) (ok bool, retryAfter time.Duration, reason string) {
+	callCtx, cancel := context.WithTimeout(ctx, preConnectTimeout)
+	defer cancel()
+	if useBearer && c.cfg.Token != "" {
+		callCtx = metadata.NewOutgoingContext(callCtx, metadata.Pairs("authorization", "Bearer "+c.cfg.Token))
+	}
+	resp, err := client.PreConnect(callCtx, &studiov1.PreConnectRequest{
+		TenantId: c.cfg.TenantID,
+		AgentId:  c.cfg.AgentID,
+	})
+	if err != nil {
+		c.logger.Debug(fmt.Sprintf("studio pre-connect check skipped: %v", err))
+		return true, 0, ""
+	}
+	if resp.GetOk() {
+		return true, 0, ""
+	}
+	wait := time.Duration(resp.GetRetryAfterSeconds()) * time.Second
+	if wait < time.Second {
+		wait = time.Second
+	}
+	return false, wait, resp.GetReason()
 }
 
 func (c *Client) dial(material *tlsMaterial) (*grpc.ClientConn, error) {

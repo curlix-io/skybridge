@@ -24,6 +24,7 @@ Think of it as a one-way mirror in front of your database: everyone on the outsi
 of data come back when they run a query — they just don't see the sensitive parts.
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#0f766e", "primaryTextColor": "#f8fafc", "primaryBorderColor": "#134e4a", "lineColor": "#64748b", "fontSize": "15px"}}}%%
 flowchart LR
     person["👤 Person or app<br/>running a normal query"]
     sb["🛡️ Skybridge<br/>(lives inside your network)"]
@@ -33,6 +34,13 @@ flowchart LR
     sb -->|"query"| db
     db -->|"raw rows"| sb
     sb -->|"same rows,<br/>sensitive fields blacked out"| person
+
+    classDef client fill:#e2e8f0,stroke:#475569,color:#0f172a
+    classDef bridge fill:#0f766e,stroke:#134e4a,color:#f8fafc
+    classDef store fill:#1e293b,stroke:#0f172a,color:#f8fafc
+    class person client
+    class sb bridge
+    class db store
 ```
 
 **Why teams run this in front of a database:**
@@ -76,6 +84,7 @@ one-shot query-exec path (`edge` role), sharing the same masking pipeline.
 ### Deployment shapes
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#0f766e", "primaryTextColor": "#f8fafc", "primaryBorderColor": "#134e4a", "lineColor": "#64748b", "fontSize": "15px"}}}%%
 flowchart LR
     subgraph clients["Native DB clients"]
         c1["psql / mysql / mongosh"]
@@ -99,6 +108,18 @@ flowchart LR
     c1 -->|"tunnel mode"| gw
     gw -. "egress tunnel<br/>(masked bytes only)" .-> agent
     cg -. "egress call-home<br/>(read-only tool calls)" .-> edge
+
+    classDef client fill:#e2e8f0,stroke:#475569,color:#0f172a
+    classDef bridge fill:#0f766e,stroke:#134e4a,color:#f8fafc
+    classDef store fill:#1e293b,stroke:#0f172a,color:#f8fafc
+    classDef saasNode fill:#c2410c,stroke:#7c2d12,color:#f8fafc
+    class c1 client
+    class agent,edge bridge
+    class db,aws store
+    class gw,cg saasNode
+    style clients fill:#f1f5f9,stroke:#94a3b8,color:#0f172a
+    style net fill:#ecfdf5,stroke:#0f766e,color:#0f172a
+    style saas fill:#fff7ed,stroke:#c2410c,color:#0f172a
 ```
 
 Skybridge ships three deployment shapes; all of them keep the customer side **egress-only** (it
@@ -251,6 +272,7 @@ the value falls through to the next layer, and an unmasked value is *never* corr
 left as-is. The chain runs in this order:
 
 ```mermaid
+%%{init: {"theme": "base", "themeVariables": {"primaryColor": "#0f766e", "primaryTextColor": "#f8fafc", "primaryBorderColor": "#134e4a", "lineColor": "#64748b", "fontSize": "15px"}}}%%
 flowchart TD
     row["Result row / document<br/>(from Postgres, MySQL, or Mongo)"]
 
@@ -271,6 +293,13 @@ flowchart TD
     end
 
     overlay --> out["Masked row/document<br/>→ forwarded to the client"]
+
+    classDef io fill:#e2e8f0,stroke:#475569,color:#0f172a
+    classDef step fill:#0f766e,stroke:#134e4a,color:#f8fafc
+    class row,out io
+    class r1,r2,o1 step
+    style remote fill:#ecfdf5,stroke:#0f766e,color:#0f172a
+    style overlay fill:#f0fdfa,stroke:#0f766e,color:#0f172a
 ```
 
 **Layer 1 — `Remote` (content-shape detection, structured *and* unstructured alike).** This is the
@@ -463,6 +492,7 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present an opaque session token, not a DB password) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /your-control-plane/proxy-exchange`) |
 | `SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN` | `SKYBRIDGE_TOKEN` | bearer for the exchange call |
+| `SKYBRIDGE_CREDENTIAL_EXCHANGE_PER_MIN` | unset (no limit) | caps exchange attempts per native-client IP per minute — without this, a client could try many guessed session tokens as the password with no local throttling |
 | `SKYBRIDGE_CLIENT_TLS_CERT_FILE` / `_PEM` | — | server cert (Postgres) — enables terminating client TLS so the token isn't sent in cleartext |
 | `SKYBRIDGE_CLIENT_TLS_KEY_FILE` / `_PEM` | — | matching private key |
 | `SKYBRIDGE_CLIENT_TLS_SELF_SIGNED` | `false` | dev: generate an ephemeral self-signed cert at startup (clients use `sslmode=require`) |
@@ -646,6 +676,7 @@ truth — the table below is a summary, not a replacement).
 | `SKYBRIDGE_STUDIO_MAX_SESSIONS` | `8` | Caps concurrent Query Studio dispatch sessions on one `edge`-role process. |
 | `SKYBRIDGE_GW_CLIENT_CONN_PER_MIN` / `SKYBRIDGE_GW_ORG_CONN_PER_MIN` | unset (no limit); default `60`/min per client IP once `SKYBRIDGE_GW_CONTROL_PLANE_URL` is set | Gateway-side per-client / per-org *new*-connection-rate ceilings — the main throughput/abuse knobs on the `gateway` role in tunnel mode. |
 | `SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS` | unset (no limit); default `1000` once `SKYBRIDGE_GW_CONTROL_PLANE_URL` is set | Caps how many client connections one org can have relayed *simultaneously* — unlike the rate limits above, this bounds the standing total, so one org holding many connections open indefinitely can't exhaust the gateway process's goroutines/file descriptors at every other org's expense. |
+| `SKYBRIDGE_GW_AGENT_CONN_PER_MIN` | unset (no limit) | Caps agent *registration* attempts per client IP per minute — separate from the client-facing limits above; throttles how fast the agent listener's bearer-token check (`SKYBRIDGE_GW_TOKEN`) can be probed. |
 
 Everything else in `internal/config/config.go` (TLS, credential exchange, enrollment) is
 correctness/security configuration, not a performance knob.

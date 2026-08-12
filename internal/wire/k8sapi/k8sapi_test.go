@@ -282,6 +282,38 @@ func TestRecordRequestBodyWithBody(t *testing.T) {
 	}
 }
 
+// TestRecordRequestBodyRejectsOversizedBody is the regression test for maxBodyBytes: before it
+// existed, recordRequestBody's io.ReadAll(req.Body) had no size ceiling at all — a malicious
+// client could stream an effectively unbounded request body and exhaust agent memory. It must now
+// error instead of buffering an unbounded amount.
+func TestRecordRequestBodyRejectsOversizedBody(t *testing.T) {
+	rec := &captureRecorder{}
+	// io.MultiReader avoids actually allocating maxBodyBytes+2 bytes up front — the reader lazily
+	// produces bytes, and recordRequestBody's own LimitReader(maxBodyBytes+1) is what should trip.
+	oversized := io.MultiReader(&repeatReader{n: maxBodyBytes + 2})
+	req, _ := http.NewRequest(http.MethodPost, "http://cluster/api/v1/namespaces/default/pods", oversized)
+	if err := recordRequestBody(rec, req); err == nil {
+		t.Fatal("expected an error for a body exceeding maxBodyBytes")
+	}
+}
+
+// repeatReader yields n arbitrary bytes without materializing them all in memory at once.
+type repeatReader struct{ n int }
+
+func (r *repeatReader) Read(p []byte) (int, error) {
+	if r.n <= 0 {
+		return 0, io.EOF
+	}
+	if len(p) > r.n {
+		p = p[:r.n]
+	}
+	for i := range p {
+		p[i] = 'x'
+	}
+	r.n -= len(p)
+	return len(p), nil
+}
+
 type captureRecorder struct {
 	inputs  []string
 	outputs []string

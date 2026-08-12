@@ -150,6 +150,7 @@ func startRecognizersSync(ctx context.Context, cfg config.Agent, remote *mask.Re
 		interval = recognizersMinPoll
 	}
 	go func() {
+		defer recoverBackground(logger, "pii-recognizers sync")
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {

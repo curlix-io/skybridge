@@ -29,6 +29,9 @@ jobs:
       - name: vet
         run: go vet ./...
 
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@latest ./...
+
       - name: build
         run: make build
 

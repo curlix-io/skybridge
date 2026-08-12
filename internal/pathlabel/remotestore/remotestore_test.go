@@ -1,8 +1,10 @@
 package remotestore
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
+	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -534,3 +536,34 @@ func TestStore_StartPullsImmediatelyAndStopsOnCancel(t *testing.T) {
 }
 
 var _ label.Store = (*Store)(nil)
+
+// TestStore_RecoverBackgroundStopsPanicAndLogs is the regression test for Start's background
+// pull/push loops' panic safety net: a panic triggered by a malformed or adversarial
+// control-plane response must stop only that one sync loop, not crash the whole agent process
+// and every live database session sharing it.
+func TestStore_RecoverBackgroundStopsPanicAndLogs(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(testConfig("http://127.0.0.1:0"), slog.New(slog.NewTextHandler(&buf, nil)))
+
+	func() {
+		defer s.recoverBackground("test sync loop")
+		panic("simulated parsing bug on a malformed control-plane response")
+	}()
+
+	if !bytes.Contains(buf.Bytes(), []byte("recovered from panic in test sync loop")) {
+		t.Fatalf("expected a recovered-panic log line naming the loop, got %q", buf.String())
+	}
+}
+
+func TestStore_RecoverBackgroundNoopWithoutPanic(t *testing.T) {
+	var buf bytes.Buffer
+	s := New(testConfig("http://127.0.0.1:0"), slog.New(slog.NewTextHandler(&buf, nil)))
+
+	func() {
+		defer s.recoverBackground("test sync loop")
+	}()
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no log output absent a panic, got %q", buf.String())
+	}
+}

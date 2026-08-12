@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
 	"net/http"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/curlix-io/skybridge/internal/config"
@@ -18,6 +20,59 @@ import (
 // credentialExchangeTimeout bounds the control-plane round trip done while a native client waits at
 // the login prompt; it must be comfortably under common client login timeouts.
 const credentialExchangeTimeout = 10 * time.Second
+
+// errCredentialExchangeRateLimited is returned when a native client IP has exceeded
+// SKYBRIDGE_CREDENTIAL_EXCHANGE_PER_MIN — the resolver returns this without making the control-plane
+// HTTP call at all, so a burst of guessed session tokens from one client can't also hammer the
+// control plane.
+var errCredentialExchangeRateLimited = errors.New("credential exchange: rate limit exceeded")
+
+// credExchangeWindow is a minimal fixed-window per-key counter, purpose-built for bounding
+// credential-injection token-exchange attempts per native-client IP. Mirrors
+// internal/gateway/ratelimit.go's shape; kept local rather than imported from there to avoid an
+// agent<->gateway package dependency for a few lines of shared logic — these guard genuinely
+// different things (gateway connection admission vs. this package's credential-exchange attempts).
+type credExchangeLimiter struct {
+	limit  int
+	window time.Duration
+	now    func() time.Time
+
+	mu      sync.Mutex
+	windows map[string]*credExchangeWindow
+}
+
+type credExchangeWindow struct {
+	start time.Time
+	count int
+}
+
+// newCredExchangeLimiter returns a per-minute limiter, or nil when limit <= 0 (unlimited).
+func newCredExchangeLimiter(limit int) *credExchangeLimiter {
+	if limit <= 0 {
+		return nil
+	}
+	return &credExchangeLimiter{limit: limit, window: time.Minute, now: time.Now, windows: make(map[string]*credExchangeWindow)}
+}
+
+// allow reports whether key (a client IP) may make another attempt this window. A nil limiter or an
+// empty key (IP unknown) always allows — matching NewConnRateLimiter's nil-receiver-safe pattern.
+func (l *credExchangeLimiter) allow(key string) bool {
+	if l == nil || key == "" {
+		return true
+	}
+	now := l.now()
+
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	w := l.windows[key]
+	if w == nil || now.Sub(w.start) >= l.window {
+		l.windows[key] = &credExchangeWindow{start: now, count: 1}
+		return true
+	}
+	w.count++
+	return w.count <= l.limit
+}
 
 type wireClientIPKey struct{}
 
@@ -63,8 +118,12 @@ func NewHTTPCredentialResolver(cfg config.Agent) wire.CredentialResolver {
 	url := strings.TrimSpace(cfg.CredentialExchangeURL)
 	token := strings.TrimSpace(cfg.CredentialExchangeToken)
 	client := &http.Client{Timeout: credentialExchangeTimeout}
+	limiter := newCredExchangeLimiter(cfg.CredentialExchangePerMin)
 
 	return func(ctx context.Context, startup map[string]string, secret string) (wire.UpstreamCredential, error) {
+		if !limiter.allow(wireClientIPFromContext(ctx)) {
+			return wire.UpstreamCredential{}, errCredentialExchangeRateLimited
+		}
 		if strings.TrimSpace(secret) == "" {
 			return wire.UpstreamCredential{}, fmt.Errorf("no session token presented")
 		}

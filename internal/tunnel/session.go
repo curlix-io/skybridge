@@ -3,9 +3,11 @@ package tunnel
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"os"
+	"runtime/debug"
 	"sync"
 	"time"
 )
@@ -13,12 +15,32 @@ import (
 // ErrSessionClosed is returned once the underlying connection is gone.
 var ErrSessionClosed = errors.New("tunnel: session closed")
 
+// errStreamBufferOverflow fails a stream whose peer has sent more data than the consumer has
+// drained, past maxStreamBufferBytes — see Stream.deliver.
+var errStreamBufferOverflow = errors.New("tunnel: stream buffer exceeded limit")
+
 // IdleTimeout bounds how long the read loop waits for ANY frame (data or heartbeat) before treating
 // the peer as dead. Both sides must send heartbeats well inside this window (see agent.go's
 // heartbeatLoop and the gateway's mirror of it) — otherwise an idle-but-healthy link with no client
 // traffic would be torn down. Ungraceful peer death (ECS task killed, no FIN) leaves a plain
 // io.ReadFull blocked forever with nothing to signal it; this deadline is what actually detects that.
 const IdleTimeout = 45 * time.Second
+
+// maxStreams bounds how many concurrently open logical streams one Session tracks. Without this, a
+// peer sending unlimited "open" frames grows Session.streams (one *Stream + buffer per entry)
+// without limit. Set well above any real deployment's per-org concurrency — one Session serves one
+// org's traffic (see internal/gateway's default SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS=1000) — so
+// this is a safety backstop against a malicious/compromised peer, not an operational ceiling.
+// A var, not a const, so tests can temporarily lower it rather than opening thousands of real
+// streams to exercise the limit.
+var maxStreams = 10000
+
+// maxStreamBufferBytes bounds how many undelivered bytes Stream.deliver will buffer for one stream
+// before the consumer (the wire engine reading from it) catches up. At 32 KiB/frame (MaxPayload)
+// this is ~128 frames of slack — generous for ordinary scheduling jitter, but without it a peer
+// that keeps sending data for a stream nobody is draining (or a stalled consumer) could grow that
+// one stream's buffer without limit.
+const maxStreamBufferBytes = 4 << 20
 
 // Session multiplexes logical streams and a control channel over one net.Conn.
 type Session struct {
@@ -57,27 +79,46 @@ func newSession(conn net.Conn, isClient bool) *Session {
 	} else {
 		s.nextID = 2 // server opens even ids
 	}
-	go s.readLoop()
+	go s.runReadLoop()
 	return s
+}
+
+// runReadLoop wraps readLoop with panic recovery: a malformed/adversarial frame hitting an
+// unhandled parsing edge case must only end this one session, never crash the whole agent/gateway
+// process and take down every other tenant's session sharing it. Mirrors internal/wire.SafeGo's
+// reasoning; kept local rather than importing internal/wire, which would pull this deliberately
+// stdlib-only package into wire's dependency graph for a few lines of shared logic.
+func (s *Session) runReadLoop() {
+	defer func() {
+		if r := recover(); r != nil {
+			s.closeWithErr(fmt.Errorf("tunnel: recovered from panic in read loop: %v\n%s", r, debug.Stack()))
+		}
+	}()
+	s.readLoop()
 }
 
 // Open creates a new outbound logical stream carrying meta in its OPEN frame.
 func (s *Session) Open(meta []byte) (*Stream, error) {
-	s.mu.Lock()
-	select {
-	case <-s.closed:
-		s.mu.Unlock()
-		return nil, s.errOrClosed()
-	default:
+	st, err := func() (*Stream, error) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		select {
+		case <-s.closed:
+			return nil, s.errOrClosed()
+		default:
+		}
+		id := s.nextID
+		s.nextID += 2
+		st := newStream(s, id, meta)
+		s.streams[id] = st
+		return st, nil
+	}()
+	if err != nil {
+		return nil, err
 	}
-	id := s.nextID
-	s.nextID += 2
-	st := newStream(s, id, meta)
-	s.streams[id] = st
-	s.mu.Unlock()
 
-	if err := s.writeFrame(frameOpen, id, meta); err != nil {
-		s.removeStream(id)
+	if err := s.writeFrame(frameOpen, st.id, meta); err != nil {
+		s.removeStream(st.id)
 		return nil, err
 	}
 	return st, nil
@@ -149,27 +190,52 @@ func (s *Session) readLoop() {
 				// control channel full (slow consumer); drop liveness-style messages
 			}
 		case frameOpen:
-			st := newStream(s, f.connID, f.payload)
-			s.mu.Lock()
-			s.streams[f.connID] = st
-			s.mu.Unlock()
+			// A defer-based unlock (rather than the explicit Lock/Unlock pairs this package used
+			// before) matters here specifically: if anything between Lock and Unlock ever panics,
+			// runReadLoop's recover would otherwise re-Lock this same mutex while it's still held
+			// from the panicking call — a deadlock, not a clean recovery. defer guarantees the
+			// unlock happens during the panic unwind too.
+			st, ok := func() (*Stream, bool) {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				if len(s.streams) >= maxStreams {
+					return nil, false
+				}
+				st := newStream(s, f.connID, f.payload)
+				s.streams[f.connID] = st
+				return st, true
+			}()
+			if !ok {
+				// Drop the open silently: the peer's Open() already returned successfully on its
+				// side (it doesn't wait for an ack), so there's no ack to send. Any data frames
+				// that follow for this connID find no matching entry in s.streams and are dropped
+				// the same way (see the frameData case below) — safe, if not graceful; this path
+				// only triggers against a malicious/compromised peer or a real bug, never in
+				// normal operation given maxStreams' size.
+				continue
+			}
 			select {
 			case s.accept <- st:
 			case <-s.closed:
 				return
 			}
 		case frameData:
-			s.mu.Lock()
-			st := s.streams[f.connID]
-			s.mu.Unlock()
+			st := func() *Stream {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				return s.streams[f.connID]
+			}()
 			if st != nil {
 				st.deliver(f.payload)
 			}
 		case frameClose:
-			s.mu.Lock()
-			st := s.streams[f.connID]
-			delete(s.streams, f.connID)
-			s.mu.Unlock()
+			st := func() *Stream {
+				s.mu.Lock()
+				defer s.mu.Unlock()
+				st := s.streams[f.connID]
+				delete(s.streams, f.connID)
+				return st
+			}()
 			if st != nil {
 				st.remoteClose()
 			}
@@ -214,13 +280,17 @@ func (s *Session) closeWithErr(err error) {
 	s.closeOnce.Do(func() {
 		s.err = err
 		close(s.closed)
-		_ = s.conn.Close()
-		s.mu.Lock()
-		for _, st := range s.streams {
-			st.fail(err)
+		if s.conn != nil {
+			_ = s.conn.Close()
 		}
-		s.streams = make(map[uint64]*Stream)
-		s.mu.Unlock()
+		func() {
+			s.mu.Lock()
+			defer s.mu.Unlock()
+			for _, st := range s.streams {
+				st.fail(err)
+			}
+			s.streams = make(map[uint64]*Stream)
+		}()
 	})
 }
 
@@ -254,6 +324,15 @@ func (s *Stream) Meta() []byte { return s.meta }
 func (s *Stream) deliver(p []byte) {
 	s.mu.Lock()
 	if !s.localClosed && !s.remoteClosed && s.err == nil {
+		if s.buf.Len()+len(p) > maxStreamBufferBytes {
+			// Fail this one stream rather than growing its buffer without limit or silently
+			// dropping/truncating bytes (which would corrupt the client's data) — same "abort
+			// rather than corrupt" contract the wire engines use for oversized messages.
+			s.err = errStreamBufferOverflow
+			s.cond.Broadcast()
+			s.mu.Unlock()
+			return
+		}
 		s.buf.Write(p)
 		s.cond.Broadcast()
 	}

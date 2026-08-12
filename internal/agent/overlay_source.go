@@ -124,6 +124,7 @@ func startOverlaySync(ctx context.Context, cfg config.Agent, overlay *mask.Overl
 		interval = overlayMinPoll
 	}
 	go func() {
+		defer recoverBackground(logger, "pii-overlay sync")
 		t := time.NewTicker(interval)
 		defer t.Stop()
 		for {

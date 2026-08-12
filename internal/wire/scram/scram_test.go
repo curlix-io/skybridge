@@ -218,6 +218,35 @@ func TestClientConversation_Step2RejectsNonExtendingNonce(t *testing.T) {
 	}
 }
 
+// TestClientConversation_Step2RejectsExcessiveIterationCount is the regression test for the
+// maxIterations cap: a compromised or MITM'd upstream server returning an absurd "i=" count (RFC
+// 5802 sets no upper bound) must be rejected up front rather than sent into pbkdf2's iteration
+// loop, where it would spin for an arbitrarily long time on every login attempt.
+func TestClientConversation_Step2RejectsExcessiveIterationCount(t *testing.T) {
+	conv, err := NewClientConversation(SHA256, "alice", "pw")
+	if err != nil {
+		t.Fatalf("NewClientConversation: %v", err)
+	}
+	nonce := conv.ClientFirstMessage()[len("n,,n=alice,r="):]
+	salt := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
+	_, err = conv.Step2("r=" + nonce + "server-extension,s=" + salt + ",i=1000001")
+	if err == nil {
+		t.Fatal("expected an error for an iteration count above maxIterations")
+	}
+}
+
+func TestClientConversation_Step2AcceptsIterationCountAtLimit(t *testing.T) {
+	conv, err := NewClientConversation(SHA256, "alice", "pw")
+	if err != nil {
+		t.Fatalf("NewClientConversation: %v", err)
+	}
+	nonce := conv.ClientFirstMessage()[len("n,,n=alice,r="):]
+	salt := base64.StdEncoding.EncodeToString([]byte("0123456789abcdef"))
+	if _, err := conv.Step2("r=" + nonce + "server-extension,s=" + salt + ",i=1000000"); err != nil {
+		t.Fatalf("expected maxIterations itself to be accepted, got: %v", err)
+	}
+}
+
 func TestEscapeSCRAMName(t *testing.T) {
 	if got := escapeSCRAMName("a=b,c"); got != "a=3Db=2Cc" {
 		t.Fatalf("escapeSCRAMName = %q, want a=3Db=2Cc", got)

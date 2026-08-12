@@ -47,8 +47,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	StudioGateway_Connect_FullMethodName = "/curlix.studiogateway.v1.StudioGateway/Connect"
-	StudioGateway_Enroll_FullMethodName  = "/curlix.studiogateway.v1.StudioGateway/Enroll"
+	StudioGateway_Connect_FullMethodName    = "/curlix.studiogateway.v1.StudioGateway/Connect"
+	StudioGateway_Enroll_FullMethodName     = "/curlix.studiogateway.v1.StudioGateway/Enroll"
+	StudioGateway_PreConnect_FullMethodName = "/curlix.studiogateway.v1.StudioGateway/PreConnect"
 )
 
 // StudioGatewayClient is the client API for StudioGateway service.
@@ -64,6 +65,10 @@ type StudioGatewayClient interface {
 	// Called over a server-TLS channel (no client cert yet). Single-use; the returned cert's
 	// SAN binds the agent's tenant/agent identity for all later Connect calls.
 	Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error)
+	// Cheap unary check the agent SHOULD call before opening the full Connect stream, mirroring
+	// curlix.connector.v1.ConnectorGateway.PreConnect — see that RPC's comment and
+	// docs/design/skybridge-masking-architecture.md §10.
+	PreConnect(ctx context.Context, in *PreConnectRequest, opts ...grpc.CallOption) (*PreConnectResponse, error)
 }
 
 type studioGatewayClient struct {
@@ -97,6 +102,16 @@ func (c *studioGatewayClient) Enroll(ctx context.Context, in *EnrollRequest, opt
 	return out, nil
 }
 
+func (c *studioGatewayClient) PreConnect(ctx context.Context, in *PreConnectRequest, opts ...grpc.CallOption) (*PreConnectResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PreConnectResponse)
+	err := c.cc.Invoke(ctx, StudioGateway_PreConnect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // StudioGatewayServer is the server API for StudioGateway service.
 // All implementations must embed UnimplementedStudioGatewayServer
 // for forward compatibility.
@@ -110,6 +125,10 @@ type StudioGatewayServer interface {
 	// Called over a server-TLS channel (no client cert yet). Single-use; the returned cert's
 	// SAN binds the agent's tenant/agent identity for all later Connect calls.
 	Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error)
+	// Cheap unary check the agent SHOULD call before opening the full Connect stream, mirroring
+	// curlix.connector.v1.ConnectorGateway.PreConnect — see that RPC's comment and
+	// docs/design/skybridge-masking-architecture.md §10.
+	PreConnect(context.Context, *PreConnectRequest) (*PreConnectResponse, error)
 	mustEmbedUnimplementedStudioGatewayServer()
 }
 
@@ -125,6 +144,9 @@ func (UnimplementedStudioGatewayServer) Connect(grpc.BidiStreamingServer[AgentMe
 }
 func (UnimplementedStudioGatewayServer) Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Enroll not implemented")
+}
+func (UnimplementedStudioGatewayServer) PreConnect(context.Context, *PreConnectRequest) (*PreConnectResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreConnect not implemented")
 }
 func (UnimplementedStudioGatewayServer) mustEmbedUnimplementedStudioGatewayServer() {}
 func (UnimplementedStudioGatewayServer) testEmbeddedByValue()                       {}
@@ -172,6 +194,24 @@ func _StudioGateway_Enroll_Handler(srv interface{}, ctx context.Context, dec fun
 	return interceptor(ctx, in, info, handler)
 }
 
+func _StudioGateway_PreConnect_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PreConnectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(StudioGatewayServer).PreConnect(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: StudioGateway_PreConnect_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(StudioGatewayServer).PreConnect(ctx, req.(*PreConnectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // StudioGateway_ServiceDesc is the grpc.ServiceDesc for StudioGateway service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -182,6 +222,10 @@ var StudioGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Enroll",
 			Handler:    _StudioGateway_Enroll_Handler,
+		},
+		{
+			MethodName: "PreConnect",
+			Handler:    _StudioGateway_PreConnect_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

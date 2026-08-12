@@ -157,6 +157,13 @@ func logUpstreamTLSMode(p *upstreamTLSPolicy, dbTypes []string, logger *slog.Log
 		logger = slog.Default()
 	}
 	if !p.enabled() {
+		// Previously silent — a fully plaintext deployment (the default) got no signal either way.
+		// This is a legitimate, common posture when the agent reaches the database over a trusted
+		// in-network path, so this isn't an alarm, but it must not stay invisible either.
+		logger.Warn("upstream TLS is OFF (SKYBRIDGE_UPSTREAM_TLS unset or 'disable') — the " +
+			"agent->database hop is plaintext. Fine on a trusted in-network path to the database; " +
+			"set SKYBRIDGE_UPSTREAM_TLS=require/verify-full otherwise (also required for rds_iam " +
+			"credential injection).")
 		return
 	}
 	logger.Info(fmt.Sprintf("upstream TLS ENABLED (mode=%s) for the agent→database hop.", p.mode))

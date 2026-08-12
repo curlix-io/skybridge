@@ -298,11 +298,14 @@ func TestLogUpstreamTLSModeDefaultsNilLogger(t *testing.T) {
 	logUpstreamTLSMode(p, []string{"postgres"}, nil)
 }
 
-func TestLogUpstreamTLSModeNoopWhenDisabled(t *testing.T) {
+// TestLogUpstreamTLSModeWarnsWhenDisabled is the regression test for the "plaintext-by-default, no
+// signal either way" gap: before this warning existed, a fully plaintext agent->database hop (the
+// default) produced zero log output about it.
+func TestLogUpstreamTLSModeWarnsWhenDisabled(t *testing.T) {
 	var buf bytes.Buffer
 	logUpstreamTLSMode(nil, []string{"postgres"}, slog.New(slog.NewTextHandler(&buf, nil)))
-	if buf.Len() != 0 {
-		t.Fatalf("expected no output when policy is disabled, got %q", buf.String())
+	if !bytes.Contains(buf.Bytes(), []byte("upstream TLS is OFF")) {
+		t.Fatalf("expected a plaintext-upstream-hop warning, got %q", buf.String())
 	}
 }
 

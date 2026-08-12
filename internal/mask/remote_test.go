@@ -788,6 +788,33 @@ func TestRemotePostJSONFailsOnMalformedResponseBody(t *testing.T) {
 	}
 }
 
+// TestRemotePostJSONRejectsOversizedResponse is the regression test for maxPresidioResponseBytes:
+// before it existed, postJSON's json.NewDecoder(resp.Body).Decode had no size ceiling at all — a
+// compromised or MITM'd Presidio endpoint could stream an effectively unbounded response body and
+// exhaust agent memory, since http.Client.Timeout only bounds wall-clock time, not bytes delivered
+// within it. It must now report false instead of buffering an unbounded amount.
+func TestRemotePostJSONRejectsOversizedResponse(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		// Stream more than maxPresidioResponseBytes without materializing it all in memory at once
+		// on the server side either — a valid JSON array of many small objects.
+		_, _ = w.Write([]byte("["))
+		chunk := []byte(`{"start":0,"end":1,"entity_type":"X","score":0.1},`)
+		for n := 0; n < maxPresidioResponseBytes/len(chunk)+2; n++ {
+			if _, err := w.Write(chunk); err != nil {
+				return
+			}
+		}
+		_, _ = w.Write([]byte(`{"start":0,"end":1,"entity_type":"X","score":0.1}]`))
+	}))
+	defer srv.Close()
+	r := NewRemote(RemoteConfig{AnalyzeURL: srv.URL, AnonymizeURL: srv.URL})
+	var out []detectedSpan
+	if r.postJSON(context.Background(), srv.URL, map[string]any{"text": "x"}, &out) {
+		t.Fatal("expected postJSON to report false for a response exceeding maxPresidioResponseBytes")
+	}
+}
+
 func TestRemoteMaskRowBatchesMultipleColumnsIntoOneAnalyzeCall(t *testing.T) {
 	var analyzeCalls int
 	var gotTexts []string

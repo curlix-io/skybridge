@@ -44,8 +44,9 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	ConnectorGateway_Connect_FullMethodName = "/curlix.connector.v1.ConnectorGateway/Connect"
-	ConnectorGateway_Enroll_FullMethodName  = "/curlix.connector.v1.ConnectorGateway/Enroll"
+	ConnectorGateway_Connect_FullMethodName    = "/curlix.connector.v1.ConnectorGateway/Connect"
+	ConnectorGateway_Enroll_FullMethodName     = "/curlix.connector.v1.ConnectorGateway/Enroll"
+	ConnectorGateway_PreConnect_FullMethodName = "/curlix.connector.v1.ConnectorGateway/PreConnect"
 )
 
 // ConnectorGatewayClient is the client API for ConnectorGateway service.
@@ -61,6 +62,13 @@ type ConnectorGatewayClient interface {
 	// Called over a server-TLS channel (no client cert yet). Single-use; the returned cert's
 	// SAN binds the connector's tenant/connector identity for all later Connect calls.
 	Enroll(ctx context.Context, in *EnrollRequest, opts ...grpc.CallOption) (*EnrollResponse, error)
+	// Cheap unary check the connector SHOULD call before opening the full Connect stream, so the
+	// gateway can say "not yet" (draining for a redeploy, rate-limited, revoked) without the
+	// connector paying for a full stream handshake first. Advisory only: this is additive to the
+	// v1 contract, so a connector build that predates it (or a gateway that predates it) can skip
+	// straight to Connect — the gateway still enforces revocation etc. there regardless. See
+	// docs/design/skybridge-masking-architecture.md §10.
+	PreConnect(ctx context.Context, in *PreConnectRequest, opts ...grpc.CallOption) (*PreConnectResponse, error)
 }
 
 type connectorGatewayClient struct {
@@ -94,6 +102,16 @@ func (c *connectorGatewayClient) Enroll(ctx context.Context, in *EnrollRequest, 
 	return out, nil
 }
 
+func (c *connectorGatewayClient) PreConnect(ctx context.Context, in *PreConnectRequest, opts ...grpc.CallOption) (*PreConnectResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PreConnectResponse)
+	err := c.cc.Invoke(ctx, ConnectorGateway_PreConnect_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // ConnectorGatewayServer is the server API for ConnectorGateway service.
 // All implementations must embed UnimplementedConnectorGatewayServer
 // for forward compatibility.
@@ -107,6 +125,13 @@ type ConnectorGatewayServer interface {
 	// Called over a server-TLS channel (no client cert yet). Single-use; the returned cert's
 	// SAN binds the connector's tenant/connector identity for all later Connect calls.
 	Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error)
+	// Cheap unary check the connector SHOULD call before opening the full Connect stream, so the
+	// gateway can say "not yet" (draining for a redeploy, rate-limited, revoked) without the
+	// connector paying for a full stream handshake first. Advisory only: this is additive to the
+	// v1 contract, so a connector build that predates it (or a gateway that predates it) can skip
+	// straight to Connect — the gateway still enforces revocation etc. there regardless. See
+	// docs/design/skybridge-masking-architecture.md §10.
+	PreConnect(context.Context, *PreConnectRequest) (*PreConnectResponse, error)
 	mustEmbedUnimplementedConnectorGatewayServer()
 }
 
@@ -122,6 +147,9 @@ func (UnimplementedConnectorGatewayServer) Connect(grpc.BidiStreamingServer[Conn
 }
 func (UnimplementedConnectorGatewayServer) Enroll(context.Context, *EnrollRequest) (*EnrollResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Enroll not implemented")
+}
+func (UnimplementedConnectorGatewayServer) PreConnect(context.Context, *PreConnectRequest) (*PreConnectResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PreConnect not implemented")
 }
 func (UnimplementedConnectorGatewayServer) mustEmbedUnimplementedConnectorGatewayServer() {}
 func (UnimplementedConnectorGatewayServer) testEmbeddedByValue()                          {}
@@ -169,6 +197,24 @@ func _ConnectorGateway_Enroll_Handler(srv interface{}, ctx context.Context, dec 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _ConnectorGateway_PreConnect_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PreConnectRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(ConnectorGatewayServer).PreConnect(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: ConnectorGateway_PreConnect_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(ConnectorGatewayServer).PreConnect(ctx, req.(*PreConnectRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // ConnectorGateway_ServiceDesc is the grpc.ServiceDesc for ConnectorGateway service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -179,6 +225,10 @@ var ConnectorGateway_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "Enroll",
 			Handler:    _ConnectorGateway_Enroll_Handler,
+		},
+		{
+			MethodName: "PreConnect",
+			Handler:    _ConnectorGateway_PreConnect_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

@@ -386,6 +386,13 @@ func logClientTLSMode(cfg config.Agent, clientTLS *tls.Config, engine wire.Engin
 		logger = slog.Default()
 	}
 	if !cfg.ClientTLSConfigured() {
+		// Previously silent — a fully plaintext deployment (the default) got no signal either way.
+		// This is a legitimate, common posture on a trusted in-network hop, so this isn't an alarm,
+		// but it must not stay invisible either.
+		logger.Warn("client TLS is OFF (no SKYBRIDGE_CLIENT_TLS_CERT_FILE/_KEY_FILE or " +
+			"SKYBRIDGE_CLIENT_TLS_SELF_SIGNED configured) — the client<->agent hop is plaintext. Fine " +
+			"on a trusted in-network hop; configure client TLS if clients reach this agent over " +
+			"anything less trusted, or if SKYBRIDGE_INJECT_CREDENTIALS is enabled.")
 		return
 	}
 	if clientTLS == nil {
@@ -737,6 +744,23 @@ func recoverConn(logger *slog.Logger, remote net.Addr) {
 	} else {
 		logger.Error(fmt.Sprintf("recovered from panic in connection handler: %v\n%s", r, debug.Stack()))
 	}
+}
+
+// recoverBackground is recoverConn's counterpart for the periodic pull/push sync loops
+// (startOverlaySync, startRecognizersSync, and internal/pathlabel/remotestore.Store.Start's own
+// local equivalent) — none of these are per-connection, but the same reasoning applies: an
+// unhandled parsing edge case on a malformed/adversarial control-plane response must only stop
+// this one sync loop, not crash the whole agent process and every live database session sharing
+// it. name identifies which loop panicked in the log line (e.g. "pii-overlay sync").
+func recoverBackground(logger *slog.Logger, name string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	if logger == nil {
+		logger = slog.Default()
+	}
+	logger.Error(fmt.Sprintf("recovered from panic in %s: %v\n%s", name, r, debug.Stack()))
 }
 
 func sleep(ctx context.Context, d time.Duration) bool {

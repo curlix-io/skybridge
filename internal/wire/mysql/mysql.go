@@ -543,10 +543,15 @@ func appendLenEncInt(b []byte, v uint64) []byte {
 	}
 }
 
-// lenEncStrSpan returns the total bytes a lenenc string occupies at off.
+// lenEncStrSpan returns the total bytes a lenenc string occupies at off. l is checked against
+// len(p) before being converted to int: a wire-reported length far larger than the buffer itself
+// (e.g. near uint64's max, from a truncated/corrupted 8-byte length field) would otherwise
+// overflow int on conversion and wrap negative, making the off+total>len(p) bounds check below
+// pass when it shouldn't — the caller then advances its offset by that negative "span" and panics
+// on the next out-of-range slice read. No legitimate string length can exceed the remaining buffer.
 func lenEncStrSpan(p []byte, off int) (int, bool) {
 	l, n, ok := readLenEncInt(p, off)
-	if !ok {
+	if !ok || l > uint64(len(p)) {
 		return 0, false
 	}
 	total := n + int(l)
@@ -616,7 +621,7 @@ func columnIdentity(p []byte) (name, schema, orgTable, orgName string, freeText 
 	orgTable = lenEncStr(p, spans[3])
 
 	l, n, ok := readLenEncInt(p, off)
-	if !ok {
+	if !ok || l > uint64(len(p)) {
 		return "", "", "", "", freeText
 	}
 	off += n
@@ -653,7 +658,7 @@ func columnIdentity(p []byte) (name, schema, orgTable, orgName string, freeText 
 // lenEncStr decodes the lenenc string starting at off, returning "" on any parse failure.
 func lenEncStr(p []byte, off int) string {
 	l, n, ok := readLenEncInt(p, off)
-	if !ok {
+	if !ok || l > uint64(len(p)) {
 		return ""
 	}
 	off += n
@@ -717,7 +722,7 @@ func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker
 			continue
 		}
 		l, n, ok := readLenEncInt(payload, off)
-		if !ok {
+		if !ok || l > uint64(len(payload)) {
 			return nil, nil, false, nil
 		}
 		off += n

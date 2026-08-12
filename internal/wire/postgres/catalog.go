@@ -106,6 +106,22 @@ type CatalogResolver struct {
 	colCache map[string]map[columnKey]string // keyed by database name, then (tableOID, attnum)
 }
 
+// maxCatalogDatabases bounds how many distinct database names this resolver will track
+// connections/caches for over the agent's lifetime. A long-running agent fronting many distinct
+// upstream databases (or a client free to pick an arbitrary database name in its startup packet)
+// could otherwise grow conns/cache/colCache without limit; once the cap is reached, resolution for
+// a not-yet-seen database degrades to unresolved (Resolve/ResolveColumn's existing best-effort
+// contract already treats that the same as a catalog outage) rather than growing further.
+const maxCatalogDatabases = 200
+
+// maxCatalogCacheEntriesPerDB bounds each database's tableOID/(tableOID,attnum) cache size. Real
+// schemas have at most a few thousand tables/columns; this is far more generous than any legitimate
+// schema while still bounding the worst case of a client driving lookups for many distinct/invalid
+// OIDs. On overflow the whole per-database cache is cleared rather than tracking per-entry
+// recency — this is a best-effort perf cache, not a correctness-critical store, so an occasional
+// cleared cache just costs one extra catalog round trip.
+const maxCatalogCacheEntriesPerDB = 20000
+
 // NewCatalogResolver returns a resolver that dials cred's host/port for each database it's asked
 // to resolve identity for, lazily and independently.
 func NewCatalogResolver(cred CatalogCredential) *CatalogResolver {
@@ -138,6 +154,10 @@ func (r *CatalogResolver) Resolve(ctx context.Context, database string, tableOID
 	}
 	cc, exists := r.conns[database]
 	if !exists {
+		if len(r.conns) >= maxCatalogDatabases {
+			r.mu.Unlock()
+			return "", "", false
+		}
 		cc = &catalogConn{}
 		r.conns[database] = cc
 	}
@@ -158,6 +178,8 @@ func (r *CatalogResolver) Resolve(ctx context.Context, database string, tableOID
 
 	r.mu.Lock()
 	if r.cache[database] == nil {
+		r.cache[database] = make(map[uint32]tableInfo)
+	} else if len(r.cache[database]) >= maxCatalogCacheEntriesPerDB {
 		r.cache[database] = make(map[uint32]tableInfo)
 	}
 	r.cache[database][tableOID] = info
@@ -186,6 +208,10 @@ func (r *CatalogResolver) ResolveColumn(ctx context.Context, database string, ta
 	}
 	cc, exists := r.conns[database]
 	if !exists {
+		if len(r.conns) >= maxCatalogDatabases {
+			r.mu.Unlock()
+			return "", false
+		}
 		cc = &catalogConn{}
 		r.conns[database] = cc
 	}
@@ -203,6 +229,8 @@ func (r *CatalogResolver) ResolveColumn(ctx context.Context, database string, ta
 
 	r.mu.Lock()
 	if r.colCache[database] == nil {
+		r.colCache[database] = make(map[columnKey]string)
+	} else if len(r.colCache[database]) >= maxCatalogCacheEntriesPerDB {
 		r.colCache[database] = make(map[columnKey]string)
 	}
 	r.colCache[database][key] = name

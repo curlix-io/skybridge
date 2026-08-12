@@ -212,11 +212,15 @@ func TestLogClientTLSModeDefaultsNilLogger(t *testing.T) {
 	logClientTLSMode(config.Agent{ClientTLSSelfSigned: true}, tlsCfg, &fakeEngine{name: "postgres"}, nil)
 }
 
-func TestLogClientTLSModeNoopWhenNotConfigured(t *testing.T) {
+// TestLogClientTLSModeWarnsWhenNotConfigured is the regression test for the "plaintext-by-default,
+// no signal either way" gap: before this warning existed, a fully plaintext deployment (the
+// default) produced zero log output about it, indistinguishable from a healthy TLS-terminated one
+// except by the absence of a message.
+func TestLogClientTLSModeWarnsWhenNotConfigured(t *testing.T) {
 	var buf bytes.Buffer
 	logClientTLSMode(config.Agent{}, nil, &fakeEngine{name: "postgres"}, slog.New(slog.NewTextHandler(&buf, nil)))
-	if buf.Len() != 0 {
-		t.Fatalf("expected no output when client TLS is not configured, got %q", buf.String())
+	if !bytes.Contains(buf.Bytes(), []byte("client TLS is OFF")) {
+		t.Fatalf("expected a plaintext-client-hop warning, got %q", buf.String())
 	}
 }
 
@@ -391,6 +395,37 @@ func TestRecoverConnNoopWithoutPanic(t *testing.T) {
 
 	func() {
 		defer recoverConn(logger, nil)
+	}()
+
+	if buf.Len() != 0 {
+		t.Fatalf("expected no log output absent a panic, got %q", buf.String())
+	}
+}
+
+// TestRecoverBackgroundStopsPanicAndLogs is the regression test for the periodic sync loops'
+// panic safety net (startOverlaySync, startRecognizersSync): a panic triggered by a malformed or
+// adversarial control-plane response must stop only that one background loop, not crash the
+// whole agent process and every live database session sharing it.
+func TestRecoverBackgroundStopsPanicAndLogs(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	func() {
+		defer recoverBackground(logger, "test sync loop")
+		panic("simulated parsing bug on a malformed control-plane response")
+	}()
+
+	if !bytes.Contains(buf.Bytes(), []byte("recovered from panic in test sync loop")) {
+		t.Fatalf("expected a recovered-panic log line naming the loop, got %q", buf.String())
+	}
+}
+
+func TestRecoverBackgroundNoopWithoutPanic(t *testing.T) {
+	var buf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&buf, nil))
+
+	func() {
+		defer recoverBackground(logger, "test sync loop")
 	}()
 
 	if buf.Len() != 0 {

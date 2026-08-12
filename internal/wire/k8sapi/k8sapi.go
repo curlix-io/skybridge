@@ -16,6 +16,14 @@ import (
 	"github.com/curlix-io/skybridge/internal/wire"
 )
 
+// maxBodyBytes bounds how much of a single request/response body this engine will buffer in
+// memory at once (recordRequestBody, forwardRequest's Secret-masking read). Generous enough for a
+// legitimate large `list`/`get -o json` response — k8s objects are individually capped by etcd
+// (~1.5 MiB) but a List response aggregates many — while still bounding the worst case: without
+// this, a malicious client or a compromised/MITM'd cluster API server could stream an effectively
+// unbounded body and exhaust agent memory, since io.ReadAll has no size ceiling of its own.
+const maxBodyBytes = 50 << 20
+
 // UpstreamCredential is the real cluster identity the agent authenticates to the API server with,
 // resolved from the client-presented session token. Mirrors wire.UpstreamCredential's shape
 // (username/password) for the bearer-token auth model the Kubernetes API uses instead of a login
@@ -172,9 +180,12 @@ func forwardRequest(upstream *tls.Conn, client io.Writer, req *http.Request, cre
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxBodyBytes+1))
 	if err != nil {
 		return fmt.Errorf("kubernetes: reading upstream response body: %w", err)
+	}
+	if len(body) > maxBodyBytes {
+		return fmt.Errorf("kubernetes: upstream response body exceeds %d bytes", maxBodyBytes)
 	}
 	masked := maskSecretJSON(body)
 	resp.Body = io.NopCloser(bytes.NewReader(masked))
@@ -190,9 +201,12 @@ func recordRequestBody(recorder wire.Recorder, req *http.Request) error {
 		recorder.RecordInput([]byte(req.Method + " " + req.URL.Path))
 		return nil
 	}
-	raw, err := io.ReadAll(req.Body)
+	raw, err := io.ReadAll(io.LimitReader(req.Body, maxBodyBytes+1))
 	if err != nil {
 		return err
+	}
+	if len(raw) > maxBodyBytes {
+		return fmt.Errorf("kubernetes: request body exceeds %d bytes", maxBodyBytes)
 	}
 	_ = req.Body.Close()
 	req.Body = io.NopCloser(bytes.NewReader(raw))

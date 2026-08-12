@@ -155,6 +155,10 @@ type Agent struct {
 	InjectCredentials       bool   // SKYBRIDGE_INJECT_CREDENTIALS
 	CredentialExchangeURL   string // SKYBRIDGE_CREDENTIAL_EXCHANGE_URL (POST endpoint on the control plane)
 	CredentialExchangeToken string // bearer for the exchange call (defaults to SKYBRIDGE_TOKEN)
+	// CredentialExchangePerMin caps exchange attempts per native-client IP per minute (0 =
+	// unlimited). Without this, a client could open many connections and try many guessed session
+	// tokens as the password with nothing in this codebase slowing repeated failures down.
+	CredentialExchangePerMin int
 
 	// Kubernetes API proxy credential exchange (docs/design/kubernetes-access-broker.md). Separate
 	// URL from CredentialExchangeURL above: the K8s exchange resolves a bearer token per HTTP
@@ -289,9 +293,10 @@ func LoadAgent() Agent {
 		PathLabelPushSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_PUSH_SECONDS", ""), 15),
 		PostgresCatalogDSN:   env("SKYBRIDGE_POSTGRES_CATALOG_DSN", ""),
 
-		InjectCredentials:       truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
-		CredentialExchangeURL:   env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),
-		CredentialExchangeToken: env("SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		InjectCredentials:        truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
+		CredentialExchangeURL:    env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),
+		CredentialExchangeToken:  env("SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		CredentialExchangePerMin: atoiDefault(env("SKYBRIDGE_CREDENTIAL_EXCHANGE_PER_MIN", ""), 0),
 
 		K8sCredentialExchangeURL: env("SKYBRIDGE_K8S_CREDENTIAL_EXCHANGE_URL", ""),
 		K8sClientTLSCertPEM:      pemFromEnv("SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM", "SKYBRIDGE_K8S_CLIENT_TLS_CERT_FILE"),
@@ -516,6 +521,11 @@ type Gateway struct {
 	// many connections and simply never closing them, holding goroutines/fds/tunnel-stream slots
 	// indefinitely at every other org's expense. This bounds the standing total instead.
 	OrgMaxConcurrentClients int
+	// AgentConnPerMin caps agent *registration* attempts per client IP per minute (0 = unlimited).
+	// Distinct from ClientConnPerMin/OrgConnPerMin above (which gate native-client connections):
+	// without this, the agent listener's bearer-token check can be probed at whatever rate TCP
+	// handshakes allow.
+	AgentConnPerMin int
 
 	// ClientProxyProtocol: when true, every native-client listener expects a PROXY protocol v1/v2
 	// header on each accepted connection (as sent by an AWS NLB target group with proxy_protocol_v2
@@ -585,6 +595,7 @@ func LoadGateway() Gateway {
 		ClientConnPerMin:        clientConnPerMin,
 		OrgConnPerMin:           orgConnPerMin,
 		OrgMaxConcurrentClients: orgMaxConcurrentClients,
+		AgentConnPerMin:         atoiDefault(env("SKYBRIDGE_GW_AGENT_CONN_PER_MIN", ""), 0),
 		ClientProxyProtocol:     truthy(env("SKYBRIDGE_GW_CLIENT_PROXY_PROTOCOL", "")),
 		WireMtlsCABundlePEM:     pemFromEnv("SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_GW_MTLS_CA_BUNDLE_FILE"),
 		WireMtlsServerCert:      pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM", "SKYBRIDGE_GW_MTLS_SERVER_CERT_FILE"),

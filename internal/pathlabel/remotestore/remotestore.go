@@ -14,6 +14,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"time"
@@ -224,6 +225,7 @@ func (s *Store) evictLowestConfidenceLocked() {
 func (s *Store) Start(ctx context.Context) {
 	s.refreshPull(ctx)
 	go func() {
+		defer s.recoverBackground("pii-path-labels pull sync")
 		t := time.NewTicker(s.pollInterval)
 		defer t.Stop()
 		for {
@@ -236,6 +238,7 @@ func (s *Store) Start(ctx context.Context) {
 		}
 	}()
 	go func() {
+		defer s.recoverBackground("pii-path-labels push sync")
 		t := time.NewTicker(s.pushInterval)
 		defer t.Stop()
 		for {
@@ -248,6 +251,18 @@ func (s *Store) Start(ctx context.Context) {
 			}
 		}
 	}()
+}
+
+// recoverBackground stops a panic from propagating out of Start's background pull/push loops — an
+// unhandled parsing edge case on a malformed/adversarial control-plane response must only stop
+// this one sync loop, not crash the whole agent process and every live database session sharing
+// it. Mirrors internal/agent's recoverBackground; kept local since this is a different package.
+func (s *Store) recoverBackground(name string) {
+	r := recover()
+	if r == nil {
+		return
+	}
+	s.logger.Error(fmt.Sprintf("recovered from panic in %s: %v\n%s", name, r, debug.Stack()))
 }
 
 func (s *Store) refreshPull(ctx context.Context) {

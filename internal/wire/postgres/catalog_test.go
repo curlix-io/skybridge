@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"fmt"
 	"net"
 	"testing"
 )
@@ -323,6 +324,55 @@ func TestPeekStartupDatabase_MalformedReturnsEmpty(t *testing.T) {
 	cr := bufio.NewReader(bytes.NewReader([]byte{1, 2, 3}))
 	if got := peekStartupDatabase(cr); got != "" {
 		t.Fatalf("got %q, want empty for malformed input", got)
+	}
+}
+
+// TestCatalogResolver_ConnsBoundedByMaxCatalogDatabases is the regression test for the
+// maxCatalogDatabases cap: without it, a long-running agent asked to resolve identity against an
+// unbounded number of distinct database names (e.g. a client free to pick an arbitrary database in
+// its startup packet) would grow CatalogResolver.conns without limit. Prefilling conns to the cap
+// and confirming a never-before-seen database resolves as unresolved (rather than attempting to
+// dial and add a 201st entry) proves the cap is enforced before any connection attempt.
+func TestCatalogResolver_ConnsBoundedByMaxCatalogDatabases(t *testing.T) {
+	r := NewCatalogResolver(CatalogCredential{Host: "127.0.0.1", Port: "1"})
+	for i := 0; i < maxCatalogDatabases; i++ {
+		r.conns[fmt.Sprintf("db%d", i)] = &catalogConn{}
+	}
+	_, _, ok := r.Resolve(context.Background(), "brand-new-db", 99)
+	if ok {
+		t.Fatal("expected an unresolved result once maxCatalogDatabases distinct databases are already tracked")
+	}
+	if len(r.conns) != maxCatalogDatabases {
+		t.Fatalf("expected conns to stay at the cap (%d), got %d", maxCatalogDatabases, len(r.conns))
+	}
+}
+
+// TestCatalogResolver_CacheBoundedByMaxCatalogCacheEntriesPerDB is the regression test for the
+// per-database cache size cap: without it, a client driving lookups for many distinct/invalid
+// tableOIDs against one database would grow that database's cache map without limit.
+func TestCatalogResolver_CacheBoundedByMaxCatalogCacheEntriesPerDB(t *testing.T) {
+	addr, closeFn := fakeCatalogServer(t, "orders", "shop", "")
+	defer closeFn()
+	host, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		t.Fatalf("split addr: %v", err)
+	}
+
+	r := NewCatalogResolver(CatalogCredential{Host: host, Port: port, User: "u", Password: "p"})
+	r.cache["shop"] = make(map[uint32]tableInfo, maxCatalogCacheEntriesPerDB)
+	for i := uint32(0); i < maxCatalogCacheEntriesPerDB; i++ {
+		r.cache["shop"][i] = tableInfo{schema: "s", table: "t"}
+	}
+
+	// tableOID chosen outside the prefilled [0, maxCatalogCacheEntriesPerDB) range so this Resolve
+	// call is a genuine cache miss that goes to the fake server, not an accidental hit on a dummy
+	// prefilled entry.
+	schema, table, ok := r.Resolve(context.Background(), "shop", maxCatalogCacheEntriesPerDB+1)
+	if !ok || schema != "shop" || table != "orders" {
+		t.Fatalf("Resolve = %q %q %v", schema, table, ok)
+	}
+	if got := len(r.cache["shop"]); got != 1 {
+		t.Fatalf("expected the overflowing cache to be cleared down to the new entry (1), got %d", got)
 	}
 }
 

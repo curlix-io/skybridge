@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -440,6 +441,41 @@ func TestServeClientRejectsOrgConnLimitReached(t *testing.T) {
 		t.Fatalf("expected the third connection to be admitted after the slot freed up, write failed: %v", err)
 	}
 	_ = client3.Close()
+}
+
+// TestServeAgentRejectsRateLimit is the regression test for SetAgentConnLimiter: before it
+// existed, nothing in this package limited how many times the bearer-token check in ServeAgent
+// could be probed per client IP — an attacker (or a misconfigured agent stuck retrying) could
+// attempt registration at whatever rate raw TCP handshakes allow. Both attempts drive a real
+// agent.ServeTunnelConn client (like TestServeAgentRejectsBadToken) rather than a bare net.Pipe end
+// with nothing reading it — ServeAgent's rejection path writes a control message back, which blocks
+// forever on an unbuffered net.Pipe with no reader on the other side.
+func TestServeAgentRejectsRateLimit(t *testing.T) {
+	g := gateway.New("right", silent())
+	g.SetAgentConnLimiter(gateway.NewConnRateLimiter(1, 0))
+
+	deps := agent.Deps{
+		Dial:   echoDialer,
+		Engine: func(string) (wire.Engine, error) { return upperEngine{}, nil },
+		Masker: mask.Noop{},
+	}
+
+	// First attempt consumes the one-per-minute slot; net.Pipe's RemoteAddr() is the constant
+	// string "pipe" for every pipe, so this and the second attempt look like the same client IP to
+	// the limiter. A short-lived context is enough — the point is just to let ServeAgent's rate
+	// check run and the registration complete before tearing down.
+	ctx1, cancel1 := context.WithTimeout(context.Background(), 500*time.Millisecond)
+	defer cancel1()
+	gw1, local1 := net.Pipe()
+	go func() { _ = g.ServeAgent(gw1) }()
+	_ = agent.ServeTunnelConn(ctx1, local1, config.Agent{Mode: config.ModeTunnel, AgentID: "a1", Token: "right"}, deps, silent())
+
+	gw2, local2 := net.Pipe()
+	go func() { _ = g.ServeAgent(gw2) }()
+	err := agent.ServeTunnelConn(context.Background(), local2, config.Agent{Mode: config.ModeTunnel, AgentID: "a2", Token: "right"}, deps, silent())
+	if err == nil || !strings.Contains(err.Error(), "rate limited") {
+		t.Fatalf("expected the second registration to be rejected by the rate limiter, got %v", err)
+	}
 }
 
 func TestServeAgentRejectsBadToken(t *testing.T) {

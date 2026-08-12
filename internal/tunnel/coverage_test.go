@@ -440,3 +440,123 @@ func TestStreamSetWriteDeadlineIsNoop(t *testing.T) {
 		t.Fatalf("expected SetWriteDeadline to always succeed, got %v", err)
 	}
 }
+
+// TestStreamDeliverFailsOnBufferOverflow is the regression test for maxStreamBufferBytes: before it
+// existed, Stream.deliver appended every inbound data frame to its buffer with no cap — a peer that
+// keeps sending data for a stream nobody is draining (or a stalled consumer) could grow that one
+// stream's buffer without limit. It must now fail the stream instead.
+func TestStreamDeliverFailsOnBufferOverflow(t *testing.T) {
+	st := newStream(nil, 1, nil)
+	half := make([]byte, maxStreamBufferBytes/2+1)
+	st.deliver(half)
+	st.deliver(half) // cumulative > maxStreamBufferBytes
+
+	st.mu.Lock()
+	err := st.err
+	st.mu.Unlock()
+	if !errors.Is(err, errStreamBufferOverflow) {
+		t.Fatalf("expected errStreamBufferOverflow, got %v", err)
+	}
+
+	// Read must still drain whatever was already buffered before the overflowing delivery (the
+	// first half succeeded) — fallthrough-never-corrupt applies here too, the error surfaces once
+	// the buffer is drained, not by discarding already-buffered bytes.
+	drained := make([]byte, 0, len(half))
+	buf := make([]byte, 4096)
+	for len(drained) < len(half) {
+		n, rerr := st.Read(buf)
+		drained = append(drained, buf[:n]...)
+		if rerr != nil {
+			t.Fatalf("unexpected error while draining already-buffered bytes: %v", rerr)
+		}
+	}
+
+	// Only once the buffer is empty does Read surface the failure rather than hang.
+	if _, err := st.Read(buf); !errors.Is(err, errStreamBufferOverflow) {
+		t.Fatalf("expected Read to surface errStreamBufferOverflow after draining, got %v", err)
+	}
+}
+
+// TestStreamDeliverWithinLimitStillWorks confirms the cap doesn't reject ordinary, merely large
+// (not adversarial) bursts of buffered data.
+func TestStreamDeliverWithinLimitStillWorks(t *testing.T) {
+	st := newStream(nil, 1, nil)
+	chunk := make([]byte, maxStreamBufferBytes-1)
+	st.deliver(chunk)
+
+	st.mu.Lock()
+	err := st.err
+	buffered := st.buf.Len()
+	st.mu.Unlock()
+	if err != nil {
+		t.Fatalf("expected no error within the limit, got %v", err)
+	}
+	if buffered != len(chunk) {
+		t.Fatalf("expected %d buffered bytes, got %d", len(chunk), buffered)
+	}
+}
+
+// TestReadLoopDropsOpenFramesBeyondMaxStreams is the regression test for maxStreams: before it
+// existed, a peer sending unlimited "open" frames grew Session.streams without limit. maxStreams is
+// temporarily lowered rather than actually opening thousands of streams.
+func TestReadLoopDropsOpenFramesBeyondMaxStreams(t *testing.T) {
+	orig := maxStreams
+	maxStreams = 1
+	defer func() { maxStreams = orig }()
+
+	client, server := pair(t)
+	defer client.Close()
+	defer server.Close()
+
+	if _, err := client.Open([]byte("first")); err != nil {
+		t.Fatal(err)
+	}
+	// Open() returns successfully on the sending side regardless of what the peer does with the
+	// frame (it doesn't wait for an ack) — the second stream's "open" frame should be silently
+	// dropped by the server once it's already at the (lowered) limit of 1.
+	if _, err := client.Open([]byte("second")); err != nil {
+		t.Fatal(err)
+	}
+
+	st1, err := server.Accept()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(st1.Meta()) != "first" {
+		t.Fatalf("expected the first stream accepted, got meta %q", st1.Meta())
+	}
+
+	select {
+	case st2 := <-server.accept:
+		t.Fatalf("expected the second stream to be dropped past maxStreams, got accepted meta %q", st2.Meta())
+	case <-time.After(100 * time.Millisecond):
+		// expected: nothing else ever gets accepted
+	}
+}
+
+// TestRunReadLoopRecoversPanic is the regression test for the core tunnel-hardening fix: a panic
+// anywhere inside readLoop (a malformed/adversarial frame hitting an unhandled parsing edge case)
+// must close this one session with a recorded error, not crash the whole agent/gateway process and
+// take down every other tenant's session sharing it. Before runReadLoop existed, this would have
+// crashed the test binary itself.
+func TestRunReadLoopRecoversPanic(t *testing.T) {
+	// conn is intentionally left nil: readFrame calling a method on a nil net.Conn interface value
+	// panics with a nil-pointer runtime error, standing in for any other parsing bug that might
+	// panic deep inside readLoop.
+	s := &Session{
+		streams:   make(map[uint64]*Stream),
+		accept:    make(chan *Stream, 1),
+		controlCh: make(chan Control, 1),
+		closed:    make(chan struct{}),
+	}
+	s.runReadLoop()
+
+	select {
+	case <-s.closed:
+	default:
+		t.Fatal("expected the session to be closed after recovering from the panic")
+	}
+	if s.err == nil {
+		t.Fatal("expected a recorded error after recovering from the panic")
+	}
+}

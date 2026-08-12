@@ -103,6 +103,29 @@ func TestColumnIdentity(t *testing.T) {
 	}
 }
 
+// TestLenEncStrSpanRejectsOverflowingLength is the regression test for a fuzz-found panic: a lenenc
+// length field near uint64's max (from a truncated/corrupted 8-byte length marker, 0xFE) converts to
+// a negative int on overflow, which used to slip past the off+total>len(p) bounds check (a negative
+// total always satisfies "not greater than") and let the caller advance its offset out of bounds,
+// panicking on the next slice read. lenEncStrSpan must reject any length claim above len(p) instead.
+func TestLenEncStrSpanRejectsOverflowingLength(t *testing.T) {
+	p := []byte{0xFE, '0', '0', '0', '0', '0', '0', '0', 0xF3}
+	if _, ok := lenEncStrSpan(p, 0); ok {
+		t.Fatal("expected lenEncStrSpan to reject a length far exceeding the buffer size")
+	}
+}
+
+// TestColumnIdentityRejectsOverflowingLength is columnIdentity's end-to-end counterpart to
+// TestLenEncStrSpanRejectsOverflowingLength — the same crafted input, driven through the full
+// column-definition parser rather than the helper directly, must degrade to unresolved, not panic.
+func TestColumnIdentityRejectsOverflowingLength(t *testing.T) {
+	p := []byte{0xFE, '0', '0', '0', '0', '0', '0', '0', 0xF3}
+	name, schema, orgTable, orgName, freeText := columnIdentity(p)
+	if name != "" || schema != "" || orgTable != "" || orgName != "" || !freeText {
+		t.Fatalf("columnIdentity = (%q,%q,%q,%q,%v), want all-empty and freeText=true (unresolved)", name, schema, orgTable, orgName, freeText)
+	}
+}
+
 // TestColumnIdentityResolvesRealNameForAliasedColumn is the regression test for
 // docs/PATH_LABEL_IDENTITY_GAPS_DESIGN.md's Gap A: a query aliasing a column (e.g. "SELECT email AS
 // contact_info") must still let a path-scoped label confirmed on "email" match — orgName, not name,
@@ -157,6 +180,33 @@ func TestState_ObjectID(t *testing.T) {
 	}
 	if s.objectID("test", "") != "" {
 		t.Fatal("expected empty ObjectID when orgTable is unset (e.g. a derived/computed column)")
+	}
+}
+
+// TestLenEncStrRejectsOverflowingLength is lenEncStr's counterpart to
+// TestLenEncStrSpanRejectsOverflowingLength: the same class of int-overflow-on-conversion bug, in
+// the sibling helper that decodes a lenenc string's value rather than just its span.
+func TestLenEncStrRejectsOverflowingLength(t *testing.T) {
+	p := []byte{0xFE, '0', '0', '0', '0', '0', '0', '0', 0xF3}
+	if got := lenEncStr(p, 0); got != "" {
+		t.Fatalf("lenEncStr = %q, want empty for a length far exceeding the buffer size", got)
+	}
+}
+
+// TestMaskTextRowRejectsOverflowingLength is the regression test for a fuzz-found panic in the
+// text-protocol row decoder: a lenenc field length near uint64's max used to pass the
+// off+int(l)>len(payload) bounds check after overflowing int on conversion (wrapping negative),
+// then panic in make([]byte, l) with l still the original huge uint64. maskTextRow must instead
+// signal ok=false (protocol-parse drift, safe by construction) so the caller forwards the packet
+// unchanged rather than attempting to decode it.
+func TestMaskTextRowRejectsOverflowingLength(t *testing.T) {
+	row := []byte{0xFE, '0', '0', '0', '0', '0', '0', '0', 0xF3}
+	_, _, ok, err := maskTextRow(context.Background(), row, nil, mask.Noop{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if ok {
+		t.Fatal("expected ok=false for a length far exceeding the buffer size")
 	}
 }
 

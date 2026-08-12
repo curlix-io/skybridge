@@ -48,6 +48,9 @@ flags). Common ones:
     SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS  per-org standing connection ceiling (default: 1000
                                               when SKYBRIDGE_GW_CONTROL_PLANE_URL is set, else
                                               unlimited) — bounds the total, not just the rate
+    SKYBRIDGE_GW_AGENT_CONN_PER_MIN          per-client-IP agent *registration* attempts/min
+                                              (default: unlimited) — separate from the client
+                                              limits above; throttles probing the bearer token
 
 Exhaustive list, including wire-mTLS options: internal/config/config.go (Gateway struct).
 `
@@ -92,6 +95,10 @@ func runGateway(args []string) {
 	if lim := gateway.NewOrgConnLimiter(cfg.OrgMaxConcurrentClients); lim != nil {
 		gw.SetOrgConnLimiter(lim)
 		logger.Info(fmt.Sprintf("org concurrent connection ceiling=%d", cfg.OrgMaxConcurrentClients))
+	}
+	if lim := gateway.NewConnRateLimiter(cfg.AgentConnPerMin, 0); lim != nil {
+		gw.SetAgentConnLimiter(lim)
+		logger.Info(fmt.Sprintf("agent registration attempt limit=%d/min per client IP", cfg.AgentConnPerMin))
 	}
 	if cfg.ControlPlaneURL != "" {
 		gw.SetStore(gateway.NewHTTPStore(cfg.ControlPlaneURL, cfg.SessionPath, cfg.ControlPlaneToken))

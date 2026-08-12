@@ -17,10 +17,12 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials"
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/keepalive"
 	"google.golang.org/grpc/metadata"
+	"google.golang.org/grpc/status"
 
 	agentv1 "github.com/curlix-io/skybridge/internal/genpb/curlix/agent/v1"
 	connectorv1 "github.com/curlix-io/skybridge/internal/genpb/curlix/connector/v1"
@@ -37,6 +39,24 @@ func jitteredBackoff(d time.Duration) time.Duration {
 	half := d / 2
 	return half + time.Duration(rand.Int64N(int64(half+1)))
 }
+
+// backoffResetAfter: only reset backoff to baseline (1s) if the prior connection actually stayed
+// up this long. Without this, a connect-then-immediately-drop cycle (bad keepalive, a listener
+// flapping) resets to a 0-delay retry every single cycle -- a tight loop that never actually
+// backs off. Matches hoop.dev's own agent/main.go heuristic (defaultBackoffResetSec, same value,
+// same reasoning) -- see docs/design/skybridge-masking-architecture.md §10.3 in curlix/curlix.
+var backoffResetAfter = 60 * time.Second
+
+// authFailureBackoffFloor: an auth failure (expired/revoked credential) is a config problem, not
+// a transient network blip -- a fleet sharing one standing credential that hits its TTL boundary
+// at the same moment would otherwise retry in near-lockstep every ordinary backoff step forever.
+// Mirrors curlix.connector.agent._AUTH_FAILURE_BACKOFF_FLOOR_SECONDS in the Python reference.
+var authFailureBackoffFloor = 120 * time.Second
+
+// preConnectTimeout bounds the advisory PreConnect unary call so a hung gateway can't stall the
+// reconnect loop; on any error (older gateway that doesn't implement it, timeout, dial failure)
+// the caller falls back to attempting Connect directly.
+var preConnectTimeout = 10 * time.Second
 
 // Version reported to the gateway on Register.
 const Version = "0.1.0"
@@ -109,28 +129,88 @@ func (c *Client) Run(ctx context.Context) error {
 			return err // fatal config error (e.g. CA present but no cert and no enroll token)
 		}
 		conn, derr := c.dial(material)
+		authFailure := false
 		if derr == nil {
-			serveErr := c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), material == nil)
-			_ = conn.Close()
-			if serveErr != nil {
-				c.logger.Warn(fmt.Sprintf("call-home stream ended: %v", serveErr))
+			client := connectorv1.NewConnectorGatewayClient(conn)
+			useBearer := material == nil
+			ok, retryAfter, reason := c.preConnect(ctx, client, useBearer)
+			if !ok {
+				_ = conn.Close()
+				c.logger.Info(fmt.Sprintf("pre-connect: gateway says wait (%s), retrying in ~%s", reason, retryAfter))
+				if !c.cfg.Reconnect {
+					return nil
+				}
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-time.After(jitteredBackoff(retryAfter)):
+				}
+				continue // don't touch the reconnect backoff state -- this wasn't a failure
 			}
-			backoff = time.Second
+
+			started := time.Now()
+			serveErr := c.serve(ctx, client, useBearer)
+			_ = conn.Close()
+			authFailure = status.Code(serveErr) == codes.Unauthenticated
+			switch {
+			case authFailure:
+				c.logger.Error(fmt.Sprintf(
+					"call-home authentication rejected (credential expired or revoked?) -- this "+
+						"edge needs a fresh enrollment/bearer credential; will keep retrying at a "+
+						"reduced rate: %v", serveErr))
+			case serveErr != nil:
+				c.logger.Warn(fmt.Sprintf("call-home stream ended: %v", serveErr))
+			case time.Since(started) >= backoffResetAfter:
+				backoff = time.Second // clean close of a connection that was actually stable
+			}
 		} else {
 			c.logger.Warn(fmt.Sprintf("dial %s failed: %v", c.cfg.Target, derr))
 		}
 		if !c.cfg.Reconnect {
 			return derr
 		}
+		sleepFor := backoff
+		if authFailure && sleepFor < authFailureBackoffFloor {
+			sleepFor = authFailureBackoffFloor
+		}
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(jitteredBackoff(backoff)):
+		case <-time.After(jitteredBackoff(sleepFor)):
 		}
 		if backoff *= 2; backoff > c.cfg.MaxBackoff {
 			backoff = c.cfg.MaxBackoff
 		}
 	}
+}
+
+// preConnect is a best-effort admission check before opening the full Connect stream, so the
+// gateway can say "not yet" (draining, rate-limited, revoked) without this client paying for a
+// full stream handshake first. Any error (older gateway that doesn't implement this RPC yet,
+// timeout) is treated as "proceed" -- this is advisory, never a hard gate. See
+// docs/design/skybridge-masking-architecture.md §10.3 in curlix/curlix.
+func (c *Client) preConnect(ctx context.Context, client connectorv1.ConnectorGatewayClient, useBearer bool) (ok bool, retryAfter time.Duration, reason string) {
+	callCtx, cancel := context.WithTimeout(ctx, preConnectTimeout)
+	defer cancel()
+	if useBearer && c.cfg.Token != "" {
+		callCtx = metadata.NewOutgoingContext(callCtx, metadata.Pairs("authorization", "Bearer "+c.cfg.Token))
+	}
+	resp, err := client.PreConnect(callCtx, &connectorv1.PreConnectRequest{
+		TenantId:    c.cfg.TenantID,
+		ConnectorId: c.cfg.ConnectorID,
+	})
+	if err != nil {
+		c.logger.Debug(fmt.Sprintf("pre-connect check skipped: %v", err))
+		return true, 0, ""
+	}
+	if resp.GetOk() {
+		return true, 0, ""
+	}
+	wait := time.Duration(resp.GetRetryAfterSeconds()) * time.Second
+	if wait < time.Second {
+		wait = time.Second
+	}
+	return false, wait, resp.GetReason()
 }
 
 func (c *Client) dial(material *tlsMaterial) (*grpc.ClientConn, error) {

@@ -5,10 +5,20 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"sync/atomic"
 	"time"
 )
+
+// maxPresidioResponseBytes bounds how much of an analyze/anonymize response postJSON will buffer.
+// A compromised or MITM'd Presidio endpoint could otherwise stream an effectively unbounded (or
+// slow-drip) response body — http.Client.Timeout bounds the whole round trip's wall-clock time, but
+// not how many bytes a sufficiently-fast-but-huge body delivers within that window. Generous enough
+// for a heavily batched analyze call (many texts, many spans each) while still bounding the worst
+// case, matching the same-shaped cap already used for control-plane responses elsewhere (see
+// internal/agent/overlay_source.go, recognizers_source.go, internal/pathlabel/remotestore.go).
+const maxPresidioResponseBytes = 10 << 20
 
 // MetricsRecorder is the subset of metrics.Recorder that maskers need, kept as a small local
 // interface (rather than importing the metrics package's concrete type into every call site) so
@@ -404,5 +414,10 @@ func (r *Remote) postJSON(ctx context.Context, url string, body any, out any) bo
 	if resp.StatusCode != http.StatusOK {
 		return false
 	}
-	return json.NewDecoder(resp.Body).Decode(out) == nil
+	limited := io.LimitReader(resp.Body, maxPresidioResponseBytes+1)
+	raw, err := io.ReadAll(limited)
+	if err != nil || len(raw) > maxPresidioResponseBytes {
+		return false
+	}
+	return json.Unmarshal(raw, out) == nil
 }

@@ -29,6 +29,14 @@ const (
 	SHA256 = "SCRAM-SHA-256"
 )
 
+// maxIterations bounds the PBKDF2 iteration count Step2 will accept from the server-first
+// message's "i" attribute. Real servers use counts in the single-digit-thousands (Postgres
+// defaults to 4096, MongoDB to 15000); this is far more generous than any legitimate
+// configuration while still bounding the worst case — without it, a compromised or MITM'd
+// upstream server could return an absurd iteration count (RFC 5802 sets no upper bound) to make
+// the agent spin in pbkdf2's iteration loop for an arbitrarily long time on every login attempt.
+const maxIterations = 1_000_000
+
 // ClientConversation drives one SCRAM client exchange against an upstream server. Not safe for
 // concurrent use; a conversation is single-shot (one Step1/Step2/Step3 sequence per auth attempt).
 type ClientConversation struct {
@@ -100,7 +108,7 @@ func (c *ClientConversation) Step2(serverFirst string) (string, error) {
 		return "", fmt.Errorf("scram: bad salt: %w", err)
 	}
 	iter, err := strconv.Atoi(iterStr)
-	if err != nil || iter <= 0 {
+	if err != nil || iter <= 0 || iter > maxIterations {
 		return "", fmt.Errorf("scram: bad iteration count %q", iterStr)
 	}
 

@@ -36,14 +36,15 @@ const storeTimeout = 5 * time.Second
 
 // Gateway holds the live agent registry and relays client connections over agent tunnels.
 type Gateway struct {
-	authToken      string
-	log            *slog.Logger
-	store          Store
-	admitter       WireAdmitter
-	resolver       TargetResolver
-	requireOrgID   bool
-	connLimiter    ConnRateLimiter
-	orgConnLimiter OrgConnLimiter
+	authToken        string
+	log              *slog.Logger
+	store            Store
+	admitter         WireAdmitter
+	resolver         TargetResolver
+	requireOrgID     bool
+	connLimiter      ConnRateLimiter
+	orgConnLimiter   OrgConnLimiter
+	agentConnLimiter ConnRateLimiter
 
 	mu        sync.RWMutex
 	agents    map[string]*agentConn // agent id -> connection
@@ -62,15 +63,16 @@ func New(authToken string, logger *slog.Logger) *Gateway {
 		logger = slog.Default()
 	}
 	return &Gateway{
-		authToken:      authToken,
-		log:            logger,
-		store:          NoopStore{},
-		admitter:       NoopWireAdmitter{},
-		resolver:       NoopTargetResolver{},
-		connLimiter:    NoopConnRateLimiter{},
-		orgConnLimiter: NoopOrgConnLimiter{},
-		agents:         make(map[string]*agentConn),
-		orgAgents:      make(map[string]*agentConn),
+		authToken:        authToken,
+		log:              logger,
+		store:            NoopStore{},
+		admitter:         NoopWireAdmitter{},
+		resolver:         NoopTargetResolver{},
+		connLimiter:      NoopConnRateLimiter{},
+		orgConnLimiter:   NoopOrgConnLimiter{},
+		agentConnLimiter: NoopConnRateLimiter{},
+		agents:           make(map[string]*agentConn),
+		orgAgents:        make(map[string]*agentConn),
 	}
 }
 
@@ -122,6 +124,19 @@ func (g *Gateway) SetOrgConnLimiter(l OrgConnLimiter) {
 	g.orgConnLimiter = l
 }
 
+// SetAgentConnLimiter installs a per-client-IP rate limit on agent *registration* attempts
+// (defaults to unlimited) — distinct from SetConnRateLimiter, which only gates native-client
+// connections. Without this, the agent listener's bearer-token check (ServeAgent) can be probed at
+// whatever rate TCP handshakes allow, with nothing in this package slowing repeated failed
+// attempts down. Reuses ConnRateLimiter's shape (keyed by IP; call with orgID="" since the org
+// isn't known/verified yet at registration time).
+func (g *Gateway) SetAgentConnLimiter(l ConnRateLimiter) {
+	if l == nil {
+		l = NoopConnRateLimiter{}
+	}
+	g.agentConnLimiter = l
+}
+
 // ListenAgents accepts agent (egress) connections until ctx is cancelled. Pass a tls.Config-wrapped
 // listener for mTLS in production.
 func (g *Gateway) ListenAgents(ctx context.Context, ln net.Listener) error {
@@ -151,9 +166,20 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 	sess := tunnel.Server(conn)
 	defer sess.Close()
 
+	// The tunnel protocol has the client speak first (send Register) on every path below — the
+	// rate-limit check must not jump ahead of that by writing a rejection before the client has
+	// sent anything: on a real TCP connection the kernel's socket buffers can mask the resulting
+	// out-of-turn write, but it's still a protocol-ordering violation, and net.Pipe-backed tests
+	// (fully synchronous, no buffering) deadlock/error on it immediately.
 	reg, err := sess.NextControl()
 	if err != nil {
 		return err
+	}
+	if g.agentConnLimiter != nil {
+		if err := g.agentConnLimiter.Allow(conn.RemoteAddr().String(), ""); err != nil {
+			_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "rate limited"})
+			return err
+		}
 	}
 	if reg.Kind != tunnel.KindRegister {
 		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "expected register"})

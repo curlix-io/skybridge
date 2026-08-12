@@ -355,6 +355,10 @@ func (f fakeGatewayClient) Enroll(context.Context, *studiov1.EnrollRequest, ...g
 	return nil, errors.New("not implemented in fake")
 }
 
+func (f fakeGatewayClient) PreConnect(context.Context, *studiov1.PreConnectRequest, ...grpc.CallOption) (*studiov1.PreConnectResponse, error) {
+	return nil, errors.New("not implemented in fake")
+}
+
 func TestHeartbeatLoopStopsOnContextCancel(t *testing.T) {
 	c := New(Config{}, slog.New(slog.NewTextHandler(io.Discard, nil)))
 	ss := &safeStream{stream: newFakeBidiStream()}
