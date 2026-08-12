@@ -12,7 +12,7 @@ require (
 	github.com/aws/aws-sdk-go-v2 v1.43.4
 	github.com/aws/aws-sdk-go-v2/config v1.32.25
 	github.com/aws/aws-sdk-go-v2/credentials v1.19.24
-	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.59.0
+	github.com/aws/aws-sdk-go-v2/service/cloudwatch v1.66.3
 	github.com/aws/aws-sdk-go-v2/service/cloudwatchlogs v1.78.0
 	github.com/aws/aws-sdk-go-v2/service/ecs v1.85.0
 	github.com/aws/aws-sdk-go-v2/service/elasticloadbalancingv2 v1.55.4
