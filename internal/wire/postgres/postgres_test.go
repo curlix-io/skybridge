@@ -795,6 +795,96 @@ func TestNegotiateStartup_ClientDisconnectsDuringNegotiation(t *testing.T) {
 	_ = serverEnd.Close()
 }
 
+// authSASLPayload builds an AuthenticationSASL ('R', subtype 10) payload advertising mechanisms in
+// order, terminated by the empty string per the wire format.
+func authSASLPayload(mechanisms ...string) []byte {
+	buf := new(bytes.Buffer)
+	var u32 [4]byte
+	binary.BigEndian.PutUint32(u32[:], authSASL)
+	buf.Write(u32[:])
+	for _, m := range mechanisms {
+		buf.WriteString(m)
+		buf.WriteByte(0)
+	}
+	buf.WriteByte(0)
+	return buf.Bytes()
+}
+
+func TestStripSASLPlusMechanism_RemovesPlusKeepsPlain(t *testing.T) {
+	in := authSASLPayload("SCRAM-SHA-256", "SCRAM-SHA-256-PLUS")
+	out := stripSASLPlusMechanism(in)
+	if bytes.Contains(out, []byte("SCRAM-SHA-256-PLUS")) {
+		t.Fatal("SCRAM-SHA-256-PLUS should have been stripped")
+	}
+	if !bytes.Contains(out, []byte("SCRAM-SHA-256\x00")) {
+		t.Fatal("SCRAM-SHA-256 should still be advertised")
+	}
+	if got, want := binary.BigEndian.Uint32(out[0:4]), uint32(authSASL); got != want {
+		t.Fatalf("subtype = %d, want %d", got, want)
+	}
+	if !bytes.HasSuffix(out, []byte{0, 0}) {
+		t.Fatalf("expected mechanism list terminated by an empty string, got %x", out)
+	}
+}
+
+func TestStripSASLPlusMechanism_NoPlusUnchanged(t *testing.T) {
+	in := authSASLPayload("SCRAM-SHA-256")
+	out := stripSASLPlusMechanism(in)
+	if !bytes.Equal(in, out) {
+		t.Fatalf("payload without PLUS should be returned unchanged: got %x want %x", out, in)
+	}
+}
+
+func TestStripSASLPlusMechanism_NonSASLAuthMessageUnchanged(t *testing.T) {
+	// AuthenticationOK (subtype 0) must pass through untouched.
+	in := make([]byte, 4)
+	binary.BigEndian.PutUint32(in, authOK)
+	out := stripSASLPlusMechanism(in)
+	if !bytes.Equal(in, out) {
+		t.Fatalf("non-SASL authentication payload should be returned unchanged: got %x want %x", out, in)
+	}
+}
+
+func TestStripSASLPlusMechanism_ShortPayloadUnchanged(t *testing.T) {
+	in := []byte{0, 1}
+	out := stripSASLPlusMechanism(in)
+	if !bytes.Equal(in, out) {
+		t.Fatalf("short payload should be returned unchanged: got %x want %x", out, in)
+	}
+}
+
+// TestPipeBackend_StripsSASLPlusFromAuthentication is the end-to-end regression: a real
+// AuthenticationSASL message advertising PLUS, sent by the upstream server, must reach the native
+// client with PLUS removed — see stripSASLPlusMechanism's doc comment for why a split-TLS proxy can
+// never make channel binding work, and TestStripSASLPlusMechanism_* above for the payload-level
+// coverage of the transform itself.
+func TestPipeBackend_StripsSASLPlusFromAuthentication(t *testing.T) {
+	server := new(bytes.Buffer)
+	writeRaw := func(typ byte, payload []byte) {
+		var hdr [5]byte
+		hdr[0] = typ
+		binary.BigEndian.PutUint32(hdr[1:5], uint32(len(payload)+4))
+		server.Write(hdr[:])
+		server.Write(payload)
+	}
+	writeRaw(msgAuthentication, authSASLPayload("SCRAM-SHA-256", "SCRAM-SHA-256-PLUS"))
+	writeRaw('Z', []byte{'I'})
+
+	client := new(bytes.Buffer)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil)
+	if err == nil || err.Error() != "EOF" {
+		t.Fatalf("expected EOF at stream end, got %v", err)
+	}
+
+	out := client.Bytes()
+	if bytes.Contains(out, []byte("SCRAM-SHA-256-PLUS")) {
+		t.Fatal("SCRAM-SHA-256-PLUS reached the client unchanged")
+	}
+	if !bytes.Contains(out, []byte("SCRAM-SHA-256\x00")) {
+		t.Fatal("plain SCRAM-SHA-256 should still reach the client")
+	}
+}
+
 func readFull(r *bufio.Reader, b []byte) (int, error) {
 	got := 0
 	for got < len(b) {

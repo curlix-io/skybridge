@@ -4,7 +4,8 @@
 // forwarded verbatim (we never rewrite queries). The server->client direction is parsed message by
 // message; RowDescription ('T') is tracked for column names/formats and DataRow ('D') values are run
 // through the masker before being re-encoded and forwarded. Everything else (auth, errors, command
-// completion) passes through unchanged.
+// completion) passes through unchanged, with one exception: AuthenticationSASL's mechanism list has
+// "SCRAM-SHA-256-PLUS" stripped before forwarding — see stripSASLPlusMechanism for why.
 //
 // Client-side SSL: when the engine is built with a TLS config the proxy *terminates* the client's
 // SSLRequest (answers 'S' and completes a TLS handshake), so the StartupMessage — and, in the
@@ -340,6 +341,8 @@ func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, 
 		}
 
 		switch typ {
+		case msgAuthentication:
+			payload = stripSASLPlusMechanism(payload)
 		case 'T': // RowDescription
 			cols = parseRowDescription(ctx, payload, resolveObjectID)
 		case 'D': // DataRow
@@ -366,6 +369,40 @@ func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, 
 			}
 		}
 	}
+}
+
+// stripSASLPlusMechanism removes "SCRAM-SHA-256-PLUS" from an AuthenticationSASL ('R', subtype 10)
+// mechanism list before it reaches the native client. Everything else in the server->client stream
+// passes through byte-for-byte (see the package doc comment) — this is the one exception, and it
+// exists because this proxy always terminates client TLS and upstream TLS as two independent TLS
+// sessions (see negotiateStartup and agent.upstreamTLSPolicy). SCRAM-SHA-256-PLUS's channel-binding
+// proof (tls-server-end-point) is cryptographically tied to a *specific* TLS session; a client
+// computing it against the client<->proxy certificate can never satisfy a server checking it against
+// the proxy<->server certificate. Forwarding PLUS verbatim would let a client pick a mechanism this
+// split-TLS proxy can never make work, turning a real client-side setting (channel_binding=require)
+// into a hard, confusing auth failure. Stripping it here just leaves plain SCRAM-SHA-256 (no channel
+// binding) on the list, which the verbatim path already forwards and relays correctly today. Any
+// other message type, and any AuthenticationSASL that doesn't include PLUS, is returned unchanged.
+func stripSASLPlusMechanism(payload []byte) []byte {
+	const authSASLPlus = "SCRAM-SHA-256-PLUS"
+	if len(payload) < 4 || binary.BigEndian.Uint32(payload[0:4]) != authSASL {
+		return payload
+	}
+	body := payload[4:]
+	if !bytes.Contains(body, []byte(authSASLPlus+"\x00")) {
+		return payload
+	}
+	mechanisms := strings.Split(string(body), "\x00")
+	out := append([]byte(nil), payload[0:4]...)
+	for _, m := range mechanisms {
+		if m == "" || m == authSASLPlus {
+			continue
+		}
+		out = append(out, m...)
+		out = append(out, 0)
+	}
+	out = append(out, 0) // list terminator
+	return out
 }
 
 func writeMessage(w io.Writer, typ byte, payload []byte) error {
