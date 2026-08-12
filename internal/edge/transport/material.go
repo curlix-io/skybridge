@@ -12,8 +12,13 @@ import (
 	"google.golang.org/grpc/credentials"
 
 	"github.com/curlix-io/skybridge/internal/certstore"
+	"github.com/curlix-io/skybridge/internal/edgeiam"
 	connectorv1 "github.com/curlix-io/skybridge/internal/genpb/curlix/connector/v1"
 )
+
+// DefaultIamEnrollTokenPath is used when Config.IamEnrollURL is set but no override path is given
+// (there is currently no per-call override — every connector deployment hits the same path).
+const DefaultIamEnrollTokenPath = "/api/v1/skybridge/enrollments-iam"
 
 // tlsMaterial is the edge's mTLS identity: its client cert/key plus the CA bundle it trusts for the
 // gateway. A nil *tlsMaterial means "bearer-token mode" (no CA configured).
@@ -56,7 +61,31 @@ func (c *Client) ensureTLSMaterial(ctx context.Context) (*tlsMaterial, error) {
 		return nil, nil // no CA -> bearer (stored material may be stale/untrusted)
 	}
 
-	if c.cfg.EnrollToken == "" {
+	enrollToken := c.cfg.EnrollToken
+	if enrollToken == "" && c.cfg.IamAuthEnabled {
+		// No human-minted token needed: presign the edge's own ambient AWS identity (an ECS task
+		// role, in production) and exchange it for a fresh, short-lived enroll token. Unlike a
+		// static SKYBRIDGE_ENROLLMENT_TOKEN, this can be minted on every restart — including a
+		// redeployed task with a wiped disk — so it never hits the "token already consumed by the
+		// task I'm replacing" failure mode a single-use token has.
+		token, ierr := edgeiam.EnrollTokenViaIAM(ctx, edgeiam.IamEnrollConfig{
+			BaseURL:  c.cfg.IamEnrollURL,
+			Path:     DefaultIamEnrollTokenPath,
+			TenantID: c.cfg.TenantID,
+			AgentID:  c.cfg.ConnectorID,
+		})
+		if ierr != nil {
+			if stored != nil {
+				// Mint failed (e.g. control plane hiccup) but we still have a stale-but-usable
+				// cert cached — prefer that over hard-failing the connection attempt.
+				return &tlsMaterial{caBundlePEM: pickCA(), clientCertPEM: stored.ClientCertPEM, clientKeyPEM: stored.ClientKeyPEM}, nil
+			}
+			return nil, fmt.Errorf("IAM enroll-token: %w", ierr)
+		}
+		enrollToken = token
+	}
+
+	if enrollToken == "" {
 		if stored != nil {
 			// Expired but no token to renew — try anyway; the gateway rejects if invalid.
 			return &tlsMaterial{caBundlePEM: pickCA(), clientCertPEM: stored.ClientCertPEM, clientKeyPEM: stored.ClientKeyPEM}, nil
@@ -64,7 +93,7 @@ func (c *Client) ensureTLSMaterial(ctx context.Context) (*tlsMaterial, error) {
 		return nil, errors.New("mTLS configured (CA bundle present) but no client cert and no SKYBRIDGE_ENROLLMENT_TOKEN to enroll")
 	}
 
-	m, err := c.enroll(ctx)
+	m, err := c.enrollWithToken(ctx, enrollToken)
 	if err != nil {
 		return nil, err
 	}
@@ -74,9 +103,15 @@ func (c *Client) ensureTLSMaterial(ctx context.Context) (*tlsMaterial, error) {
 	return m, nil
 }
 
-// enroll generates a fresh keypair + CSR and exchanges a one-time enrollment token for a signed cert
-// over a server-TLS channel (no client cert yet).
+// enroll generates a fresh keypair + CSR and exchanges c.cfg.EnrollToken (a one-time enrollment
+// token) for a signed cert over a server-TLS channel (no client cert yet).
 func (c *Client) enroll(ctx context.Context) (*tlsMaterial, error) {
+	return c.enrollWithToken(ctx, c.cfg.EnrollToken)
+}
+
+// enrollWithToken is enroll's implementation, parameterized on the token so ensureTLSMaterial can
+// pass a freshly IAM-minted one without mutating c.cfg.
+func (c *Client) enrollWithToken(ctx context.Context, enrollToken string) (*tlsMaterial, error) {
 	keyPEM, csrPEM, err := generateKeyAndCSR(c.cfg.TrustDomain, c.cfg.TenantID, c.cfg.ConnectorID)
 	if err != nil {
 		return nil, err
@@ -97,7 +132,7 @@ func (c *Client) enroll(ctx context.Context) (*tlsMaterial, error) {
 
 	c.logger.Info(fmt.Sprintf("enrolling tenant=%s edge=%s via %s", c.cfg.TenantID, c.cfg.ConnectorID, target))
 	resp, err := connectorv1.NewConnectorGatewayClient(conn).Enroll(ctx, &connectorv1.EnrollRequest{
-		EnrollmentToken: c.cfg.EnrollToken,
+		EnrollmentToken: enrollToken,
 		TenantId:        c.cfg.TenantID,
 		ConnectorId:     c.cfg.ConnectorID,
 		CsrPem:          string(csrPEM),

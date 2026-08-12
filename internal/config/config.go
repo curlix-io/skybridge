@@ -397,8 +397,22 @@ type Edge struct {
 	TrustDomain string
 	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a
 	// replaced ECS task recovers its identity instead of re-enrolling with an already-used one-time
-	// token. See SKYBRIDGE_IDENTITY_SECRET_ARN.
+	// token. See SKYBRIDGE_IDENTITY_SECRET_ARN. IamAuthEnabled below is a stronger alternative for
+	// this same problem — no static secret at all — and takes priority when both are set.
 	IdentitySecretARN string
+
+	// AWS-IAM-authenticated enrollment (mirrors WireMtlsIamAuthEnabled): the edge presigns its own
+	// sts:GetCallerIdentity with ambient AWS credentials (an ECS task role, in production) and
+	// exchanges that for a fresh enroll token via IamEnrollURL, instead of relying on a static,
+	// single-use EnrollToken/StudioEnrollmentToken. Safe to call on every restart — including a
+	// redeployed task whose disk (and cached IdentitySecretARN cert, if that mint also fails) is
+	// gone — so it closes the "single-use token already consumed by the task I'm replacing"
+	// deploy failure documented in README.md's "Keeping mTLS identity alive across redeploys".
+	// Shared by both the connector and Studio enrollment surfaces (internal/edge/transport,
+	// internal/edge/studiotransport) — they hit the same control-plane endpoint, distinguished by
+	// tenant_id/agent_id in the request body.
+	IamAuthEnabled bool   // SKYBRIDGE_IAM_AUTH (truthy)
+	IamEnrollURL   string // SKYBRIDGE_IAM_ENROLL_URL (control-plane origin, e.g. https://app.example.com)
 
 	// Live read-only AWS access (executed locally at the edge).
 	AWSRegion        string
@@ -459,6 +473,8 @@ func LoadEdge() Edge {
 		EnrollToken:             env("SKYBRIDGE_ENROLLMENT_TOKEN", key.EnrollmentToken),
 		TrustDomain:             env("SKYBRIDGE_TRUST_DOMAIN", ""),
 		IdentitySecretARN:       env("SKYBRIDGE_IDENTITY_SECRET_ARN", ""),
+		IamAuthEnabled:          truthy(env("SKYBRIDGE_IAM_AUTH", "")),
+		IamEnrollURL:            env("SKYBRIDGE_IAM_ENROLL_URL", ""),
 		AWSRegion:               env("SKYBRIDGE_AWS_REGION", key.AWSRegion),
 		AWSAssumeRoleARN:        env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
 		AWSExternalID:           env("SKYBRIDGE_AWS_EXTERNAL_ID", ""),

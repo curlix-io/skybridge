@@ -79,6 +79,12 @@ type Config struct {
 	EnrollTarget      string
 	EnrollToken       string
 	TrustDomain       string
+
+	// IamAuthEnabled/IamEnrollURL mirror internal/edge/transport.Config's equivalent fields — mint
+	// a fresh enroll token from the edge's ambient AWS identity instead of relying on a static,
+	// single-use EnrollToken. See SKYBRIDGE_IAM_AUTH / SKYBRIDGE_IAM_ENROLL_URL.
+	IamAuthEnabled bool
+	IamEnrollURL   string
 }
 
 // Client maintains the Studio Gateway Connect stream.

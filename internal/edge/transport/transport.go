@@ -91,6 +91,14 @@ type Config struct {
 	EnrollTarget      string // Enroll endpoint host:port (defaults to Target)
 	EnrollToken       string // one-time enrollment token (needed to obtain the first cert)
 	TrustDomain       string // SPIFFE trust domain placed in the CSR SAN (cosmetic; default skybridge.edge)
+
+	// IamAuthEnabled, when true, mints its own enroll token by presigning sts:GetCallerIdentity
+	// with the edge's ambient AWS credentials (an ECS task role, in production) instead of relying
+	// on a static, single-use EnrollToken — see internal/edgeiam. Safe to use on every restart,
+	// including a redeployed task with a wiped disk. IamEnrollURL is the control-plane HTTPS
+	// origin that verifies the presigned request (see SKYBRIDGE_IAM_AUTH / SKYBRIDGE_IAM_ENROLL_URL).
+	IamAuthEnabled bool
+	IamEnrollURL   string
 }
 
 // Client maintains the call-home connection and serves dispatched tool work.

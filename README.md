@@ -750,8 +750,9 @@ replacement (new image, new task definition, a CPU/memory bump — anything that
 task) wipes that disk. Since `SKYBRIDGE_ENROLLMENT_TOKEN` is **single-use**, the new task can't just
 re-enroll: the token was already consumed by the task it replaced, and the deploy fails.
 
-**Fix:** point the edge at an AWS Secrets Manager secret and it will keep its identity there too,
-so a replacement task picks up right where the old one left off — no new token required.
+**Fix 1 (cache the cert):** point the edge at an AWS Secrets Manager secret and it will keep its
+identity there too, so a replacement task picks up right where the old one left off — no new token
+required.
 
 | Identity | Env var |
 |---|---|
@@ -762,6 +763,54 @@ so a replacement task picks up right where the old one left off — no new token
 Point one of these at a secret ARN the task's IAM role can `GetSecretValue`/`PutSecretValue` on
 (`internal/certstore`), and the edge mirrors its cert there on first enrollment, then loads from it
 on every subsequent start.
+
+**Fix 2 (skip the static token entirely — AWS IAM auth, 2026-08-12).** This is the stronger fix:
+instead of a human-minted, single-use `SKYBRIDGE_ENROLLMENT_TOKEN`, the edge presigns its own
+`sts:GetCallerIdentity` call with whatever ambient AWS credentials it already has (the ECS task
+role) and exchanges that for a fresh enroll token from your control plane. Nothing is consumed by
+minting it, so it's safe to call on *every* restart — a redeployed task with a wiped disk just
+mints a new one instead of hitting the "token already used by the task I'm replacing" failure.
+This is the same pattern behind Teleport's `iam` join method, HashiCorp Vault's `aws` auth method,
+and HashiCorp Boundary's KMS-registered workers: re-prove identity from a platform-native source on
+every boot rather than persisting a bootstrap secret.
+
+```sh
+SKYBRIDGE_IAM_AUTH=true \
+SKYBRIDGE_IAM_ENROLL_URL=https://api.example.com \
+go run ./cmd/skybridge edge
+```
+
+Covers both the connector (edge → Connector Gateway) and Studio (edge → Studio Gateway) identities
+in one flag; `internal/wiremtls` (agent → relay gateway tunnel) has its own equivalent,
+`SKYBRIDGE_WIRE_MTLS_IAM_AUTH` (paired with `SKYBRIDGE_WIRE_MTLS_ENROLL_URL`). The control plane
+must implement the corresponding server-side STS-replay verification — see `internal/edgeiam` for
+the exact request shape presigned and posted. Fix 1's Secrets Manager cache still applies on top of
+this: a cached, still-valid cert is always reused first, so Fix 2 only triggers a mint on an actual
+cache miss (first enrollment, or every identity provider's own cert TTL expiring).
+
+#### Reconnect resilience (2026-08-12)
+
+Both call-home clients (`internal/edge/transport` for the Connector Gateway, and
+`internal/edge/studiotransport` for the Studio Gateway) share the same reconnect design, matched
+to the same fixes on the Curlix-SaaS side (`docs/design/skybridge-masking-architecture.md` §10.5
+in the `curlix` repo):
+
+- **Jittered exponential backoff** (`jitteredBackoff`, `[d/2, d)`) on every reconnect, starting at
+  1s and doubling up to `Config.MaxBackoff` (default 30s) — avoids a thundering herd of edges
+  reconnecting to the same gateway in lockstep.
+- **Backoff only resets to baseline after a stable connection** (`backoffResetAfter`, 60s) — a
+  connection that connects and drops again immediately (bad keepalive, a flapping listener) keeps
+  the backoff ladder escalating instead of retrying at a 0-delay pace forever.
+- **Auth failures get a distinct, higher floor** (`authFailureBackoffFloor`, 120s) — an
+  `Unauthenticated` `Connect` error (expired/revoked credential) is a config problem, not a
+  transient blip; retrying at the ordinary backoff cadence would otherwise hammer the gateway
+  every few seconds until a human fixes the credential.
+- **`PreConnect` pre-flight** — before opening the full `Connect` stream, the client makes one
+  cheap unary `PreConnect` call. A gateway that's draining (redeploying) or has revoked this
+  identity answers `{ok: false, retry_after_seconds, reason}`, and the client sleeps that long
+  (jittered) before trying again — no failed stream handshake needed to find out. This is
+  advisory: a gateway that predates this RPC (or any transient error calling it) is treated as "go
+  ahead," so it never blocks a connection on its own.
 
 ### Docs
 
