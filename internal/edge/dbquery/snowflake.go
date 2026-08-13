@@ -78,7 +78,7 @@ func executeSnowflake(ctx context.Context, target Target, database, q string, op
 	}
 	data = capRows(data, opts.MaxRows)
 	objID := objectID(opts.OrgID, "snowflake", dbName, dbName)
-	masked, err := maskRows(ctx, masker, opts.Detector, opts.ProposeStore, objID, cols, data)
+	masked, err := maskRows(ctx, masker, opts.Detector, opts.ProposeStore, opts.SampleCollector, objID, cols, data)
 	if err != nil {
 		return nil, err
 	}

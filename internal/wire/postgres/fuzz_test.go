@@ -41,7 +41,7 @@ func FuzzMaskDataRow(f *testing.F) {
 		if !withCols {
 			useCols = nil
 		}
-		_, _, _ = maskDataRow(context.Background(), p, useCols, mask.Noop{})
+		_, _, _ = maskDataRow(context.Background(), p, useCols, mask.Noop{}, nil)
 	})
 }
 

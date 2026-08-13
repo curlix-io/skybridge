@@ -46,6 +46,15 @@ type Options struct {
 	// same pathlabel/remotestore.Store backing the PathOverlay masker in this chain, but kept as a
 	// separate field (rather than trying to unwrap it from Masker) since Masker is an opaque Chain.
 	ProposeStore label.Store
+	// SampleCollector, when set, receives every text leaf's pre-mask value keyed by its resolved
+	// ObjectID/FieldPath, independent of whether Detector fires — this is the sample source for an
+	// AI classifier scan (internal/pathlabel/trafficsampler.Buffer implements this), so classification
+	// no longer needs a second, dedicated read-only DSN to sample from (see
+	// docs/AI_PATH_LABELLING_DESIGN.md §5.2). Optional; nil disables collection without affecting
+	// masking or Detector-based proposing.
+	SampleCollector interface {
+		Observe(objectID, fieldPath, value string)
+	}
 }
 
 // objectID builds the opaque, tenant-scoped identifier mask.Column.ObjectID carries for a query

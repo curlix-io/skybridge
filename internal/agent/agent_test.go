@@ -11,6 +11,7 @@ import (
 
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/mask"
+	"github.com/curlix-io/skybridge/internal/pathlabel/remotestore"
 	"github.com/curlix-io/skybridge/internal/wire"
 )
 
@@ -117,6 +118,36 @@ func TestBuildMaskerWithOverlayNilHandleWhenNoOverlay(t *testing.T) {
 	_, overlay, _, _, _ := buildMaskerWithOverlay(config.Agent{MaskAnalyzeURL: "http://a", MaskAnonymizeURL: "http://b"})
 	if overlay != nil {
 		t.Fatal("expected a nil overlay handle when no overlay is configured")
+	}
+}
+
+// TestBuildTrafficSampler_DisabledWithoutLLMEndpointOrStore confirms buildTrafficSampler stays a
+// safe no-op unless both a store (PathLabelURL configured) and an LLM endpoint are set — matching
+// every other optional integration's "nothing configured -> nil" contract.
+func TestBuildTrafficSampler_DisabledWithoutLLMEndpointOrStore(t *testing.T) {
+	if buf := buildTrafficSampler(config.Agent{}, nil); buf != nil {
+		t.Fatal("expected nil with neither LLM endpoint nor store configured")
+	}
+	store := remotestore.New(config.Agent{PathLabelURL: "http://example.invalid"}, nil)
+	if buf := buildTrafficSampler(config.Agent{}, store); buf != nil {
+		t.Fatal("expected nil with a store but no LLM endpoint configured")
+	}
+	if buf := buildTrafficSampler(config.Agent{TrafficSamplerLLMEndpoint: "http://example.invalid"}, nil); buf != nil {
+		t.Fatal("expected nil with an LLM endpoint but no store configured")
+	}
+}
+
+// TestBuildTrafficSampler_EnabledWithBothConfigured confirms buildTrafficSampler returns a usable
+// Buffer once both prerequisites are set (see docs/AI_PATH_LABELLING_DESIGN.md §5.2).
+func TestBuildTrafficSampler_EnabledWithBothConfigured(t *testing.T) {
+	store := remotestore.New(config.Agent{PathLabelURL: "http://example.invalid"}, nil)
+	buf := buildTrafficSampler(config.Agent{TrafficSamplerLLMEndpoint: "http://example.invalid"}, store)
+	if buf == nil {
+		t.Fatal("expected a non-nil Buffer with both LLM endpoint and store configured")
+	}
+	buf.Observe("org1:postgres:app:users", "email", "a@example.com")
+	if len(buf.Fields()) != 1 {
+		t.Fatalf("expected the buffer to be usable, got fields=%v", buf.Fields())
 	}
 }
 

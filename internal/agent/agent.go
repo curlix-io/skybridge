@@ -25,7 +25,9 @@ import (
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/mask"
 	"github.com/curlix-io/skybridge/internal/mask/metrics"
+	"github.com/curlix-io/skybridge/internal/pathlabel/aiclassifier"
 	"github.com/curlix-io/skybridge/internal/pathlabel/remotestore"
+	"github.com/curlix-io/skybridge/internal/pathlabel/trafficsampler"
 	"github.com/curlix-io/skybridge/internal/tunnel"
 	"github.com/curlix-io/skybridge/internal/wire"
 	"github.com/curlix-io/skybridge/internal/wiremtls"
@@ -104,7 +106,7 @@ func proxyConn(ctx context.Context, engine wire.Engine, client, upstream net.Con
 // EngineFor selects a wire engine by database type (no client-TLS termination). The agent uses the
 // TLS-aware engineFactory at runtime; this stays for callers/tests that want the plaintext default.
 func EngineFor(dbType string) (wire.Engine, error) {
-	return engineFactory(nil, "", nil)(dbType)
+	return engineFactory(nil, "", nil, nil)(dbType)
 }
 
 // BuildMasker assembles the masking chain (remote masker + your column overlay) from config. It
@@ -198,6 +200,47 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.RoleOverlay, *
 	return mask.NewChain(maskers...), overlay, remote, store, metricsRecorder
 }
 
+// buildTrafficSampler returns an internal/pathlabel/trafficsampler.Buffer ready to be wired into
+// this agent's wire engines via engineFactory's collector parameter, or nil when the traffic-fed AI
+// classifier is disabled — either no LLM endpoint configured, or no PathLabelURL (store) to propose
+// labels to, since the classifier reuses the same remotestore.Store PathOverlay already syncs
+// against rather than opening a second one (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). Unlike
+// internal/labeller's DSN-based scan job, this needs no second, dedicated read-only credential —
+// samples come from live traffic the wire engines already observe.
+func buildTrafficSampler(cfg config.Agent, store *remotestore.Store) *trafficsampler.Buffer {
+	if cfg.TrafficSamplerLLMEndpoint == "" || store == nil {
+		return nil
+	}
+	return trafficsampler.New(cfg.TrafficSamplerMaxFields, cfg.TrafficSamplerMaxSamplesPerField)
+}
+
+// startTrafficSampler starts buf's periodic classify-and-propose loop (internal/pathlabel/
+// trafficsampler.Run) against ctx, using store as both the confirmed-label source PathOverlay
+// already reads and the Put sink for this classifier's SourceProposed labels. No-op when buf or
+// store is nil (buildTrafficSampler already returns nil together for both, but this stays
+// defensive rather than assuming that invariant at every call site).
+func startTrafficSampler(ctx context.Context, cfg config.Agent, buf *trafficsampler.Buffer, store *remotestore.Store, logger *slog.Logger) {
+	if buf == nil || store == nil {
+		return
+	}
+	classifier := aiclassifier.NewLLM(aiclassifier.LLMConfig{
+		Endpoint:      cfg.TrafficSamplerLLMEndpoint,
+		APIKey:        cfg.TrafficSamplerLLMAPIKey,
+		Categories:    cfg.TrafficSamplerLLMCategories,
+		MinConfidence: cfg.TrafficSamplerLLMMinConfidence,
+	})
+	scanner := aiclassifier.NewScanner(aiclassifier.ScannerConfig{
+		Classifier: classifier,
+		Sampler:    buf,
+		Store:      store,
+	})
+	go trafficsampler.Run(ctx, trafficsampler.RunnerConfig{
+		Buffer:              buf,
+		Scanner:             scanner,
+		ScanIntervalSeconds: cfg.TrafficSamplerScanIntervalSeconds,
+	}, logger)
+}
+
 // logMaskingGuardrails emits startup warnings when the configured masking posture is weaker than an
 // operator likely intends. By default (SKYBRIDGE_MASK_MODE=best-effort) the wire proxy is fail-open
 // — a masker miss or outage forwards the value unchanged — so a missing layer silently lets data
@@ -275,10 +318,6 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *slog.Logger) err
 	if err != nil {
 		return err
 	}
-	engine, err := engineFactory(clientTLS, cfg.OrgID, pgCatalog)(cfg.DBType)
-	if err != nil {
-		return err
-	}
 	masker, overlay, remote, pathLabelStore, metricsRecorder := buildMaskerWithOverlay(cfg)
 	startOverlaySync(ctx, cfg, overlay, logger)
 	startRecognizersSync(ctx, cfg, remote, logger)
@@ -288,7 +327,13 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *slog.Logger) err
 	if metricsRecorder != nil {
 		metricsRecorder.Start(ctx)
 	}
+	trafficSampler := buildTrafficSampler(cfg, pathLabelStore)
+	startTrafficSampler(ctx, cfg, trafficSampler, pathLabelStore, logger)
 	logMaskingGuardrails(cfg, logger)
+	engine, err := engineFactory(clientTLS, cfg.OrgID, pgCatalog, trafficSampler)(cfg.DBType)
+	if err != nil {
+		return err
+	}
 	resolver := NewHTTPCredentialResolver(cfg)
 	upTLS, err := buildUpstreamTLSPolicy(cfg)
 	if err != nil {
@@ -423,6 +468,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 	}
 	// Build the masker here (rather than letting withDefaults do it) so we can capture the overlay
 	// handle and keep it refreshed from the control plane. Respect a test-injected masker.
+	var trafficSampler *trafficsampler.Buffer
 	if deps.Masker == nil {
 		masker, overlay, remote, pathLabelStore, metricsRecorder := buildMaskerWithOverlay(cfg)
 		deps.Masker = masker
@@ -434,6 +480,8 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		if metricsRecorder != nil {
 			metricsRecorder.Start(ctx)
 		}
+		trafficSampler = buildTrafficSampler(cfg, pathLabelStore)
+		startTrafficSampler(ctx, cfg, trafficSampler, pathLabelStore, logger)
 		logMaskingGuardrails(cfg, logger)
 	}
 	// Build the engine factory with client-TLS termination (Postgres) unless a test injected one.
@@ -446,7 +494,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		if err != nil {
 			return err
 		}
-		deps.Engine = engineFactory(clientTLS, cfg.OrgID, pgCatalog)
+		deps.Engine = engineFactory(clientTLS, cfg.OrgID, pgCatalog, trafficSampler)
 		if clientTLS != nil {
 			logger.Info("[tunnel] client TLS termination ENABLED for Postgres targets.")
 		}

@@ -652,6 +652,52 @@ func TestMaskString_MalformedValuePassesThrough(t *testing.T) {
 	}
 }
 
+// fakeCollector records every Observe call, standing in for trafficsampler.Buffer.
+type fakeCollector struct {
+	observed map[string]string
+}
+
+func (c *fakeCollector) Observe(objectID, fieldPath, value string) {
+	if c.observed == nil {
+		c.observed = make(map[string]string)
+	}
+	c.observed[objectID+"|"+fieldPath] = value
+}
+
+// bsonStringValue encodes s as a raw BSON string value (int32 length + bytes + trailing NUL) — the
+// same shape maskString decodes, independent of any surrounding document.
+func bsonStringValue(s string) []byte {
+	v := make([]byte, 4, 4+len(s)+1)
+	binary.LittleEndian.PutUint32(v, uint32(len(s)+1))
+	v = append(v, s...)
+	v = append(v, 0x00)
+	return v
+}
+
+// TestMaskString_CollectsSampleWhenObjectIDResolved mirrors the postgres/mysql equivalent tests: a
+// resolved curObjectID observes the pre-mask string value; an empty curObjectID does not.
+func TestMaskString_CollectsSampleWhenObjectIDResolved(t *testing.T) {
+	col := &fakeCollector{}
+	bm := &bsonMasker{ctx: context.Background(), masker: mask.Noop{}, curObjectID: "org1:mongo:app:users", collector: col}
+	if _, err := bm.maskString("note", "note", bsonStringValue("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if col.observed["org1:mongo:app:users|note"] != "hello" {
+		t.Fatalf("expected a sample observed for the resolved ObjectID, got %v", col.observed)
+	}
+}
+
+func TestMaskString_SkipsCollectionWhenObjectIDUnresolved(t *testing.T) {
+	col := &fakeCollector{}
+	bm := &bsonMasker{ctx: context.Background(), masker: mask.Noop{}, collector: col}
+	if _, err := bm.maskString("note", "note", bsonStringValue("hello")); err != nil {
+		t.Fatal(err)
+	}
+	if len(col.observed) != 0 {
+		t.Fatalf("expected no sample observed without a resolved ObjectID, got %v", col.observed)
+	}
+}
+
 // ---- observe: non-OP_MSG and too-short messages are silently skipped ----
 
 func TestRequestTracker_ObserveIgnoresNonOpMsg(t *testing.T) {

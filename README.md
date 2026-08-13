@@ -500,6 +500,13 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_UPSTREAM_TLS_CA_FILE` / `_PEM` | system roots | trust roots used by `verify-ca` / `verify-full` (e.g. the RDS CA bundle) |
 | `SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME` | dial host | override the verified hostname / SNI sent to the upstream |
 | `SKYBRIDGE_POSTGRES_CATALOG_DSN` | — | dedicated, read-only Postgres credential (`postgres://user:pass@host:port`) the agent uses on a separate connection it owns for `pg_class`/`pg_namespace` lookups, resolving `PathOverlay`'s table identity for Postgres wire-proxy connections (see [Path-scoped labels](./REDACTION.md#path-scoped-labels-mask-pathoverlay)); unset leaves Postgres's `ObjectID` unresolved, same as before this existed |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT` | — | enables a traffic-fed AI path-label classifier that samples free-text values straight out of live wire-proxy/`dbquery` traffic already flowing through this agent — no second, dedicated read-only DSN required (see `docs/AI_PATH_LABELLING_DESIGN.md` §5.2). Also requires `SKYBRIDGE_PATH_LABEL_URL` (proposals are pushed through the same store `PathOverlay` already syncs against); unset (or no `SKYBRIDGE_PATH_LABEL_URL`) disables it entirely |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_API_KEY` | — | bearer/API key for the LLM endpoint above |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_CATEGORIES` | — | comma-separated PII category taxonomy the classifier is constrained to return |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_MIN_CONFIDENCE` | `0.5` | minimum confidence to accept a classifier proposal |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_MAX_FIELDS` | `10000` | max distinct `(ObjectID, FieldPath)` pairs buffered at once (LRU-evicted beyond this) |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_MAX_SAMPLES_PER_FIELD` | `20` | max sample values retained per field |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_SCAN_INTERVAL_SECONDS` | `300` | how often buffered fields are classified and proposed |
 
 Switch databases by changing `SKYBRIDGE_DB_TYPE`; everything else is identical.
 
