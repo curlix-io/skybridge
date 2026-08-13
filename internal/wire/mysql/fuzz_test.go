@@ -34,6 +34,6 @@ func FuzzMaskTextRow(f *testing.F) {
 	f.Add([]byte{})
 	f.Add([]byte{0xFE, '0', '0', '0', '0', '0', '0', '0', 0xF3})
 	f.Fuzz(func(t *testing.T, payload []byte) {
-		_, _, _, _ = maskTextRow(context.Background(), payload, nil, mask.Noop{})
+		_, _, _, _ = maskTextRow(context.Background(), payload, nil, mask.Noop{}, nil)
 	})
 }

@@ -103,7 +103,7 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 	}
 
 	// Command phase: identical to the verbatim path, offset 0 (the agent ran both auths itself).
-	s := &state{caps: info.caps, queries: make(chan struct{}, 64)}
+	s := &state{caps: info.caps, queries: make(chan struct{}, 64), collector: e.collector}
 	errc := make(chan error, 2)
 	go func() { errc <- s.clientToServer(cb, upstream, recorder) }()
 	go func() { errc <- s.serverToClient(ctx, sb, client, masker, recorder) }()

@@ -16,6 +16,12 @@ type detector interface {
 	Detect(ctx context.Context, text string) (category string, confidence float64, ok bool)
 }
 
+// sampleCollector matches trafficsampler.Buffer's Observe method (see executor.go's
+// Options.SampleCollector) — kept as a local interface for the same reason as detector above.
+type sampleCollector interface {
+	Observe(objectID, fieldPath, value string)
+}
+
 // proposeLeaf runs det against value, if set, and Puts a SourceProposed label into store for the
 // matching leaf when det reports a positive match. Both det and store must be non-nil (checked by
 // the caller) — this is a small helper shared by maskRows and maskDocuments rather than a
@@ -63,12 +69,13 @@ func isFreeTextValue(v any) bool {
 	}
 }
 
-func maskRows(ctx context.Context, masker mask.Masker, det detector, store label.Store, objID string, cols []string, rows []map[string]any) ([]map[string]any, error) {
+func maskRows(ctx context.Context, masker mask.Masker, det detector, store label.Store, collector sampleCollector, objID string, cols []string, rows []map[string]any) ([]map[string]any, error) {
 	if masker == nil {
 		return rows, nil
 	}
 	out := make([]map[string]any, 0, len(rows))
 	propose := det != nil && store != nil && objID != ""
+	collect := collector != nil && objID != ""
 	for _, row := range rows {
 		maskCols := make([]mask.Column, len(cols))
 		raw := make([][]byte, len(cols))
@@ -80,8 +87,13 @@ func maskRows(ctx context.Context, masker mask.Masker, det detector, store label
 				continue
 			}
 			raw[i] = []byte(fmt.Sprint(v))
-			if propose && maskCols[i].FreeText {
-				proposeLeaf(ctx, det, store, objID, col, string(raw[i]))
+			if maskCols[i].FreeText {
+				if propose {
+					proposeLeaf(ctx, det, store, objID, col, string(raw[i]))
+				}
+				if collect {
+					collector.Observe(objID, col, string(raw[i]))
+				}
 			}
 		}
 		masked, err := masker.MaskRow(ctx, maskCols, raw)
@@ -106,11 +118,12 @@ func maskRows(ctx context.Context, masker mask.Masker, det detector, store label
 // lets a path-scoped label distinguish e.g. "order.total" from "user.total" (pathlabel design doc
 // §3.3), and what lets a nested "profile.contact.email" carry its own label independent of any
 // top-level field happening to share the name "email".
-func maskDocuments(ctx context.Context, masker mask.Masker, det detector, store label.Store, objID string, docs []map[string]any) ([]map[string]any, error) {
+func maskDocuments(ctx context.Context, masker mask.Masker, det detector, store label.Store, collector sampleCollector, objID string, docs []map[string]any) ([]map[string]any, error) {
 	if masker == nil {
 		return docs, nil
 	}
 	propose := det != nil && store != nil && objID != ""
+	collect := collector != nil && objID != ""
 	out := make([]map[string]any, 0, len(docs))
 	for _, doc := range docs {
 		leaves := docpath.Walk(doc)
@@ -124,6 +137,9 @@ func maskDocuments(ctx context.Context, masker mask.Masker, det detector, store 
 			raw = append(raw, []byte(l.Value))
 			if propose {
 				proposeLeaf(ctx, det, store, objID, l.Path, l.Value)
+			}
+			if collect {
+				collector.Observe(objID, l.Path, l.Value)
 			}
 		}
 		masked, err := masker.MaskRow(ctx, maskCols, raw)

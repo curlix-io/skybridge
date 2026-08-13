@@ -127,6 +127,21 @@ type Agent struct {
 	// resolution entirely: PathOverlay then behaves exactly as it does today for Postgres (empty
 	// ObjectID, safe no-op, falls through to layer 3).
 	PostgresCatalogDSN string // SKYBRIDGE_POSTGRES_CATALOG_DSN
+
+	// Traffic-fed AI path-label classifier (internal/pathlabel/trafficsampler). Unlike
+	// internal/labeller's DSN-based scan job, this samples free-text values straight out of live
+	// wire-proxy/dbquery traffic already flowing through this agent — no second, dedicated read-only
+	// credential (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). Enabled only when both
+	// TrafficSamplerLLMEndpoint and PathLabelURL are set: the classifier needs somewhere to propose
+	// labels to, and this reuses the same remotestore.Store PathOverlay already syncs against rather
+	// than opening a second one.
+	TrafficSamplerLLMEndpoint         string   // SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT ("" disables the traffic-fed classifier)
+	TrafficSamplerLLMAPIKey           string   // SKYBRIDGE_TRAFFIC_SAMPLER_LLM_API_KEY
+	TrafficSamplerLLMCategories       []string // SKYBRIDGE_TRAFFIC_SAMPLER_LLM_CATEGORIES (comma-separated taxonomy)
+	TrafficSamplerLLMMinConfidence    float64  // SKYBRIDGE_TRAFFIC_SAMPLER_LLM_MIN_CONFIDENCE
+	TrafficSamplerMaxFields           int      // SKYBRIDGE_TRAFFIC_SAMPLER_MAX_FIELDS (0 -> trafficsampler.Buffer's own default)
+	TrafficSamplerMaxSamplesPerField  int      // SKYBRIDGE_TRAFFIC_SAMPLER_MAX_SAMPLES_PER_FIELD (0 -> default)
+	TrafficSamplerScanIntervalSeconds int      // SKYBRIDGE_TRAFFIC_SAMPLER_SCAN_INTERVAL_SECONDS (0 -> default)
 	// PIIOverlay is the column->rule overlay you define (off by default): from SKYBRIDGE_PII_OVERLAY
 	// (inline JSON, full-value replacement tokens only — see parseOverlay) or SKYBRIDGE_PII_OVERLAY_FILE
 	// (a path to a YAML or JSON file — easier to author, diff, and commit than one-line JSON in an env
@@ -292,6 +307,14 @@ func LoadAgent() Agent {
 		PathLabelPollSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_POLL_SECONDS", ""), 60),
 		PathLabelPushSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_PUSH_SECONDS", ""), 15),
 		PostgresCatalogDSN:   env("SKYBRIDGE_POSTGRES_CATALOG_DSN", ""),
+
+		TrafficSamplerLLMEndpoint:         env("SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT", ""),
+		TrafficSamplerLLMAPIKey:           env("SKYBRIDGE_TRAFFIC_SAMPLER_LLM_API_KEY", ""),
+		TrafficSamplerLLMCategories:       splitCSV(env("SKYBRIDGE_TRAFFIC_SAMPLER_LLM_CATEGORIES", "")),
+		TrafficSamplerLLMMinConfidence:    atofDefault(env("SKYBRIDGE_TRAFFIC_SAMPLER_LLM_MIN_CONFIDENCE", ""), 0.5),
+		TrafficSamplerMaxFields:           atoiDefault(env("SKYBRIDGE_TRAFFIC_SAMPLER_MAX_FIELDS", ""), 0),
+		TrafficSamplerMaxSamplesPerField:  atoiDefault(env("SKYBRIDGE_TRAFFIC_SAMPLER_MAX_SAMPLES_PER_FIELD", ""), 0),
+		TrafficSamplerScanIntervalSeconds: atoiDefault(env("SKYBRIDGE_TRAFFIC_SAMPLER_SCAN_INTERVAL_SECONDS", ""), 0),
 
 		InjectCredentials:        truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
 		CredentialExchangeURL:    env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),

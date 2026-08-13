@@ -25,7 +25,7 @@ func (wrongCountMasker) MaskRow(_ context.Context, cols []mask.Column, _ [][]byt
 // indexing past the end of a short masker response.
 func TestMaskDocuments_ErrorsOnMaskerLengthMismatch(t *testing.T) {
 	docs := []map[string]any{{"a": "1", "b": "2"}}
-	_, err := maskDocuments(context.Background(), wrongCountMasker{}, nil, nil, "", docs)
+	_, err := maskDocuments(context.Background(), wrongCountMasker{}, nil, nil, nil, "", docs)
 	if err == nil {
 		t.Fatal("expected an error when the masker returns the wrong number of values")
 	}
@@ -41,7 +41,7 @@ func (nilifyMasker) MaskRow(_ context.Context, cols []mask.Column, _ [][]byte) (
 
 func TestMaskDocuments_NilMaskedValueBecomesEmptyString(t *testing.T) {
 	docs := []map[string]any{{"note": "secret"}}
-	out, err := maskDocuments(context.Background(), nilifyMasker{}, nil, nil, "", docs)
+	out, err := maskDocuments(context.Background(), nilifyMasker{}, nil, nil, nil, "", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -73,7 +73,7 @@ func TestMaskRows_ProposesLabelsForFreeTextDetectorMatches(t *testing.T) {
 	rows := []map[string]any{{"note": "SECRET", "other": "nothing interesting", "id": 1}}
 	cols := []string{"note", "other", "id"}
 	spy := &pathSpyMasker{}
-	_, err := maskRows(context.Background(), spy, det, store, "org1:postgres:app:app", cols, rows)
+	_, err := maskRows(context.Background(), spy, det, store, nil, "org1:postgres:app:app", cols, rows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -103,7 +103,7 @@ func TestMaskRows_SkipsProposalsWhenObjectIDEmpty(t *testing.T) {
 	store := label.NewMemStore()
 	rows := []map[string]any{{"note": "SECRET"}}
 	spy := &pathSpyMasker{}
-	_, err := maskRows(context.Background(), spy, det, store, "", []string{"note"}, rows)
+	_, err := maskRows(context.Background(), spy, det, store, nil, "", []string{"note"}, rows)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -120,7 +120,7 @@ func TestMaskDocuments_ProposesLabelsForDetectorMatches(t *testing.T) {
 	store := label.NewMemStore()
 	docs := []map[string]any{{"profile": map[string]any{"note": "SECRET"}}}
 	spy := &pathSpyMasker{}
-	_, err := maskDocuments(context.Background(), spy, det, store, "org1:mongo:app:users", docs)
+	_, err := maskDocuments(context.Background(), spy, det, store, nil, "org1:mongo:app:users", docs)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -133,6 +133,57 @@ func TestMaskDocuments_ProposesLabelsForDetectorMatches(t *testing.T) {
 	}
 	if l.Category != "custom_category" {
 		t.Fatalf("unexpected label: %+v", l)
+	}
+}
+
+// fakeCollector records every Observe call, standing in for trafficsampler.Buffer.
+type fakeCollector struct {
+	observed map[string]string
+}
+
+func (c *fakeCollector) Observe(objectID, fieldPath, value string) {
+	if c.observed == nil {
+		c.observed = make(map[string]string)
+	}
+	c.observed[objectID+"|"+fieldPath] = value
+}
+
+// TestMaskRows_CollectsSamplesRegardlessOfDetectorVerdict confirms SampleCollector.Observe fires for
+// every free-text column value, not just ones a positive Detector match would have proposed a label
+// for — the AI classifier needs samples of ordinary values too, not only Presidio-flagged ones (see
+// docs/AI_PATH_LABELLING_DESIGN.md §5.2).
+func TestMaskRows_CollectsSamplesRegardlessOfDetectorVerdict(t *testing.T) {
+	det := &fakeDetector{}
+	col := &fakeCollector{}
+	rows := []map[string]any{{"note": "SECRET", "other": "nothing interesting", "id": 1}}
+	cols := []string{"note", "other", "id"}
+	spy := &pathSpyMasker{}
+	_, err := maskRows(context.Background(), spy, det, nil, col, "org1:postgres:app:app", cols, rows)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if col.observed["org1:postgres:app:app|note"] != "SECRET" {
+		t.Fatalf("expected a sample observed for the detector-matched column, got %v", col.observed)
+	}
+	if col.observed["org1:postgres:app:app|other"] != "nothing interesting" {
+		t.Fatalf("expected a sample observed for a non-matching free-text column too, got %v", col.observed)
+	}
+	if _, ok := col.observed["org1:postgres:app:app|id"]; ok {
+		t.Fatal("expected no sample observed for a non-free-text (typed) column")
+	}
+}
+
+// TestMaskDocuments_CollectsSamples mirrors the maskRows collector test for the nested-document path.
+func TestMaskDocuments_CollectsSamples(t *testing.T) {
+	col := &fakeCollector{}
+	docs := []map[string]any{{"profile": map[string]any{"note": "hello"}}}
+	spy := &pathSpyMasker{}
+	_, err := maskDocuments(context.Background(), spy, nil, nil, col, "org1:mongo:app:users", docs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if col.observed["org1:mongo:app:users|profile.note"] != "hello" {
+		t.Fatalf("expected a sample observed at the nested path, got %v", col.observed)
 	}
 }
 

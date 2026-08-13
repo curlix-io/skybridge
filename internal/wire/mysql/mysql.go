@@ -81,6 +81,18 @@ type Engine struct {
 	// orgID scopes mask.Column.ObjectID for path-/table-aware masking labels (see
 	// internal/pathlabel). Empty disables that scoping without otherwise affecting masking.
 	orgID string
+	// collector, when non-nil, receives every free-text column's pre-mask value keyed by its
+	// resolved ObjectID/Path, feeding an AI classifier's sample buffer
+	// (internal/pathlabel/trafficsampler) instead of requiring a second, dedicated read-only DSN to
+	// sample from (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). nil leaves this a no-op, exactly as
+	// before this feature existed.
+	collector sampleCollector
+}
+
+// sampleCollector matches trafficsampler.Buffer's Observe method — kept as a local interface so this
+// package doesn't import internal/pathlabel/trafficsampler just for a method set.
+type sampleCollector interface {
+	Observe(objectID, fieldPath, value string)
 }
 
 // New returns a MySQL engine (plaintext upstream).
@@ -107,6 +119,16 @@ func (e *Engine) WithOrgID(orgID string) *Engine {
 	return &c
 }
 
+// WithSampleCollector returns a copy of the engine that feeds every free-text column's pre-mask
+// value into collector, keyed by its resolved ObjectID/Path, for an AI classifier to sample from
+// live traffic instead of a second dedicated DSN (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). nil
+// (the default) leaves this disabled — the safe no-op this package has always had.
+func (e *Engine) WithSampleCollector(collector sampleCollector) *Engine {
+	c := *e
+	c.collector = collector
+	return &c
+}
+
 // Name implements wire.Engine.
 func (*Engine) Name() string { return "mysql" }
 
@@ -116,6 +138,9 @@ type state struct {
 	// orgID scopes mask.Column.ObjectID for path-/table-aware masking labels; copied from the
 	// owning Engine at Proxy start (see Engine.orgID / WithOrgID). Empty disables that scoping.
 	orgID string
+	// collector, copied from the owning Engine at Proxy/ProxyInject start (see Engine.collector /
+	// WithSampleCollector); nil disables it.
+	collector sampleCollector
 	// offset is the wire sequence-id shift applied while the agent has inserted an extra packet into
 	// the connection phase (upstream TLS): client→server packets get +offset, server→client packets
 	// get −offset. It starts at 1 in that case and drops to 0 once auth completes (after which each
@@ -182,7 +207,7 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 		return err
 	}
 
-	s := &state{caps: caps, queries: make(chan struct{}, 64), orgID: e.orgID}
+	s := &state{caps: caps, queries: make(chan struct{}, 64), orgID: e.orgID, collector: e.collector}
 	s.offset.Store(offset)
 	errc := make(chan error, 2)
 	wire.SafeGo(errc, func() error { return s.clientToServer(cb, upstream, recorder) })
@@ -451,7 +476,7 @@ func (s *state) handleOneResultSet(ctx context.Context, sb *bufio.Reader, bw *bu
 			more = resultStatus(rpayload, s.deprecateEOF())&statusMoreResults != 0
 			return more, false, writePacket(bw, rseq, rpayload)
 		}
-		newPayload, values, ok, err := maskTextRow(ctx, rpayload, cols, masker)
+		newPayload, values, ok, err := maskTextRow(ctx, rpayload, cols, masker, s.collector)
 		if err != nil {
 			return false, false, err
 		}
@@ -712,7 +737,7 @@ func resultStatus(p []byte, deprecateEOF bool) uint16 {
 // — the caller must abort rather than forward that row. Also returns the masked field values
 // (already decoded here) so the caller can render a replay-transcript line without re-parsing the
 // re-encoded packet.
-func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker mask.Masker) ([]byte, [][]byte, bool, error) {
+func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker mask.Masker, collector sampleCollector) ([]byte, [][]byte, bool, error) {
 	vals := make([][]byte, 0, len(cols))
 	off := 0
 	for off < len(payload) {
@@ -741,6 +766,9 @@ func maskTextRow(ctx context.Context, payload []byte, cols []mask.Column, masker
 			mc[i] = cols[i]
 		} else {
 			mc[i] = mask.Column{Text: true, FreeText: true}
+		}
+		if collector != nil && mc[i].FreeText && mc[i].ObjectID != "" && vals[i] != nil {
+			collector.Observe(mc[i].ObjectID, mc[i].Path, string(vals[i]))
 		}
 	}
 	masked, err := masker.MaskRow(ctx, mc, vals)

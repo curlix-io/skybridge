@@ -148,7 +148,7 @@ func executeMongo(ctx context.Context, target Target, database, stmt string, opt
 		return nil, err
 	}
 	objID := objectID(opts.OrgID, "mongo", dbName, parsed.collection)
-	masked, err := maskDocuments(ctx, masker, opts.Detector, opts.ProposeStore, objID, docs)
+	masked, err := maskDocuments(ctx, masker, opts.Detector, opts.ProposeStore, opts.SampleCollector, objID, docs)
 	if err != nil {
 		return nil, err
 	}
