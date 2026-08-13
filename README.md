@@ -683,7 +683,7 @@ truth — the table below is a summary, not a replacement).
 | `SKYBRIDGE_STUDIO_MAX_SESSIONS` | `8` | Caps concurrent Query Studio dispatch sessions on one `edge`-role process. |
 | `SKYBRIDGE_GW_CLIENT_CONN_PER_MIN` / `SKYBRIDGE_GW_ORG_CONN_PER_MIN` | unset (no limit); default `60`/min per client IP once `SKYBRIDGE_GW_CONTROL_PLANE_URL` is set | Gateway-side per-client / per-org *new*-connection-rate ceilings — the main throughput/abuse knobs on the `gateway` role in tunnel mode. |
 | `SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS` | unset (no limit); default `1000` once `SKYBRIDGE_GW_CONTROL_PLANE_URL` is set | Caps how many client connections one org can have relayed *simultaneously* — unlike the rate limits above, this bounds the standing total, so one org holding many connections open indefinitely can't exhaust the gateway process's goroutines/file descriptors at every other org's expense. |
-| `SKYBRIDGE_GW_AGENT_CONN_PER_MIN` | unset (no limit) | Caps agent *registration* attempts per client IP per minute — separate from the client-facing limits above; throttles how fast the agent listener's bearer-token check (`SKYBRIDGE_GW_TOKEN`) can be probed. |
+| `SKYBRIDGE_GW_AGENT_CONN_PER_MIN` | unset (no limit) | Caps agent *registration* attempts per client IP per minute — separate from the client-facing limits above; throttles how fast the agent listener's mTLS handshake (`SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM`, required — there is no bearer-token mode) can be probed. |
 
 Everything else in `internal/config/config.go` (TLS, credential exchange, enrollment) is
 correctness/security configuration, not a performance knob.

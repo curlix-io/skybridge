@@ -28,7 +28,9 @@ flags). Common ones:
 
   Agent endpoint (edges/agents dial in here to register)
     SKYBRIDGE_GW_AGENT_LISTEN     agent listen address (default :8010)
-    SKYBRIDGE_GW_TOKEN            bearer token, when not using wire-mTLS
+    SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM   CA bundle for verifying agent client certs (required — the
+                                      agent listener refuses to start without it; there is no
+                                      bearer-token registration mode)
 
   Client listeners (native db clients connect here; relayed to a registered agent)
     SKYBRIDGE_GW_CLIENTS          JSON [{"addr":":15432","org_id":"...","target":"postgres"},...]
@@ -60,18 +62,6 @@ func gatewayFatal(logger *slog.Logger, msg string) {
 	os.Exit(1)
 }
 
-// distinctClientOrgs counts the distinct non-empty organization_id values across clients, used to
-// size the bearer-token-mode startup warning to how exposed this particular deployment actually is.
-func distinctClientOrgs(clients []config.ClientListener) int {
-	seen := make(map[string]bool, len(clients))
-	for _, c := range clients {
-		if c.OrgID != "" {
-			seen[c.OrgID] = true
-		}
-	}
-	return len(seen)
-}
-
 func runGateway(args []string) {
 	fs := flag.NewFlagSet("gateway", flag.ExitOnError)
 	help := false
@@ -86,7 +76,7 @@ func runGateway(args []string) {
 	cfg := config.LoadGateway()
 	logger := skylog.New(os.Stderr, "skybridge-gateway", skylog.ParseLevel(cfg.LogLevel))
 
-	gw := gateway.New(cfg.AuthToken, logger)
+	gw := gateway.New(logger)
 	gw.SetRequireOrgID(cfg.RequireOrgID)
 	if lim := gateway.NewConnRateLimiter(cfg.ClientConnPerMin, cfg.OrgConnPerMin); lim != nil {
 		gw.SetConnRateLimiter(lim)
@@ -116,45 +106,33 @@ func runGateway(args []string) {
 
 	errs := make(chan error, 1+len(cfg.Clients))
 
+	// Agent registration requires a verified mTLS client certificate unconditionally — there is no
+	// bearer-token fallback (see internal/gateway/gateway.go's ServeAgent). Refuse to start rather
+	// than run an agent listener nothing can ever successfully register against.
+	if !cfg.WireMtlsConfigured() {
+		gatewayFatal(logger, "SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM is required — the agent listener has no bearer-token mode")
+	}
 	agentLn, err := net.Listen("tcp", cfg.AgentListen)
 	if err != nil {
 		gatewayFatal(logger, err.Error())
 	}
-	if cfg.WireMtlsConfigured() {
-		serverCert, serverKey := cfg.WireMtlsServerCert, cfg.WireMtlsServerKey
-		if len(serverCert) == 0 || len(serverKey) == 0 {
-			var genErr error
-			serverCert, serverKey, genErr = wiremtls.GenerateSelfSignedServerCert()
-			if genErr != nil {
-				gatewayFatal(logger, fmt.Sprintf("generating self-signed wire mTLS server cert: %v", genErr))
-			}
-			logger.Warn("using an EPHEMERAL self-signed wire mTLS server cert " +
-				"(no SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM/_KEY_PEM). Client cert verification still authenticates " +
-				"agents; provide a real server cert in production so agents can verify the gateway too.")
+	serverCert, serverKey := cfg.WireMtlsServerCert, cfg.WireMtlsServerKey
+	if len(serverCert) == 0 || len(serverKey) == 0 {
+		var genErr error
+		serverCert, serverKey, genErr = wiremtls.GenerateSelfSignedServerCert()
+		if genErr != nil {
+			gatewayFatal(logger, fmt.Sprintf("generating self-signed wire mTLS server cert: %v", genErr))
 		}
-		tlsCfg, tlsErr := wiremtls.ServerConfig(serverCert, serverKey, cfg.WireMtlsCABundlePEM)
-		if tlsErr != nil {
-			gatewayFatal(logger, fmt.Sprintf("wire mTLS server config: %v", tlsErr))
-		}
-		agentLn = tls.NewListener(agentLn, tlsCfg)
-		logger.Info(fmt.Sprintf("agent endpoint %s (mTLS: agent client certs required)", cfg.AgentListen))
-	} else {
-		// Bearer-token mode has no cryptographic binding between organization_id and the connecting
-		// agent — reg.OrgID is trusted as self-reported (see internal/gateway/gateway.go's
-		// ServeAgent), so any agent holding the one shared SKYBRIDGE_GW_TOKEN can register as ANY
-		// org and silently take over that org's client traffic (orgAgents is last-writer-wins).
-		// This is a real risk specifically because it's easy to reach with the simplest possible
-		// setup — warn loudly rather than let it read as just an informational mode note.
-		msg := fmt.Sprintf("agent endpoint %s: bearer-token mode (no SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM configured) — "+
-			"organization_id is self-reported by the connecting agent, not cryptographically bound to "+
-			"the shared SKYBRIDGE_GW_TOKEN; any agent holding that token can register as any org and "+
-			"take over its client traffic.", cfg.AgentListen)
-		if n := distinctClientOrgs(cfg.Clients); n > 1 {
-			msg += fmt.Sprintf(" This gateway serves %d distinct organizations — configure wire mTLS "+
-				"(SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM) to close this gap before running multi-tenant.", n)
-		}
-		logger.Warn(msg)
+		logger.Warn("using an EPHEMERAL self-signed wire mTLS server cert " +
+			"(no SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM/_KEY_PEM). Client cert verification still authenticates " +
+			"agents; provide a real server cert in production so agents can verify the gateway too.")
 	}
+	tlsCfg, tlsErr := wiremtls.ServerConfig(serverCert, serverKey, cfg.WireMtlsCABundlePEM)
+	if tlsErr != nil {
+		gatewayFatal(logger, fmt.Sprintf("wire mTLS server config: %v", tlsErr))
+	}
+	agentLn = tls.NewListener(agentLn, tlsCfg)
+	logger.Info(fmt.Sprintf("agent endpoint %s (mTLS: agent client certs required)", cfg.AgentListen))
 	go func() { errs <- gw.ListenAgents(ctx, agentLn) }()
 
 	for _, cl := range cfg.Clients {

@@ -36,7 +36,6 @@ const storeTimeout = 5 * time.Second
 
 // Gateway holds the live agent registry and relays client connections over agent tunnels.
 type Gateway struct {
-	authToken        string
 	log              *slog.Logger
 	store            Store
 	admitter         WireAdmitter
@@ -57,13 +56,13 @@ type agentConn struct {
 	sess  *tunnel.Session
 }
 
-// New creates a Gateway. authToken (if non-empty) is required from agents at registration.
-func New(authToken string, logger *slog.Logger) *Gateway {
+// New creates a Gateway. Agents must present a verified mTLS client certificate at registration —
+// there is no bearer-token fallback (see ServeAgent).
+func New(logger *slog.Logger) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Gateway{
-		authToken:        authToken,
 		log:              logger,
 		store:            NoopStore{},
 		admitter:         NoopWireAdmitter{},
@@ -157,11 +156,11 @@ func (g *Gateway) ListenAgents(ctx context.Context, ln net.Listener) error {
 	}
 }
 
-// ServeAgent handles one agent connection: register, then track liveness until it disconnects. When
-// conn is a *tls.Conn with a verified client cert (the gateway's agent listener wraps ln in a
-// wiremtls.ServerConfig-based tls.Config), the cert's SPIFFE identity is authoritative and the
-// plaintext bearer token check is skipped entirely — mirrors the connector gateway's mTLS-vs-bearer
-// dual mode.
+// ServeAgent handles one agent connection: register, then track liveness until it disconnects.
+// conn must be a *tls.Conn with a verified client cert (the gateway's agent listener wraps ln in a
+// wiremtls.ServerConfig-based tls.Config that requires one) — the cert's SPIFFE identity is the
+// only agent-registration credential. There is no bearer-token fallback: a connection without a
+// verified client cert is rejected outright, regardless of what it sends as reg.Token.
 func (g *Gateway) ServeAgent(conn net.Conn) error {
 	sess := tunnel.Server(conn)
 	defer sess.Close()
@@ -198,9 +197,9 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 		}
 		reg.OrgID = certTenant
 		reg.AgentID = certAgentID
-	} else if g.authToken != "" && reg.Token != g.authToken {
-		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "unauthorized"})
-		return errors.New("gateway: agent failed authentication")
+	} else {
+		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "unauthorized: mTLS client certificate required"})
+		return errors.New("gateway: agent connection has no verified mTLS client certificate")
 	}
 	if reg.AgentID == "" {
 		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "missing agent_id"})

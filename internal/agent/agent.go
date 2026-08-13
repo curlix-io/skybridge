@@ -521,18 +521,25 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 			logger.Warn("[tunnel] SKYBRIDGE_INJECT_CREDENTIALS set but no SKYBRIDGE_CREDENTIAL_EXCHANGE_URL; using verbatim auth passthrough.")
 		}
 	}
+	// The gateway's agent listener requires a verified mTLS client certificate unconditionally (no
+	// bearer-token fallback — see internal/gateway/gateway.go's ServeAgent) — fail fast here instead
+	// of dialing in a loop that can never succeed.
+	if !cfg.WireMtlsConfigured() {
+		return fmt.Errorf(
+			"tunnel mode requires wire mTLS: set SKYBRIDGE_WIRE_MTLS_ENROLL_URL (+ SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN), " +
+				"SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM/_KEY_PEM, or SKYBRIDGE_WIRE_MTLS_IAM_AUTH",
+		)
+	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	var wireTLS *tls.Config
 	hasPresetCert := len(cfg.WireMtlsClientCertPEM) > 0 && len(cfg.WireMtlsClientKeyPEM) > 0
-	if cfg.WireMtlsConfigured() {
-		switch {
-		case cfg.WireMtlsIamAuthEnabled:
-			logger.Info(fmt.Sprintf("[tunnel] wire mTLS via AWS IAM auth configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL))
-		case hasPresetCert:
-			logger.Info("[tunnel] wire mTLS configured with a pre-issued client cert — will present it instead of the bearer token.")
-		default:
-			logger.Info(fmt.Sprintf("[tunnel] wire mTLS enrollment configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL))
-		}
+	switch {
+	case cfg.WireMtlsIamAuthEnabled:
+		logger.Info(fmt.Sprintf("[tunnel] wire mTLS via AWS IAM auth configured (%s) — will present a client cert once enrolled.", cfg.WireMtlsEnrollURL))
+	case hasPresetCert:
+		logger.Info("[tunnel] wire mTLS configured with a pre-issued client cert — will present it.")
+	default:
+		logger.Info(fmt.Sprintf("[tunnel] wire mTLS enrollment configured (%s) — will present a client cert once enrolled.", cfg.WireMtlsEnrollURL))
 	}
 
 	wireMtlsEnrollHintLogged := false
@@ -644,7 +651,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		// next *actual* failure starts escalating from the base again, rather than staying stuck at
 		// whatever it climbed to during the outage that just ended.
 		backoff = reconnectBaseBackoff
-		mode := "bearer-token"
+		mode := "no client cert yet (registration will be rejected)"
 		if wireTLS != nil {
 			conn = tls.Client(conn, wireTLS)
 			mode = "mTLS"
@@ -674,7 +681,6 @@ func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps 
 		Kind:    tunnel.KindRegister,
 		AgentID: cfg.AgentID,
 		OrgID:   cfg.OrgID,
-		Token:   cfg.Token,
 	}); err != nil {
 		return err
 	}

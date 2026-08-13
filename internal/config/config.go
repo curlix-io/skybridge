@@ -541,7 +541,6 @@ type Gateway struct {
 	LogLevel string // SKYBRIDGE_LOG_LEVEL: debug | info (default) | warn | error
 
 	AgentListen string           // address agents dial into (egress endpoint), e.g. ":8010"
-	AuthToken   string           // required registration token (empty disables the check)
 	Clients     []ClientListener // native-client listeners, each bound to a target
 
 	// Session recording -> control plane (optional). When ControlPlaneURL is set the gateway reports
@@ -562,8 +561,8 @@ type Gateway struct {
 	OrgMaxConcurrentClients int
 	// AgentConnPerMin caps agent *registration* attempts per client IP per minute (0 = unlimited).
 	// Distinct from ClientConnPerMin/OrgConnPerMin above (which gate native-client connections):
-	// without this, the agent listener's bearer-token check can be probed at whatever rate TCP
-	// handshakes allow.
+	// without this, the agent listener's mTLS handshake can be probed at whatever rate TCP
+	// connections allow.
 	AgentConnPerMin int
 
 	// ClientProxyProtocol: when true, every native-client listener expects a PROXY protocol v1/v2
@@ -575,17 +574,16 @@ type Gateway struct {
 	// connecting directly (no NLB) will fail the handshake and be dropped.
 	ClientProxyProtocol bool
 
-	// Wire-agent mTLS server side (Phase 2, docs/design/identity-aware-network-access.md). When a CA
-	// bundle is configured, ListenAgents wraps the agent listener in a tls.Config that requires and
-	// verifies agent client certs — the verified cert's SPIFFE identity replaces the plaintext
-	// SKYBRIDGE_GW_TOKEN check in ServeAgent. Falls back to bearer-token mode when unset.
-	WireMtlsCABundlePEM []byte // SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM / _FILE
+	// Wire-agent mTLS server side (docs/design/identity-aware-network-access.md). The agent listener
+	// always requires and verifies agent client certs via this CA bundle — the verified cert's
+	// SPIFFE identity is the only agent-registration credential; there is no bearer-token fallback.
+	WireMtlsCABundlePEM []byte // SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM / _FILE (required)
 	WireMtlsServerCert  []byte // SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM / _FILE (self-signed generated if empty)
 	WireMtlsServerKey   []byte // SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM / _FILE
 }
 
-// WireMtlsConfigured reports whether the gateway should require agent client certs on its agent
-// listener instead of (or on top of) the legacy bearer token.
+// WireMtlsConfigured reports whether the gateway's mTLS CA bundle is set — the agent listener
+// refuses to start without it (see cmd/skybridge/gateway.go).
 func (g Gateway) WireMtlsConfigured() bool {
 	return len(g.WireMtlsCABundlePEM) > 0
 }
@@ -623,7 +621,6 @@ func LoadGateway() Gateway {
 	return Gateway{
 		LogLevel:                env("SKYBRIDGE_LOG_LEVEL", ""),
 		AgentListen:             env("SKYBRIDGE_GW_AGENT_LISTEN", ":8010"),
-		AuthToken:               env("SKYBRIDGE_GW_TOKEN", ""),
 		Clients:                 parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
 		ControlPlaneURL:         cpURL,
 		ControlPlaneToken:       env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),

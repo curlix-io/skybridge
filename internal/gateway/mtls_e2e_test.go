@@ -155,7 +155,7 @@ func TestEndToEndTunnelRelayMTLS(t *testing.T) {
 		ServerName:   "localhost",
 	}
 
-	g := gateway.New("", silent()) // no bearer token configured at all
+	g := gateway.New(silent()) // no bearer token configured at all
 	rec := &recordingStore{}
 	g.SetStore(rec)
 	g.SetTargetResolver(stubTargetResolver{
@@ -217,7 +217,7 @@ func TestServeAgentRejectsCertOrgMismatch(t *testing.T) {
 	}
 	clientTLSCfg := &tls.Config{Certificates: []tls.Certificate{clientCert}, RootCAs: pool, ServerName: "localhost"}
 
-	g := gateway.New("", silent())
+	g := gateway.New(silent())
 	agentRaw, gwRaw := net.Pipe()
 	agentTLS := tls.Client(agentRaw, clientTLSCfg)
 	gwTLS := tls.Server(gwRaw, serverTLSCfg)
