@@ -151,7 +151,7 @@ func BuildMaskerWithPathLabelSync(ctx context.Context, cfg config.Agent, logger 
 // cfg.PathLabelURL is set — otherwise PathOverlay is wired with a nil Store, which is a permanent
 // no-op per its own doc comment, preserving the "nothing configured -> mask.Noop" contract callers
 // rely on.
-func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask.Remote, *remotestore.Store, *metrics.Recorder) {
+func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.RoleOverlay, *mask.Remote, *remotestore.Store, *metrics.Recorder) {
 	metricsRecorder := metrics.New(metrics.Config{
 		URL:          cfg.MaskingMetricsURL,
 		Token:        cfg.MaskingMetricsToken,
@@ -177,9 +177,9 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 	if remote.Enabled() {
 		maskers = append(maskers, remote)
 	}
-	var overlay *mask.Overlay
+	var overlay *mask.RoleOverlay
 	if len(cfg.PIIOverlay) > 0 || cfg.PIIOverlayURL != "" {
-		overlay = mask.NewOverlayWithRules(cfg.PIIOverlay)
+		overlay = mask.NewRoleOverlayWithRules(cfg.PIIOverlay)
 		maskers = append(maskers, overlay)
 	}
 	var store *remotestore.Store
@@ -705,7 +705,12 @@ func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, c
 	// record byte-count metadata without opting into full transcript capture).
 	recorder := newTranscriptRecorder(meta.SessionID, cfg)
 	defer flushTranscript(recorder, sess, logger)
-	if err := proxyConn(ctx, engine, st, upstream, deps.Masker, deps.Resolver, recorder); err != nil {
+	// meta.ResourceRoleID is already resolved server-side (wire-targets, per gateway.go) and decoded
+	// above — attaching it to ctx lets a mask.RoleOverlay in the chain select this connection's own
+	// PII scope override (resource_roles.default_pii_scope) without proxyConn/the wire engines
+	// needing any change (MaskRow already threads ctx through every layer).
+	maskCtx := mask.WithResourceRoleID(ctx, meta.ResourceRoleID)
+	if err := proxyConn(maskCtx, engine, st, upstream, deps.Masker, deps.Resolver, recorder); err != nil {
 		logger.Debug(fmt.Sprintf("target %q session ended: %v", meta.Target, err))
 	}
 }

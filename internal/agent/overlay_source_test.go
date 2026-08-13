@@ -35,7 +35,7 @@ func TestOverlaySourceFetchParses(t *testing.T) {
 	defer srv.Close()
 
 	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL, PIIOverlayToken: "tok-1", OrgID: "org-9"})
-	rules, err := src.fetch(context.Background())
+	rules, _, err := src.fetch(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -57,7 +57,7 @@ func TestOverlaySourceFetchUsesCustomOrgHeader(t *testing.T) {
 	defer srv.Close()
 
 	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL, OrgID: "org-9", PIIOverlayOrgHeader: "X-Tenant-Id"})
-	if _, err := src.fetch(context.Background()); err != nil {
+	if _, _, err := src.fetch(context.Background()); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -69,7 +69,7 @@ func TestOverlaySourceFetchNilColumnsDefaultsToEmptyMap(t *testing.T) {
 	defer srv.Close()
 
 	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL})
-	rules, err := src.fetch(context.Background())
+	rules, _, err := src.fetch(context.Background())
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -80,7 +80,7 @@ func TestOverlaySourceFetchNilColumnsDefaultsToEmptyMap(t *testing.T) {
 
 func TestStartOverlaySyncDefaultsNilLogger(t *testing.T) {
 	// A nil logger must fall back to slog.Default() rather than panic.
-	overlay := mask.NewOverlay(nil)
+	overlay := mask.NewRoleOverlay(nil)
 	cfg := config.Agent{PIIOverlayURL: "http://127.0.0.1:0", PIIOverlayPollSeconds: -1}
 	startOverlaySync(context.Background(), cfg, overlay, nil)
 }
@@ -95,7 +95,7 @@ func TestStartOverlaySyncPollStopsOnContextCancel(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	overlay := mask.NewOverlay(nil)
+	overlay := mask.NewRoleOverlay(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := config.Agent{PIIOverlayURL: srv.URL, PIIOverlayPollSeconds: 15}
 	startOverlaySync(ctx, cfg, overlay, slog.Default())
@@ -112,14 +112,14 @@ func TestOverlaySourceFetchBadJSONDecode(t *testing.T) {
 	defer srv.Close()
 
 	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL})
-	if _, err := src.fetch(context.Background()); err == nil || !strings.Contains(err.Error(), "decode") {
+	if _, _, err := src.fetch(context.Background()); err == nil || !strings.Contains(err.Error(), "decode") {
 		t.Fatalf("expected a decode error, got %v", err)
 	}
 }
 
 func TestOverlaySourceFetchDialFailure(t *testing.T) {
 	src := newOverlaySource(config.Agent{PIIOverlayURL: "http://127.0.0.1:1"})
-	if _, err := src.fetch(context.Background()); err == nil {
+	if _, _, err := src.fetch(context.Background()); err == nil {
 		t.Fatal("expected a transport-level error on connection refused")
 	}
 }
@@ -132,7 +132,7 @@ func TestOverlaySourceFetchHTTPError(t *testing.T) {
 	defer srv.Close()
 
 	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL})
-	if _, err := src.fetch(context.Background()); err == nil {
+	if _, _, err := src.fetch(context.Background()); err == nil {
 		t.Fatal("expected error on non-2xx response")
 	}
 }
@@ -143,7 +143,7 @@ func TestStartOverlaySyncSeedsOverlay(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	overlay := mask.NewOverlay(nil)
+	overlay := mask.NewRoleOverlay(nil)
 	cfg := config.Agent{PIIOverlayURL: srv.URL, PIIOverlayPollSeconds: -1} // fetch-once
 	startOverlaySync(context.Background(), cfg, overlay, slog.Default())
 
@@ -157,7 +157,7 @@ func TestStartOverlaySyncSeedsOverlay(t *testing.T) {
 }
 
 func TestStartOverlaySyncLogsFailedInitialFetch(t *testing.T) {
-	overlay := mask.NewOverlay(map[string]string{"email": "[static]"})
+	overlay := mask.NewRoleOverlay(map[string]string{"email": "[static]"})
 	var buf bytes.Buffer
 	cfg := config.Agent{PIIOverlayURL: "http://127.0.0.1:0", PIIOverlayPollSeconds: -1}
 	startOverlaySync(context.Background(), cfg, overlay, slog.New(slog.NewTextHandler(&buf, nil)))
@@ -179,7 +179,7 @@ func TestStartOverlaySyncPollsInBackground(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	overlay := mask.NewOverlay(nil)
+	overlay := mask.NewRoleOverlay(nil)
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	// PIIOverlayPollSeconds unset (0) exercises the "below overlayMinPoll, clamp up" branch; we
@@ -197,12 +197,84 @@ func TestStartOverlaySyncPollsInBackground(t *testing.T) {
 }
 
 func TestStartOverlaySyncNoURLIsNoop(t *testing.T) {
-	overlay := mask.NewOverlay(map[string]string{"email": "[static]"})
+	overlay := mask.NewRoleOverlay(map[string]string{"email": "[static]"})
 	// No URL → must leave the static overlay untouched and not block.
 	startOverlaySync(context.Background(), config.Agent{}, overlay, slog.Default())
 	out, _ := overlay.MaskRow(context.Background(), []mask.Column{{Name: "email", Text: true, FreeText: true}}, [][]byte{[]byte("a@b.com")})
 	if string(out[0]) != "[static]" {
 		t.Fatalf("static overlay should remain, got %q", out[0])
+	}
+}
+
+func TestOverlaySourceFetchParsesRoleOverlays(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(overlayResponse{
+			Columns:      map[string]string{"email": "[email]"},
+			RoleOverlays: map[string]map[string]string{"role-1": {"internal_notes": "[redacted]"}},
+		})
+	}))
+	defer srv.Close()
+
+	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL})
+	rules, roleOverlays, err := src.fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rules["email"] != "[email]" {
+		t.Fatalf("unexpected default rules: %v", rules)
+	}
+	if roleOverlays["role-1"]["internal_notes"] != "[redacted]" {
+		t.Fatalf("unexpected role overlays: %v", roleOverlays)
+	}
+}
+
+func TestOverlaySourceFetchNilRoleOverlaysDefaultsToEmptyMap(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = io.WriteString(w, `{"organization_id":"org-9","columns":{}}`)
+	}))
+	defer srv.Close()
+
+	src := newOverlaySource(config.Agent{PIIOverlayURL: srv.URL})
+	_, roleOverlays, err := src.fetch(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if roleOverlays == nil || len(roleOverlays) != 0 {
+		t.Fatalf("expected a non-nil, empty role_overlays map, got %v", roleOverlays)
+	}
+}
+
+func TestStartOverlaySyncAppliesRoleOverlays(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		_ = json.NewEncoder(w).Encode(overlayResponse{
+			Columns:      map[string]string{"email": "[email]"},
+			RoleOverlays: map[string]map[string]string{"role-1": {"internal_notes": "[redacted]"}},
+		})
+	}))
+	defer srv.Close()
+
+	overlay := mask.NewRoleOverlay(nil)
+	cfg := config.Agent{PIIOverlayURL: srv.URL, PIIOverlayPollSeconds: -1}
+	startOverlaySync(context.Background(), cfg, overlay, slog.Default())
+
+	roleCtx := mask.WithResourceRoleID(context.Background(), "role-1")
+	out, _ := overlay.MaskRow(
+		roleCtx,
+		[]mask.Column{{Name: "internal_notes", Text: true, FreeText: true}},
+		[][]byte{[]byte("some note")},
+	)
+	if string(out[0]) != "[redacted]" {
+		t.Fatalf("expected role-1's overlay applied, got %q", out[0])
+	}
+
+	// A connection with no resolved role still only sees the default overlay.
+	defaultOut, _ := overlay.MaskRow(
+		context.Background(),
+		[]mask.Column{{Name: "internal_notes", Text: true, FreeText: true}},
+		[][]byte{[]byte("some note")},
+	)
+	if string(defaultOut[0]) != "some note" {
+		t.Fatalf("expected default overlay to leave internal_notes unmasked, got %q", defaultOut[0])
 	}
 }
 

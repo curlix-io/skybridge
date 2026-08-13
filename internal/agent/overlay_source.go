@@ -28,8 +28,12 @@ const DefaultOrgHeader = "X-Organization-Id"
 type overlayResponse struct {
 	OrganizationID string            `json:"organization_id"`
 	Columns        map[string]string `json:"columns"`
-	Count          int               `json:"count"`
-	GeneratedUnix  int64             `json:"generated_unix"`
+	// RoleOverlays is a per-resource_role_id override, keyed by resource_role_id, for Resource
+	// Roles with a non-null default_pii_scope. Additive/optional — an org with no such roles never
+	// populates this, and a zero-value (nil) map here is always treated as "no overrides".
+	RoleOverlays  map[string]map[string]string `json:"role_overlays"`
+	Count         int                          `json:"count"`
+	GeneratedUnix int64                        `json:"generated_unix"`
 }
 
 // overlaySource fetches the projected column->token overlay from the control plane.
@@ -55,11 +59,12 @@ func newOverlaySource(cfg config.Agent) *overlaySource {
 	}
 }
 
-// fetch returns the current column->token rules for the agent's organization.
-func (s *overlaySource) fetch(ctx context.Context) (map[string]string, error) {
+// fetch returns the current column->token rules for the agent's organization, plus any per-role
+// overrides (role_overlays, keyed by resource_role_id).
+func (s *overlaySource) fetch(ctx context.Context) (map[string]string, map[string]map[string]string, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, s.url, nil)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	req.Header.Set("Accept", "application/json")
 	if s.token != "" {
@@ -70,28 +75,31 @@ func (s *overlaySource) fetch(ctx context.Context) (map[string]string, error) {
 	}
 	resp, err := s.client.Do(req)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	defer resp.Body.Close()
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		snippet, _ := io.ReadAll(io.LimitReader(resp.Body, 512))
-		return nil, fmt.Errorf("pii-overlay %s -> %d: %s", s.url, resp.StatusCode, strings.TrimSpace(string(snippet)))
+		return nil, nil, fmt.Errorf("pii-overlay %s -> %d: %s", s.url, resp.StatusCode, strings.TrimSpace(string(snippet)))
 	}
 	var out overlayResponse
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(&out); err != nil {
-		return nil, fmt.Errorf("pii-overlay decode: %w", err)
+		return nil, nil, fmt.Errorf("pii-overlay decode: %w", err)
 	}
 	if out.Columns == nil {
 		out.Columns = map[string]string{}
 	}
-	return out.Columns, nil
+	if out.RoleOverlays == nil {
+		out.RoleOverlays = map[string]map[string]string{}
+	}
+	return out.Columns, out.RoleOverlays, nil
 }
 
 // startOverlaySync seeds the overlay from the control plane and (when polling is enabled) keeps it
-// refreshed in the background, hot-swapping rules in place. It is best-effort: a failed initial
-// fetch leaves the static SKYBRIDGE_PII_OVERLAY rules intact and logs the error. Returns immediately
-// when no dynamic source is configured.
-func startOverlaySync(ctx context.Context, cfg config.Agent, overlay *mask.Overlay, logger *slog.Logger) {
+// refreshed in the background, hot-swapping rules (default and per-role) in place. It is
+// best-effort: a failed initial fetch leaves the static SKYBRIDGE_PII_OVERLAY rules intact and logs
+// the error. Returns immediately when no dynamic source is configured.
+func startOverlaySync(ctx context.Context, cfg config.Agent, overlay *mask.RoleOverlay, logger *slog.Logger) {
 	if overlay == nil || strings.TrimSpace(cfg.PIIOverlayURL) == "" {
 		return
 	}
@@ -103,13 +111,14 @@ func startOverlaySync(ctx context.Context, cfg config.Agent, overlay *mask.Overl
 	refresh := func() bool {
 		fctx, cancel := context.WithTimeout(ctx, overlayFetchTimeout)
 		defer cancel()
-		rules, err := src.fetch(fctx)
+		rules, roleOverlays, err := src.fetch(fctx)
 		if err != nil {
 			logger.Warn(fmt.Sprintf("pii-overlay refresh failed: %v", err))
 			return false
 		}
 		overlay.Replace(rules)
-		logger.Debug(fmt.Sprintf("pii-overlay synced (%d columns)", len(rules)))
+		overlay.ReplaceRoleOverlays(roleOverlays)
+		logger.Debug(fmt.Sprintf("pii-overlay synced (%d columns, %d role overrides)", len(rules), len(roleOverlays)))
 		return true
 	}
 
