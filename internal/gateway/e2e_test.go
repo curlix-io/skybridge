@@ -3,6 +3,8 @@ package gateway_test
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/binary"
 	"errors"
 	"io"
@@ -56,6 +58,30 @@ func (upperEngine) Proxy(_ context.Context, client, upstream net.Conn, _ mask.Ma
 
 func silent() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// mtlsAgentPipe builds an in-memory (agent-side, gateway-side) connection pair, both wrapped in TLS
+// with a fresh self-signed CA issuing the agent's client cert for (tenant, agentID) — agent
+// registration requires a verified mTLS client certificate unconditionally (no bearer-token
+// fallback, see internal/gateway/gateway.go's ServeAgent), so every e2e test that needs an agent to
+// actually register must dial in over a connection like this one instead of a bare net.Pipe.
+func mtlsAgentPipe(t *testing.T, tenant, agentID string) (agentSide, gwSide net.Conn) {
+	t.Helper()
+	ca := newTestCA(t)
+	serverCert := ca.issueServerCert(t)
+	clientCert := ca.issueClientCert(t, tenant, agentID)
+
+	pool := x509.NewCertPool()
+	pool.AddCert(ca.cert)
+	serverTLSCfg := &tls.Config{
+		Certificates: []tls.Certificate{serverCert},
+		ClientCAs:    pool,
+		ClientAuth:   tls.RequireAndVerifyClientCert,
+	}
+	clientTLSCfg := &tls.Config{Certificates: []tls.Certificate{clientCert}, RootCAs: pool, ServerName: "localhost"}
+
+	agentRaw, gwRaw := net.Pipe()
+	return tls.Client(agentRaw, clientTLSCfg), tls.Server(gwRaw, serverTLSCfg)
+}
+
 // stubTargetResolver is a TargetResolver test double: it resolves target names against a canned
 // map, replacing what the agent used to announce at registration.
 type stubTargetResolver map[string]tunnel.Target
@@ -72,22 +98,21 @@ func TestEndToEndTunnelRelay(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := gateway.New("tok", silent())
+	g := gateway.New(silent())
 	rec := &recordingStore{}
 	g.SetStore(rec)
 	g.SetTargetResolver(stubTargetResolver{
 		"db": {Name: "db", Addr: "upstream:0", DBType: "upper", ResourceRoleID: "role-1", ActorEmail: "owner@example.com"},
 	})
 
-	// Agent <-> gateway over an in-memory pipe.
-	agentGW, agentLocal := net.Pipe()
+	// Agent <-> gateway over an in-memory, mTLS-wrapped pipe (agent registration requires a
+	// verified client cert unconditionally — see mtlsAgentPipe).
+	agentLocal, agentGW := mtlsAgentPipe(t, "org-1", "a1")
 	go func() { _ = g.ServeAgent(agentGW) }()
 
 	cfg := config.Agent{
-		Mode:    config.ModeTunnel,
-		AgentID: "a1",
-		OrgID:   "org-1",
-		Token:   "tok",
+		Mode: config.ModeTunnel,
+		// Deliberately no AgentID/OrgID set here — the cert supplies identity (see mtlsAgentPipe).
 	}
 	deps := agent.Deps{
 		Dial:   echoDialer,
@@ -203,20 +228,18 @@ func TestRelayAttributesByLoginUsername(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := gateway.New("", silent())
+	g := gateway.New(silent())
 	rec := &recordingStore{}
 	g.SetStore(rec)
 	g.SetTargetResolver(stubTargetResolver{
 		"pg": {Name: "pg", Addr: "upstream:0", DBType: "postgres", ResourceRoleID: "role-1"},
 	})
 
-	agentGW, agentLocal := net.Pipe()
+	agentLocal, agentGW := mtlsAgentPipe(t, "org-1", "a1")
 	go func() { _ = g.ServeAgent(agentGW) }()
 
 	cfg := config.Agent{
-		Mode:    config.ModeTunnel,
-		AgentID: "a1",
-		OrgID:   "org-1",
+		Mode: config.ModeTunnel,
 	}
 	deps := agent.Deps{
 		Dial:   echoDialer,
@@ -253,7 +276,7 @@ func TestRelayAttributesByLoginUsername(t *testing.T) {
 }
 
 func TestServeClientNoAgent(t *testing.T) {
-	g := gateway.New("", silent())
+	g := gateway.New(silent())
 	_, client := net.Pipe()
 	if err := g.ServeClient(client, "org-1", "missing"); err != gateway.ErrNoAgent {
 		t.Fatalf("want ErrNoAgent, got %v", err)
@@ -264,15 +287,15 @@ func TestServeClientRejectsWhenResolverFails(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := gateway.New("tok", silent())
+	g := gateway.New(silent())
 	rec := &recordingStore{}
 	g.SetStore(rec)
 	g.SetTargetResolver(stubTargetResolver{}) // resolves nothing -> ErrTargetNotFound for any target
 
-	agentGW, agentLocal := net.Pipe()
+	agentLocal, agentGW := mtlsAgentPipe(t, "org-1", "a1")
 	go func() { _ = g.ServeAgent(agentGW) }()
 
-	cfg := config.Agent{Mode: config.ModeTunnel, AgentID: "a1", OrgID: "org-1", Token: "tok"}
+	cfg := config.Agent{Mode: config.ModeTunnel}
 	deps := agent.Deps{
 		Dial:   echoDialer,
 		Engine: func(string) (wire.Engine, error) { return upperEngine{}, nil },
@@ -300,15 +323,16 @@ func TestServeClientRejectsWhenResolverFails(t *testing.T) {
 }
 
 func TestServeAgentRejectsMissingOrgIDWhenResolverIsLive(t *testing.T) {
-	g := gateway.New("tok", silent())
+	g := gateway.New(silent())
 	g.SetTargetResolver(stubTargetResolver{"db": {Name: "db", Addr: "x:0", DBType: "upper"}})
-	gw, local := net.Pipe()
+	// Empty tenant in the cert itself, so reg.OrgID resolves to "" post-mTLS-verification and the
+	// missing-organization_id check (not the mTLS check) is what this test actually exercises.
+	local, gw := mtlsAgentPipe(t, "", "a1")
 	go func() { _ = g.ServeAgent(gw) }()
 
 	cfg := config.Agent{
 		Mode:    config.ModeTunnel,
 		AgentID: "a1",
-		Token:   "tok",
 	}
 	err := agent.ServeTunnelConn(context.Background(), local, cfg, agent.Deps{
 		Dial:   echoDialer,
@@ -321,7 +345,7 @@ func TestServeAgentRejectsMissingOrgIDWhenResolverIsLive(t *testing.T) {
 }
 
 func TestServeClientRejectsMissingOrgID(t *testing.T) {
-	g := gateway.New("tok", silent())
+	g := gateway.New(silent())
 	g.SetTargetResolver(stubTargetResolver{"db": {Name: "db", Addr: "x:0", DBType: "upper"}})
 
 	clientGW, client := net.Pipe()
@@ -336,20 +360,17 @@ func TestServeClientRejectsRateLimit(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := gateway.New("tok", silent())
+	g := gateway.New(silent())
 	g.SetConnRateLimiter(gateway.NewConnRateLimiter(1, 0))
 	g.SetTargetResolver(stubTargetResolver{"db": {Name: "db", Addr: "upstream:0", DBType: "upper"}})
 	rec := &recordingStore{}
 	g.SetStore(rec)
 
-	agentGW, agentLocal := net.Pipe()
+	agentLocal, agentGW := mtlsAgentPipe(t, "org-1", "a1")
 	go func() { _ = g.ServeAgent(agentGW) }()
 
 	cfg := config.Agent{
-		Mode:    config.ModeTunnel,
-		AgentID: "a1",
-		OrgID:   "org-1",
-		Token:   "tok",
+		Mode: config.ModeTunnel,
 	}
 	deps := agent.Deps{
 		Dial:   echoDialer,
@@ -386,20 +407,17 @@ func TestServeClientRejectsOrgConnLimitReached(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	g := gateway.New("tok", silent())
+	g := gateway.New(silent())
 	g.SetOrgConnLimiter(gateway.NewOrgConnLimiter(1))
 	g.SetTargetResolver(stubTargetResolver{"db": {Name: "db", Addr: "upstream:0", DBType: "upper"}})
 	rec := &recordingStore{}
 	g.SetStore(rec)
 
-	agentGW, agentLocal := net.Pipe()
+	agentLocal, agentGW := mtlsAgentPipe(t, "org-1", "a1")
 	go func() { _ = g.ServeAgent(agentGW) }()
 
 	cfg := config.Agent{
-		Mode:    config.ModeTunnel,
-		AgentID: "a1",
-		OrgID:   "org-1",
-		Token:   "tok",
+		Mode: config.ModeTunnel,
 	}
 	deps := agent.Deps{
 		Dial:   echoDialer,
@@ -444,14 +462,14 @@ func TestServeClientRejectsOrgConnLimitReached(t *testing.T) {
 }
 
 // TestServeAgentRejectsRateLimit is the regression test for SetAgentConnLimiter: before it
-// existed, nothing in this package limited how many times the bearer-token check in ServeAgent
+// existed, nothing in this package limited how many times the agent listener's mTLS handshake
 // could be probed per client IP — an attacker (or a misconfigured agent stuck retrying) could
 // attempt registration at whatever rate raw TCP handshakes allow. Both attempts drive a real
-// agent.ServeTunnelConn client (like TestServeAgentRejectsBadToken) rather than a bare net.Pipe end
-// with nothing reading it — ServeAgent's rejection path writes a control message back, which blocks
-// forever on an unbuffered net.Pipe with no reader on the other side.
+// agent.ServeTunnelConn client over a verified mTLS pipe (rather than a bare net.Pipe end with
+// nothing reading it — ServeAgent's rejection path writes a control message back, which blocks
+// forever on an unbuffered net.Pipe with no reader on the other side).
 func TestServeAgentRejectsRateLimit(t *testing.T) {
-	g := gateway.New("right", silent())
+	g := gateway.New(silent())
 	g.SetAgentConnLimiter(gateway.NewConnRateLimiter(1, 0))
 
 	deps := agent.Deps{
@@ -466,31 +484,15 @@ func TestServeAgentRejectsRateLimit(t *testing.T) {
 	// check run and the registration complete before tearing down.
 	ctx1, cancel1 := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel1()
-	gw1, local1 := net.Pipe()
+	local1, gw1 := mtlsAgentPipe(t, "org-1", "a1")
 	go func() { _ = g.ServeAgent(gw1) }()
-	_ = agent.ServeTunnelConn(ctx1, local1, config.Agent{Mode: config.ModeTunnel, AgentID: "a1", Token: "right"}, deps, silent())
+	_ = agent.ServeTunnelConn(ctx1, local1, config.Agent{Mode: config.ModeTunnel, AgentID: "a1"}, deps, silent())
 
-	gw2, local2 := net.Pipe()
+	local2, gw2 := mtlsAgentPipe(t, "org-1", "a2")
 	go func() { _ = g.ServeAgent(gw2) }()
-	err := agent.ServeTunnelConn(context.Background(), local2, config.Agent{Mode: config.ModeTunnel, AgentID: "a2", Token: "right"}, deps, silent())
+	err := agent.ServeTunnelConn(context.Background(), local2, config.Agent{Mode: config.ModeTunnel, AgentID: "a2"}, deps, silent())
 	if err == nil || !strings.Contains(err.Error(), "rate limited") {
 		t.Fatalf("expected the second registration to be rejected by the rate limiter, got %v", err)
-	}
-}
-
-func TestServeAgentRejectsBadToken(t *testing.T) {
-	g := gateway.New("right", silent())
-	gw, local := net.Pipe()
-	go func() { _ = g.ServeAgent(gw) }()
-
-	cfg := config.Agent{Mode: config.ModeTunnel, AgentID: "a1", Token: "wrong"}
-	err := agent.ServeTunnelConn(context.Background(), local, cfg, agent.Deps{
-		Dial:   echoDialer,
-		Engine: func(string) (wire.Engine, error) { return upperEngine{}, nil },
-		Masker: mask.Noop{},
-	}, silent())
-	if err == nil {
-		t.Fatal("expected registration rejection for bad token")
 	}
 }
 

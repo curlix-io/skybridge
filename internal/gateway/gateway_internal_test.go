@@ -28,7 +28,7 @@ func (f funcWireAdmitter) Admit(ctx context.Context, orgID, clientIP, target str
 }
 
 func TestNew_DefaultsLoggerWhenNil(t *testing.T) {
-	g := New("tok", nil)
+	g := New(nil)
 	if g.log == nil {
 		t.Fatal("expected New to default a nil logger rather than leave it nil")
 	}
@@ -47,7 +47,7 @@ func TestNew_DefaultsLoggerWhenNil(t *testing.T) {
 }
 
 func TestSetStore_NilDefaultsToNoop(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	g.SetStore(nil)
 	if _, ok := g.store.(NoopStore); !ok {
 		t.Fatalf("expected SetStore(nil) to install NoopStore, got %T", g.store)
@@ -55,7 +55,7 @@ func TestSetStore_NilDefaultsToNoop(t *testing.T) {
 }
 
 func TestSetTargetResolver_NilDefaultsToNoop(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	g.SetTargetResolver(nil)
 	if _, ok := g.resolver.(NoopTargetResolver); !ok {
 		t.Fatalf("expected SetTargetResolver(nil) to install NoopTargetResolver, got %T", g.resolver)
@@ -63,7 +63,7 @@ func TestSetTargetResolver_NilDefaultsToNoop(t *testing.T) {
 }
 
 func TestSetConnRateLimiter_NilDefaultsToNoop(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	g.SetConnRateLimiter(nil)
 	if _, ok := g.connLimiter.(NoopConnRateLimiter); !ok {
 		t.Fatalf("expected SetConnRateLimiter(nil) to install NoopConnRateLimiter, got %T", g.connLimiter)
@@ -71,7 +71,7 @@ func TestSetConnRateLimiter_NilDefaultsToNoop(t *testing.T) {
 }
 
 func TestSetWireAdmitter(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	g.SetWireAdmitter(nil)
 	if _, ok := g.admitter.(NoopWireAdmitter); !ok {
 		t.Fatalf("expected SetWireAdmitter(nil) to install NoopWireAdmitter, got %T", g.admitter)
@@ -88,7 +88,7 @@ func TestSetWireAdmitter(t *testing.T) {
 }
 
 func TestSetRequireOrgID(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	if g.requireOrgID {
 		t.Fatal("expected requireOrgID to default false")
 	}
@@ -99,7 +99,7 @@ func TestSetRequireOrgID(t *testing.T) {
 }
 
 func TestHandleTranscript_EmptySessionIDNoops(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	called := false
 	g.SetStore(&transcriptStore{onTranscript: func(string, TranscriptChunks) error {
 		called = true
@@ -112,7 +112,7 @@ func TestHandleTranscript_EmptySessionIDNoops(t *testing.T) {
 }
 
 func TestHandleTranscript_ForwardsToStore(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	var gotID string
 	var gotChunks TranscriptChunks
 	g.SetStore(&transcriptStore{onTranscript: func(id string, c TranscriptChunks) error {
@@ -135,7 +135,7 @@ func TestHandleTranscript_ForwardsToStore(t *testing.T) {
 }
 
 func TestHandleTranscript_StoreErrorDoesNotPanic(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	g.SetStore(&transcriptStore{onTranscript: func(string, TranscriptChunks) error {
 		return errBoom
 	}})
@@ -160,7 +160,7 @@ type testError struct{ msg string }
 func (e *testError) Error() string { return e.msg }
 
 func TestOpen_ResolvesAndOpensStreamOverAgentTunnel(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	g.SetTargetResolver(funcResolver(func(_ context.Context, orgID, target string) (tunnel.Target, error) {
 		if orgID != "org1" || target != "db" {
 			t.Fatalf("unexpected resolve args org=%q target=%q", orgID, target)
@@ -218,14 +218,14 @@ func TestOpen_ResolvesAndOpensStreamOverAgentTunnel(t *testing.T) {
 }
 
 func TestOpen_NoAgentForOrg(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	if _, err := g.Open(context.Background(), "org-missing", "db"); err != ErrNoAgent {
 		t.Fatalf("want ErrNoAgent, got %v", err)
 	}
 }
 
 func TestOpen_ResolverErrorPropagates(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	wantErr := &testError{"resolve failed"}
 	g.SetTargetResolver(funcResolver(func(context.Context, string, string) (tunnel.Target, error) {
 		return tunnel.Target{}, wantErr
@@ -239,8 +239,12 @@ func TestOpen_ResolverErrorPropagates(t *testing.T) {
 	}
 }
 
-func TestListenAgents_AcceptsRegistersAndStopsOnCancel(t *testing.T) {
-	g := New("tok", silentLogger())
+// TestListenAgents_RejectsPlainTCPAndStopsOnCancel: agent registration requires a verified mTLS
+// client certificate unconditionally (no bearer-token fallback) — a plain TCP connection (this
+// listener, unlike cmd/skybridge/gateway.go's real one, isn't TLS-wrapped) must be rejected, and
+// ListenAgents must still stop cleanly on ctx cancellation afterward.
+func TestListenAgents_RejectsPlainTCPAndStopsOnCancel(t *testing.T) {
+	g := New(silentLogger())
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -255,19 +259,19 @@ func TestListenAgents_AcceptsRegistersAndStopsOnCancel(t *testing.T) {
 	}
 	defer conn.Close()
 	sess := tunnel.Client(conn)
-	if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindRegister, AgentID: "a1", OrgID: "org1", Token: "tok"}); err != nil {
+	if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindRegister, AgentID: "a1", OrgID: "org1"}); err != nil {
 		t.Fatal(err)
 	}
 	ack, err := sess.NextControl()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !ack.OK {
-		t.Fatalf("expected registration to be accepted, got %+v", ack)
+	if ack.OK {
+		t.Fatalf("expected registration without a verified mTLS client cert to be rejected, got %+v", ack)
 	}
 
-	if !waitForOrgAgentInternal(g, "org1", 2*time.Second) {
-		t.Fatal("agent did not register in time")
+	if waitForOrgAgentInternal(g, "org1", 200*time.Millisecond) {
+		t.Fatal("rejected connection must not be registered as org1's agent")
 	}
 
 	cancel()
@@ -282,7 +286,7 @@ func TestListenAgents_AcceptsRegistersAndStopsOnCancel(t *testing.T) {
 }
 
 func TestListenClients_AcceptsAndStopsOnCancel(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -328,7 +332,7 @@ func waitForOrgAgentInternal(g *Gateway, orgID string, d time.Duration) bool {
 }
 
 func TestServeAgent_RejectsNonRegisterFirstControl(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	gw, local := net.Pipe()
 	defer local.Close()
 
@@ -350,7 +354,7 @@ func TestServeAgent_RejectsNonRegisterFirstControl(t *testing.T) {
 }
 
 func TestServeAgent_RejectsMissingAgentID(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	gw, local := net.Pipe()
 	defer local.Close()
 
@@ -372,7 +376,7 @@ func TestServeAgent_RejectsMissingAgentID(t *testing.T) {
 }
 
 func TestListenClients_AcceptErrorPropagatesWhenCtxNotCancelled(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	ln, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -396,7 +400,7 @@ func TestListenClients_AcceptErrorPropagatesWhenCtxNotCancelled(t *testing.T) {
 }
 
 func TestServeClient_AdmitterRejects(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 	wantErr := &testError{"denied"}
 	g.SetWireAdmitter(funcWireAdmitter(func(context.Context, string, string, string) error {
 		return wantErr
@@ -420,7 +424,7 @@ func TestServeClient_AdmitterRejects(t *testing.T) {
 }
 
 func TestServeClient_StoreStartedErrorIsBestEffort(t *testing.T) {
-	g := New("", silentLogger())
+	g := New(silentLogger())
 
 	failing := &failingStartStore{}
 	g.SetStore(failing)

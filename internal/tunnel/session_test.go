@@ -152,14 +152,14 @@ func TestConcurrentStreams(t *testing.T) {
 func TestControlChannel(t *testing.T) {
 	client, server := pair(t)
 
-	if err := client.SendControl(Control{Kind: KindRegister, AgentID: "a1", Token: "tok"}); err != nil {
+	if err := client.SendControl(Control{Kind: KindRegister, AgentID: "a1", OrgID: "org-1"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := server.NextControl()
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got.Kind != KindRegister || got.AgentID != "a1" || got.Token != "tok" {
+	if got.Kind != KindRegister || got.AgentID != "a1" || got.OrgID != "org-1" {
 		t.Fatalf("control mismatch: %+v", got)
 	}
 }
