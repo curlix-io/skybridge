@@ -7,12 +7,21 @@ proposes how the same masking chain extends from a synchronous wire-proxy into a
 context (Kafka, Debezium), since both point in the same direction: a labeller and a masker that no
 longer assume a live, synchronous connection to the source database.
 
-This revision makes two things concrete that the previous draft only sketched:
+This revision makes three things concrete that the previous draft only sketched:
 
 1. **§5** now specifies the AI classifier's model choice as a pluggable decision — an LLM-API-backed
    implementation and a self-hosted fine-tuned-NER implementation both implement the same
    `Classifier` interface, so the choice is a deployment decision, not an architectural one.
-2. **§7** turns the earlier "forward-looking note" into an actual proposed design for a streaming
+2. **§5.2** now sources samples from live wire-proxy/`dbquery` traffic already flowing through the
+   agent/edge process (`internal/pathlabel/trafficsampler`), instead of a scan job dialing a second,
+   dedicated read-only DSN against the source database. §4b's inline-proxy peer survey already named
+   this shape — "classifies from data, schema, and ML-based analysis *as data traverses the proxy*,
+   explicitly requiring no periodic scan and no separate database credential" — as the closest
+   architectural match to Skybridge; this revision closes that gap rather than just noting it. The
+   `SKYBRIDGE_LABELLER_DSN`-based scan job (`internal/labeller`, §5.2 in the prior revision) remains
+   as an optional, secondary bootstrap path for tables/columns no live session has touched yet — see
+   the tradeoff called out in §5.2 below.
+3. **§7** turns the earlier "forward-looking note" into an actual proposed design for a streaming
    masking extension, reusing the existing `Masker` chain against a schema-registry-keyed identity
    instead of a live wire-protocol one.
 
@@ -30,6 +39,18 @@ signal, and no way to bootstrap labels for a table before anyone queries it. As 
 leaves real gaps: a column named `dob` or `ssn_last4` with no matching Presidio entity type in the
 sampled text never gets proposed, and a rarely-queried table gets no coverage at all until traffic
 happens to touch it.
+
+A second, separate problem shows up once an AI classifier is added on top of this: the most obvious
+way to run a periodic classification scan is a standalone job that dials the source database itself
+(§5.2 in the original draft of this doc) — which means a customer running Skybridge's egress-only
+agent/edge, who has already handed the agent one credential to originate live sessions with, now has
+to provision and hand over a *second*, dedicated read-only credential/DSN just so a separate scan job
+can sample rows for classification. That's an extra credential to provision, rotate, and audit for a
+capability the agent/edge process already has everything it needs for: it already resolves
+`ObjectID`/`FieldPath` identity for every row/leaf that crosses the masking chain, and it already sees
+that row's pre-mask value on the way through (`internal/edge/dbquery/mask.go`'s `proposeLeaf` call
+sites, and the wire engines' own `PathOverlay` resolution points). §5.2 below removes this second
+credential rather than just accepting it as a cost.
 
 ## 2. Goal
 
@@ -329,21 +350,82 @@ per-deployment configuration decision (which backend `aiclassifier` is built/con
 not a fork in the design. A deployment could reasonably run both and let per-`(ObjectID,FieldPath)`
 confidence (or, later, the §4e aggregation step) decide which proposal wins when they disagree.
 
-### 5.2 Where it runs: offline, not in the wire-proxy hot path
+### 5.2 Where it runs: off the wire-proxy hot path, but fed by live traffic, not a second DSN
 
-Unlike `mask.Remote.Detect` (called inline per query in `dbquery`'s exec path), the AI classifier
-should run as a **separate, periodic job** — a scan over each known `ObjectID`, sampling a bounded
-number of rows via a read-only credential (same shape as `SKYBRIDGE_POSTGRES_CATALOG_DSN`), independent
-of live traffic. Rationale:
+**Status: implemented** at `internal/pathlabel/trafficsampler` (`Buffer`, `Run`). The classifier
+itself still never runs inline per query — an LLM call is higher-latency and higher-cost than a
+Presidio regex/NER call, and putting it on the query hot path would violate the "masking never
+blocks a live database session" principle (`CLAUDE.md`'s code-review checklist). What changed from
+the original draft is *where the samples it classifies come from*.
+
+The original draft proposed a **separate, periodic job dialing its own read-only DSN** to sample
+rows (the shape `internal/labeller` + `sqlsampler`/`mongosampler` still implement, kept below as a
+secondary path). That works, but it requires provisioning a second database credential purely for
+classification, on top of the one the agent/edge process already holds to originate live sessions.
+§4b's inline-proxy peer survey already flagged the alternative: a classifier that reads samples "as
+data traverses the proxy," requiring "no periodic scan and no separate database credential." Since
+the agent/edge process already resolves `ObjectID`/`FieldPath` for every row/leaf that reaches the
+masking chain and already sees its pre-mask value, that value is sitting right there for free — no
+new connection needed.
+
+`trafficsampler.Buffer` is a bounded, in-process, LRU-evicted cache of recently-observed values per
+`(ObjectID, FieldPath)`. It's fed by `Buffer.Observe`, called from every call site that already
+resolves identity for `PathOverlay`/`proposeLeaf`:
+
+- `internal/edge/dbquery/mask.go`'s `maskRows`/`maskDocuments`, via a new `Options.SampleCollector`
+  field (`internal/edge/dbquery/executor.go`) — every free-text leaf's pre-mask value is observed
+  regardless of whether `mask.Remote`'s content Detector fires, since the AI classifier needs
+  samples of ordinary values too, not just Presidio-flagged ones.
+- The transparent wire-proxy engines' own `PathOverlay` resolution points — `internal/wire/postgres`
+  (`Engine.WithSampleCollector`, called from `maskDataRow`), `internal/wire/mysql`
+  (`Engine.WithSampleCollector`, threaded onto `state` and called from `maskTextRow`), and
+  `internal/wire/mongo` (`Engine.WithSampleCollector`, threaded onto `bsonMasker` and called from
+  `maskString`) — so the same traffic-fed sampling covers the transparent wire proxy, not just
+  `dbquery`'s one-shot exec path. All three are a no-op (nil collector) unless wired at engine
+  construction, exactly like `WithOrgID`/`WithCatalogResolver` already are.
+- `internal/agent`'s `engineFactory` (`internal/agent/clienttls.go`) threads one shared
+  `trafficsampler.Buffer` into every engine it builds, via `buildTrafficSampler`/
+  `startTrafficSampler` (`internal/agent/agent.go`), wired into both `RunListener` and `RunTunnel` —
+  and, since `config.Edge.WireProxy` is a `config.Agent` loaded the same way
+  (`cmd/skybridge/edge.go`), the `edge` role's co-hosted wire proxy gets this for free with no
+  separate wiring.
+
+`trafficsampler.Run` is a periodic loop — same shape as `internal/labeller.Run`'s ticker, minus the
+DSN: each cycle calls `Buffer.Fields()` (every `(ObjectID, FieldPath)` currently holding at least one
+buffered sample) and classifies them via the same `aiclassifier.Scanner` used by the DSN-based job,
+writing through the same `label.Store.Put` path as `SourceProposed`. It runs as a background
+goroutine inside the same agent/edge process already holding the live session — not a separate
+role/binary, and not a separate credential. It's enabled by config alone
+(`SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT` + `SKYBRIDGE_PATH_LABEL_URL` — see the README's Configure
+table and `internal/config/config.go`'s `Agent` struct) — no code change needed to turn it on for a
+given deployment. `buildTrafficSampler` deliberately reuses the same `remotestore.Store` instance
+`buildMaskerWithOverlay` already builds for `PathOverlay` when `SKYBRIDGE_PATH_LABEL_URL` is set,
+rather than opening a second store, so this classifier's proposals and `PathOverlay`'s confirmed-label
+reads share one sync loop.
+
+**Discovery tradeoff, stated plainly.** Traffic-fed discovery means coverage tracks what's actually
+queried: a hot table gets classified quickly, a table nobody has touched gets nothing, ever — this is
+strictly worse than a DSN-based `information_schema`/`ListCollectionNames` crawl for *cold-start*
+coverage of tables no one queries. §5's own design already accepted this same tradeoff at the
+sampling layer for the pre-existing traffic-driven `proposeLeaf` proposer (§1); this section just
+extends it to the LLM classifier's sampling too, in exchange for removing the second credential. The
+mitigation is additive, not a replacement: an operator who wants day-one coverage for a rarely-queried
+table can still run `internal/labeller` against the same optional read-only DSN it always supported
+(`SKYBRIDGE_LABELLER_DSN`) — now framed as an opt-in bootstrap/cold-start pass rather than the primary
+mechanism. A deployment with no such DSN configured simply accepts that coverage follows traffic,
+which for most PII-bearing tables (the ones actually being queried in production) is not a meaningful
+gap in practice.
+
+Rationale for keeping classification itself off the hot path, unchanged from the original draft:
 
 - LLM calls are higher-latency and higher-cost than a Presidio regex/NER call; putting them on the
   query hot path would violate the "masking never blocks a live database session" principle
   (`CLAUDE.md`'s code-review checklist) unless carefully bounded — safer to keep them off it
-  entirely.
-- A scheduled scan gives coverage for tables/columns that haven't been queried recently, which
-  today's traffic-driven `proposeLeaf` cannot do.
-- This mirrors nearly every platform surveyed in §4a — they are almost universally
-  scheduled/batch scanners, not inline classifiers, for exactly this reason.
+  entirely. `Observe` itself is a cheap, non-blocking, in-memory map write; only the periodic
+  `Run` loop's `Classify` calls are the expensive part, and those already run off-path.
+- This mirrors nearly every platform surveyed in §4a for the *classification* step — they are almost
+  universally scheduled/batch scanners, not inline classifiers — while matching §4b's closest peer
+  for the *sampling* step, which is the distinction this revision draws out.
 
 ### 5.3 Output: always `SourceProposed`, through the existing merge path
 
@@ -490,14 +572,34 @@ Kafka Streams/Flink transform) that plays the role the wire engines play today**
    (`internal/wire`, `internal/mask`, `internal/tunnel`, `internal/gateway`) would be broken by a
    Kafka client dependency if pulled into this module directly — favors a separate repo/module over
    a new build tag, unlike `querystudio`'s in-repo pattern.
-9. **Resolved**: table discovery started as an explicit `SKYBRIDGE_LABELLER_TABLES` list (the
-   simpler first cut this doc originally described) but now defaults to a live
-   `information_schema.tables` / `ListCollectionNames` crawl (`sqlsampler.ListTables`,
-   `mongosampler.ListTables`) when that list is unset, so a newly-created table/collection doesn't
-   need an operator to notice and add it. This reopened a scale question the original explicit-list
-   design never had to answer: a schema with tens of thousands of tables would otherwise fan out
-   into a proportional number of LLM `Classify` calls every cycle. `internal/labeller`'s `scheduler`
-   bounds this — `MaxObjectsPerScan` caps how many tables one cycle actually samples,
-   `RescanIntervalSeconds` skips a table scanned too recently, and least-recently-scanned tables are
-   preferred each cycle so a large schema still gets covered incrementally across many cycles
-   instead of needing one cycle to cover it all.
+9. **Resolved**: table discovery for the DSN-based `internal/labeller` job started as an explicit
+   `SKYBRIDGE_LABELLER_TABLES` list (the simpler first cut this doc originally described) but now
+   defaults to a live `information_schema.tables` / `ListCollectionNames` crawl
+   (`sqlsampler.ListTables`, `mongosampler.ListTables`) when that list is unset, so a newly-created
+   table/collection doesn't need an operator to notice and add it. This reopened a scale question the
+   original explicit-list design never had to answer: a schema with tens of thousands of tables would
+   otherwise fan out into a proportional number of LLM `Classify` calls every cycle.
+   `internal/labeller`'s `scheduler` bounds this — `MaxObjectsPerScan` caps how many tables one cycle
+   actually samples, `RescanIntervalSeconds` skips a table scanned too recently, and
+   least-recently-scanned tables are preferred each cycle so a large schema still gets covered
+   incrementally across many cycles instead of needing one cycle to cover it all. The traffic-fed
+   path added in §5.2 sidesteps this scale question entirely for the primary path — `Buffer.Fields()`
+   is bounded by `Buffer`'s own `maxFields` LRU cap, not a schema-size-proportional crawl — since
+   discovery there is "whatever traffic has touched," never a full-schema enumeration.
+10. **Resolved**: `trafficsampler.Buffer.Observe` is now wired into all four masking call sites —
+    `internal/edge/dbquery/mask.go` (one-shot `db_query_*`/Studio-dispatch exec path) and all three
+    transparent wire-proxy engines (`internal/wire/postgres`, `internal/wire/mysql`,
+    `internal/wire/mongo`) — via each package's own `WithSampleCollector` builder, mirroring the
+    existing `WithOrgID`/`WithCatalogResolver` pattern. The enabling config landed as a new
+    `config.Agent` sub-block (`TrafficSamplerLLMEndpoint`/`_LLMAPIKey`/`_LLMCategories`/
+    `_LLMMinConfidence`/`_MaxFields`/`_MaxSamplesPerField`/`_ScanIntervalSeconds`, all
+    `SKYBRIDGE_TRAFFIC_SAMPLER_*`), not a new top-level role — `internal/agent.RunListener`/
+    `RunTunnel` build one shared `trafficsampler.Buffer` per agent process and thread it into every
+    engine via `engineFactory`, and start `trafficsampler.Run` alongside the other background sync
+    loops. Since `config.Edge.WireProxy` is a `config.Agent`, the `edge` role's co-hosted wire proxy
+    inherits this with no separate wiring. Remaining open question: `internal/labeller`'s DSN-based
+    scan job and this traffic-fed path currently run as fully independent config/code paths with no
+    shared state (both can propose to the same `label.Store`, but neither knows about the other) —
+    fine for now since `mergeProposed`'s max-confidence-wins semantics already handle two proposers
+    disagreeing, but worth revisiting if a deployment runs both and wants them coordinated rather than
+    just both landing in the same store.

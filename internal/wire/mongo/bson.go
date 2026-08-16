@@ -108,6 +108,18 @@ type bsonMasker struct {
 	// recursion, can read the shared value without threading it through every call or re-resolving
 	// (and thus re-consuming) the tracker entry per document in a batch.
 	curObjectID string
+	// collector, when non-nil, receives every free-text string field's pre-mask value keyed by
+	// curObjectID/path, feeding an AI classifier's sample buffer
+	// (internal/pathlabel/trafficsampler) instead of requiring a second, dedicated read-only DSN to
+	// sample from (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). nil leaves this a no-op, exactly as
+	// before this feature existed.
+	collector sampleCollector
+}
+
+// sampleCollector matches trafficsampler.Buffer's Observe method — kept as a local interface so this
+// package doesn't import internal/pathlabel/trafficsampler just for a method set.
+type sampleCollector interface {
+	Observe(objectID, fieldPath, value string)
 }
 
 // resolveObjectID resolves and caches the tenant-scoped identifier mask.Column.ObjectID carries for
@@ -494,6 +506,9 @@ func (m *bsonMasker) maskString(name, path string, value []byte) ([]byte, error)
 		return value, nil
 	}
 	s := value[4 : 4+l-1] // exclude trailing NUL
+	if m.collector != nil && m.curObjectID != "" {
+		m.collector.Observe(m.curObjectID, path, string(s))
+	}
 	cols := []mask.Column{{Name: name, Path: path, ObjectID: m.curObjectID, Text: true, FreeText: true}}
 	out, err := m.masker.MaskRow(m.ctx, cols, [][]byte{append([]byte(nil), s...)})
 	if err != nil {

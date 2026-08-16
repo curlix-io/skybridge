@@ -91,7 +91,29 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 // "Postgres table-identity resolution" design notes); pgCatalog is shared across every Postgres
 // connection this agent serves so its per-database OID cache persists for the agent's lifetime,
 // not just one session.
-func engineFactory(clientTLS *tls.Config, orgID string, pgCatalog *postgres.CatalogResolver) func(string) (wire.Engine, error) {
+// sampleCollector matches trafficsampler.Buffer's Observe method — kept as a local interface, same
+// as each wire engine's own sampleCollector, so this package doesn't need to import
+// internal/pathlabel/trafficsampler just for a method set. nil disables it, the safe no-op every
+// wire engine's WithSampleCollector already treats it as.
+type sampleCollector interface {
+	Observe(objectID, fieldPath, value string)
+}
+
+// engineFactory returns an engine selector that builds the Postgres, MySQL and Mongo engines with
+// client-TLS termination when clientTLS is non-nil (needed for credential injection, where the
+// client sends a session token). orgID scopes mask.Column.ObjectID for path-/table-aware masking
+// labels (see internal/pathlabel); MySQL resolves it from its column-definition packets and Mongo
+// resolves it by correlating each find/aggregate/getMore request's collection with its reply (see
+// internal/wire/mongo package doc). Postgres resolves it too, but only when pgCatalog is non-nil
+// (SKYBRIDGE_POSTGRES_CATALOG_DSN configured — see buildPostgresCatalogResolver and REDACTION.md's
+// "Postgres table-identity resolution" design notes); pgCatalog is shared across every Postgres
+// connection this agent serves so its per-database OID cache persists for the agent's lifetime,
+// not just one session. collector, when non-nil, feeds every free-text field's pre-mask value into
+// a traffic-sampled AI classifier buffer (internal/pathlabel/trafficsampler) instead of requiring a
+// second, dedicated read-only DSN to sample from (see docs/AI_PATH_LABELLING_DESIGN.md §5.2) — wired
+// on every engine, though it only ever fires where ObjectID resolution is already configured (same
+// gate WithOrgID/WithCatalogResolver already apply).
+func engineFactory(clientTLS *tls.Config, orgID string, pgCatalog *postgres.CatalogResolver, collector sampleCollector) func(string) (wire.Engine, error) {
 	return func(dbType string) (wire.Engine, error) {
 		switch dbType {
 		case "postgres", "postgresql":
@@ -104,17 +126,23 @@ func engineFactory(clientTLS *tls.Config, orgID string, pgCatalog *postgres.Cata
 			if pgCatalog != nil {
 				e = e.WithOrgID(orgID).WithCatalogResolver(pgCatalog)
 			}
-			return e, nil
+			return e.WithSampleCollector(collector), nil
 		case "mysql":
+			var e *mysql.Engine
 			if clientTLS != nil {
-				return mysql.NewWithClientTLS(clientTLS).WithOrgID(orgID), nil
+				e = mysql.NewWithClientTLS(clientTLS)
+			} else {
+				e = mysql.New()
 			}
-			return mysql.New().WithOrgID(orgID), nil
+			return e.WithOrgID(orgID).WithSampleCollector(collector), nil
 		case "mongodb", "mongo":
+			var e *mongo.Engine
 			if clientTLS != nil {
-				return mongo.NewWithClientTLS(clientTLS).WithOrgID(orgID), nil
+				e = mongo.NewWithClientTLS(clientTLS)
+			} else {
+				e = mongo.New()
 			}
-			return mongo.New().WithOrgID(orgID), nil
+			return e.WithOrgID(orgID).WithSampleCollector(collector), nil
 		default:
 			return nil, fmt.Errorf("unsupported db type %q (want postgres|mysql|mongodb)", dbType)
 		}

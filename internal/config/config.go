@@ -127,6 +127,21 @@ type Agent struct {
 	// resolution entirely: PathOverlay then behaves exactly as it does today for Postgres (empty
 	// ObjectID, safe no-op, falls through to layer 3).
 	PostgresCatalogDSN string // SKYBRIDGE_POSTGRES_CATALOG_DSN
+
+	// Traffic-fed AI path-label classifier (internal/pathlabel/trafficsampler). Unlike
+	// internal/labeller's DSN-based scan job, this samples free-text values straight out of live
+	// wire-proxy/dbquery traffic already flowing through this agent — no second, dedicated read-only
+	// credential (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). Enabled only when both
+	// TrafficSamplerLLMEndpoint and PathLabelURL are set: the classifier needs somewhere to propose
+	// labels to, and this reuses the same remotestore.Store PathOverlay already syncs against rather
+	// than opening a second one.
+	TrafficSamplerLLMEndpoint         string   // SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT ("" disables the traffic-fed classifier)
+	TrafficSamplerLLMAPIKey           string   // SKYBRIDGE_TRAFFIC_SAMPLER_LLM_API_KEY
+	TrafficSamplerLLMCategories       []string // SKYBRIDGE_TRAFFIC_SAMPLER_LLM_CATEGORIES (comma-separated taxonomy)
+	TrafficSamplerLLMMinConfidence    float64  // SKYBRIDGE_TRAFFIC_SAMPLER_LLM_MIN_CONFIDENCE
+	TrafficSamplerMaxFields           int      // SKYBRIDGE_TRAFFIC_SAMPLER_MAX_FIELDS (0 -> trafficsampler.Buffer's own default)
+	TrafficSamplerMaxSamplesPerField  int      // SKYBRIDGE_TRAFFIC_SAMPLER_MAX_SAMPLES_PER_FIELD (0 -> default)
+	TrafficSamplerScanIntervalSeconds int      // SKYBRIDGE_TRAFFIC_SAMPLER_SCAN_INTERVAL_SECONDS (0 -> default)
 	// PIIOverlay is the column->rule overlay you define (off by default): from SKYBRIDGE_PII_OVERLAY
 	// (inline JSON, full-value replacement tokens only — see parseOverlay) or SKYBRIDGE_PII_OVERLAY_FILE
 	// (a path to a YAML or JSON file — easier to author, diff, and commit than one-line JSON in an env
@@ -293,6 +308,14 @@ func LoadAgent() Agent {
 		PathLabelPushSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_PUSH_SECONDS", ""), 15),
 		PostgresCatalogDSN:   env("SKYBRIDGE_POSTGRES_CATALOG_DSN", ""),
 
+		TrafficSamplerLLMEndpoint:         env("SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT", ""),
+		TrafficSamplerLLMAPIKey:           env("SKYBRIDGE_TRAFFIC_SAMPLER_LLM_API_KEY", ""),
+		TrafficSamplerLLMCategories:       splitCSV(env("SKYBRIDGE_TRAFFIC_SAMPLER_LLM_CATEGORIES", "")),
+		TrafficSamplerLLMMinConfidence:    atofDefault(env("SKYBRIDGE_TRAFFIC_SAMPLER_LLM_MIN_CONFIDENCE", ""), 0.5),
+		TrafficSamplerMaxFields:           atoiDefault(env("SKYBRIDGE_TRAFFIC_SAMPLER_MAX_FIELDS", ""), 0),
+		TrafficSamplerMaxSamplesPerField:  atoiDefault(env("SKYBRIDGE_TRAFFIC_SAMPLER_MAX_SAMPLES_PER_FIELD", ""), 0),
+		TrafficSamplerScanIntervalSeconds: atoiDefault(env("SKYBRIDGE_TRAFFIC_SAMPLER_SCAN_INTERVAL_SECONDS", ""), 0),
+
 		InjectCredentials:        truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
 		CredentialExchangeURL:    env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),
 		CredentialExchangeToken:  env("SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN", env("SKYBRIDGE_TOKEN", "")),
@@ -397,8 +420,22 @@ type Edge struct {
 	TrustDomain string
 	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a
 	// replaced ECS task recovers its identity instead of re-enrolling with an already-used one-time
-	// token. See SKYBRIDGE_IDENTITY_SECRET_ARN.
+	// token. See SKYBRIDGE_IDENTITY_SECRET_ARN. IamAuthEnabled below is a stronger alternative for
+	// this same problem — no static secret at all — and takes priority when both are set.
 	IdentitySecretARN string
+
+	// AWS-IAM-authenticated enrollment (mirrors WireMtlsIamAuthEnabled): the edge presigns its own
+	// sts:GetCallerIdentity with ambient AWS credentials (an ECS task role, in production) and
+	// exchanges that for a fresh enroll token via IamEnrollURL, instead of relying on a static,
+	// single-use EnrollToken/StudioEnrollmentToken. Safe to call on every restart — including a
+	// redeployed task whose disk (and cached IdentitySecretARN cert, if that mint also fails) is
+	// gone — so it closes the "single-use token already consumed by the task I'm replacing"
+	// deploy failure documented in README.md's "Keeping mTLS identity alive across redeploys".
+	// Shared by both the connector and Studio enrollment surfaces (internal/edge/transport,
+	// internal/edge/studiotransport) — they hit the same control-plane endpoint, distinguished by
+	// tenant_id/agent_id in the request body.
+	IamAuthEnabled bool   // SKYBRIDGE_IAM_AUTH (truthy)
+	IamEnrollURL   string // SKYBRIDGE_IAM_ENROLL_URL (control-plane origin, e.g. https://app.example.com)
 
 	// Live read-only AWS access (executed locally at the edge).
 	AWSRegion        string
@@ -459,6 +496,8 @@ func LoadEdge() Edge {
 		EnrollToken:             env("SKYBRIDGE_ENROLLMENT_TOKEN", key.EnrollmentToken),
 		TrustDomain:             env("SKYBRIDGE_TRUST_DOMAIN", ""),
 		IdentitySecretARN:       env("SKYBRIDGE_IDENTITY_SECRET_ARN", ""),
+		IamAuthEnabled:          truthy(env("SKYBRIDGE_IAM_AUTH", "")),
+		IamEnrollURL:            env("SKYBRIDGE_IAM_ENROLL_URL", ""),
 		AWSRegion:               env("SKYBRIDGE_AWS_REGION", key.AWSRegion),
 		AWSAssumeRoleARN:        env("SKYBRIDGE_AWS_ASSUME_ROLE_ARN", ""),
 		AWSExternalID:           env("SKYBRIDGE_AWS_EXTERNAL_ID", ""),
@@ -502,7 +541,6 @@ type Gateway struct {
 	LogLevel string // SKYBRIDGE_LOG_LEVEL: debug | info (default) | warn | error
 
 	AgentListen string           // address agents dial into (egress endpoint), e.g. ":8010"
-	AuthToken   string           // required registration token (empty disables the check)
 	Clients     []ClientListener // native-client listeners, each bound to a target
 
 	// Session recording -> control plane (optional). When ControlPlaneURL is set the gateway reports
@@ -523,8 +561,8 @@ type Gateway struct {
 	OrgMaxConcurrentClients int
 	// AgentConnPerMin caps agent *registration* attempts per client IP per minute (0 = unlimited).
 	// Distinct from ClientConnPerMin/OrgConnPerMin above (which gate native-client connections):
-	// without this, the agent listener's bearer-token check can be probed at whatever rate TCP
-	// handshakes allow.
+	// without this, the agent listener's mTLS handshake can be probed at whatever rate TCP
+	// connections allow.
 	AgentConnPerMin int
 
 	// ClientProxyProtocol: when true, every native-client listener expects a PROXY protocol v1/v2
@@ -536,17 +574,16 @@ type Gateway struct {
 	// connecting directly (no NLB) will fail the handshake and be dropped.
 	ClientProxyProtocol bool
 
-	// Wire-agent mTLS server side (Phase 2, docs/design/identity-aware-network-access.md). When a CA
-	// bundle is configured, ListenAgents wraps the agent listener in a tls.Config that requires and
-	// verifies agent client certs — the verified cert's SPIFFE identity replaces the plaintext
-	// SKYBRIDGE_GW_TOKEN check in ServeAgent. Falls back to bearer-token mode when unset.
-	WireMtlsCABundlePEM []byte // SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM / _FILE
+	// Wire-agent mTLS server side (docs/design/identity-aware-network-access.md). The agent listener
+	// always requires and verifies agent client certs via this CA bundle — the verified cert's
+	// SPIFFE identity is the only agent-registration credential; there is no bearer-token fallback.
+	WireMtlsCABundlePEM []byte // SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM / _FILE (required)
 	WireMtlsServerCert  []byte // SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM / _FILE (self-signed generated if empty)
 	WireMtlsServerKey   []byte // SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM / _FILE
 }
 
-// WireMtlsConfigured reports whether the gateway should require agent client certs on its agent
-// listener instead of (or on top of) the legacy bearer token.
+// WireMtlsConfigured reports whether the gateway's mTLS CA bundle is set — the agent listener
+// refuses to start without it (see cmd/skybridge/gateway.go).
 func (g Gateway) WireMtlsConfigured() bool {
 	return len(g.WireMtlsCABundlePEM) > 0
 }
@@ -584,7 +621,6 @@ func LoadGateway() Gateway {
 	return Gateway{
 		LogLevel:                env("SKYBRIDGE_LOG_LEVEL", ""),
 		AgentListen:             env("SKYBRIDGE_GW_AGENT_LISTEN", ":8010"),
-		AuthToken:               env("SKYBRIDGE_GW_TOKEN", ""),
 		Clients:                 parseClients(env("SKYBRIDGE_GW_CLIENTS", "")),
 		ControlPlaneURL:         cpURL,
 		ControlPlaneToken:       env("SKYBRIDGE_GW_CONTROL_PLANE_TOKEN", ""),

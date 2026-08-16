@@ -24,8 +24,9 @@ type Control struct {
 	Kind    string `json:"kind"`
 	AgentID string `json:"agent_id,omitempty"`
 	OrgID   string `json:"org_id,omitempty"` // tenant the agent belongs to; the gateway routes client
-	// connections to an agent by this org id (one agent process serves one org).
-	Token string `json:"token,omitempty"`
+	// connections to an agent by this org id (one agent process serves one org). Registration itself
+	// is authenticated by the connection's verified mTLS client certificate, not a field in here —
+	// there is no bearer-token registration mode.
 	OK    bool   `json:"ok,omitempty"`
 	Error string `json:"error,omitempty"`
 

@@ -347,7 +347,11 @@ func TestRunListenerRejectsBadListenAddr(t *testing.T) {
 // default Deps wiring (masker/engine/upstream-TLS built from cfg), and ServeTunnelConn's registration
 // handshake, before RunTunnel reconnects (which we stop via ctx cancellation).
 func TestRunTunnelDialsGatewayAndRegisters(t *testing.T) {
-	gwLn, err := net.Listen("tcp", "127.0.0.1:0")
+	certPEM, keyPEM, err := selfSignedCertPEMForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gwLn, err := tls.Listen("tcp", "127.0.0.1:0", agentTestTLSConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -378,10 +382,11 @@ func TestRunTunnelDialsGatewayAndRegisters(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := config.Agent{
-		AgentID:     "a1",
-		OrgID:       "org-1",
-		Token:       "t",
-		GatewayAddr: gwLn.Addr().String(),
+		AgentID:               "a1",
+		OrgID:                 "org-1",
+		GatewayAddr:           gwLn.Addr().String(),
+		WireMtlsClientCertPEM: certPEM,
+		WireMtlsClientKeyPEM:  keyPEM,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
@@ -407,7 +412,11 @@ func TestRunTunnelDialsGatewayAndRegisters(t *testing.T) {
 // nil) with SKYBRIDGE_PATH_LABEL_URL set, so buildMaskerWithOverlay returns a non-nil
 // pathLabelStore and RunTunnel's own pathLabelStore.Start(ctx) call runs.
 func TestRunTunnelWithPathLabelURLStartsStore(t *testing.T) {
-	gwLn, err := net.Listen("tcp", "127.0.0.1:0")
+	certPEM, keyPEM, err := selfSignedCertPEMForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gwLn, err := tls.Listen("tcp", "127.0.0.1:0", agentTestTLSConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -437,11 +446,12 @@ func TestRunTunnelWithPathLabelURLStartsStore(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	cfg := config.Agent{
-		AgentID:      "a1",
-		OrgID:        "org-1",
-		Token:        "t",
-		GatewayAddr:  gwLn.Addr().String(),
-		PathLabelURL: "http://127.0.0.1:0/path-labels",
+		AgentID:               "a1",
+		OrgID:                 "org-1",
+		GatewayAddr:           gwLn.Addr().String(),
+		PathLabelURL:          "http://127.0.0.1:0/path-labels",
+		WireMtlsClientCertPEM: certPEM,
+		WireMtlsClientKeyPEM:  keyPEM,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(io.Discard, nil))) }()
@@ -502,7 +512,11 @@ func TestRunTunnelRejectsBadPostgresCatalogDSN(t *testing.T) {
 // (deps.Engine nil) with client TLS configured, exercising the "client TLS termination ENABLED" log
 // line and the Postgres catalog resolver's success path together.
 func TestRunTunnelDefaultEngineWithClientTLSLogsEnabled(t *testing.T) {
-	gwLn, err := net.Listen("tcp", "127.0.0.1:0")
+	certPEM, keyPEM, err := selfSignedCertPEMForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	gwLn, err := tls.Listen("tcp", "127.0.0.1:0", agentTestTLSConfig(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -533,12 +547,13 @@ func TestRunTunnelDefaultEngineWithClientTLSLogsEnabled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	var buf bytes.Buffer
 	cfg := config.Agent{
-		AgentID:             "a1",
-		OrgID:               "org-1",
-		Token:               "t",
-		GatewayAddr:         gwLn.Addr().String(),
-		ClientTLSSelfSigned: true,
-		PostgresCatalogDSN:  "postgres://db.internal:5432/postgres",
+		AgentID:               "a1",
+		OrgID:                 "org-1",
+		GatewayAddr:           gwLn.Addr().String(),
+		ClientTLSSelfSigned:   true,
+		PostgresCatalogDSN:    "postgres://db.internal:5432/postgres",
+		WireMtlsClientCertPEM: certPEM,
+		WireMtlsClientKeyPEM:  keyPEM,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil))) }()
@@ -624,12 +639,18 @@ func TestRunTunnelInjectCredentialsWarnsWithoutExchangeURL(t *testing.T) {
 		}
 	}()
 
+	certPEM, keyPEM, err := selfSignedCertPEMForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var buf bytes.Buffer
 	cfg := config.Agent{
-		AgentID:           "a1",
-		GatewayAddr:       gwLn.Addr().String(),
-		InjectCredentials: true,
+		AgentID:               "a1",
+		GatewayAddr:           gwLn.Addr().String(),
+		InjectCredentials:     true,
+		WireMtlsClientCertPEM: certPEM,
+		WireMtlsClientKeyPEM:  keyPEM,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil))) }()
@@ -673,6 +694,10 @@ func TestRunTunnelInjectCredentialsEnabledWithResolver(t *testing.T) {
 		}
 	}()
 
+	certPEM, keyPEM, err := selfSignedCertPEMForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
 	ctx, cancel := context.WithCancel(context.Background())
 	var buf bytes.Buffer
 	cfg := config.Agent{
@@ -680,6 +705,8 @@ func TestRunTunnelInjectCredentialsEnabledWithResolver(t *testing.T) {
 		GatewayAddr:           gwLn.Addr().String(),
 		InjectCredentials:     true,
 		CredentialExchangeURL: "http://127.0.0.1:1",
+		WireMtlsClientCertPEM: certPEM,
+		WireMtlsClientKeyPEM:  keyPEM,
 	}
 	errc := make(chan error, 1)
 	go func() { errc <- RunTunnel(ctx, cfg, Deps{}, slog.New(slog.NewTextHandler(&buf, nil))) }()

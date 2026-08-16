@@ -527,7 +527,7 @@ func TestMaskTextRow_TruncatedFieldValue(t *testing.T) {
 	cols := []mask.Column{{Name: "email", Text: true, FreeText: true}}
 	row := appendLenEncInt(nil, 100) // claims 100 bytes, none follow
 	row = append(row, "short"...)
-	_, _, ok, err := maskTextRow(context.Background(), row, cols, mask.Noop{})
+	_, _, ok, err := maskTextRow(context.Background(), row, cols, mask.Noop{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -539,7 +539,7 @@ func TestMaskTextRow_TruncatedFieldValue(t *testing.T) {
 func TestMaskTextRow_InvalidLenEncPrefix(t *testing.T) {
 	cols := []mask.Column{{Name: "email", Text: true, FreeText: true}}
 	row := []byte{0xFF} // invalid lenenc prefix (not the NULL marker 0xFB)
-	_, _, ok, err := maskTextRow(context.Background(), row, cols, mask.Noop{})
+	_, _, ok, err := maskTextRow(context.Background(), row, cols, mask.Noop{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -560,7 +560,7 @@ func TestMaskTextRow_MaskerReturnsWrongFieldCount(t *testing.T) {
 		{Name: "email", Text: true, FreeText: true},
 	}
 	row := textRow("1", "a@b.com")
-	_, _, ok, err := maskTextRow(context.Background(), row, cols, wrongCountMasker{})
+	_, _, ok, err := maskTextRow(context.Background(), row, cols, wrongCountMasker{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}

@@ -442,6 +442,25 @@ func TestLoadEdgeDefaultsAndFallbacks(t *testing.T) {
 	}
 }
 
+func TestLoadEdgeIamAuth(t *testing.T) {
+	t.Setenv("SKYBRIDGE_IAM_AUTH", "true")
+	t.Setenv("SKYBRIDGE_IAM_ENROLL_URL", "https://api.example.com")
+	e := LoadEdge()
+	if !e.IamAuthEnabled {
+		t.Fatal("expected IamAuthEnabled true when SKYBRIDGE_IAM_AUTH is set")
+	}
+	if e.IamEnrollURL != "https://api.example.com" {
+		t.Fatalf("expected IamEnrollURL %q, got %q", "https://api.example.com", e.IamEnrollURL)
+	}
+}
+
+func TestLoadEdgeIamAuthDefaultsOff(t *testing.T) {
+	e := LoadEdge()
+	if e.IamAuthEnabled {
+		t.Fatal("expected IamAuthEnabled false by default")
+	}
+}
+
 // TestLoadEdgeTrustDomainSharedAcrossIdentities verifies SKYBRIDGE_TRUST_DOMAIN feeds
 // TrustDomain, StudioTrustDomain, and WireProxy.WireMtlsTrustDomain identically — the single knob
 // that replaced SKYBRIDGE_SPIFFE_TRUST_DOMAIN / SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN /

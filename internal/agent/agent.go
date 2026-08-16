@@ -25,7 +25,9 @@ import (
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/mask"
 	"github.com/curlix-io/skybridge/internal/mask/metrics"
+	"github.com/curlix-io/skybridge/internal/pathlabel/aiclassifier"
 	"github.com/curlix-io/skybridge/internal/pathlabel/remotestore"
+	"github.com/curlix-io/skybridge/internal/pathlabel/trafficsampler"
 	"github.com/curlix-io/skybridge/internal/tunnel"
 	"github.com/curlix-io/skybridge/internal/wire"
 	"github.com/curlix-io/skybridge/internal/wiremtls"
@@ -104,7 +106,7 @@ func proxyConn(ctx context.Context, engine wire.Engine, client, upstream net.Con
 // EngineFor selects a wire engine by database type (no client-TLS termination). The agent uses the
 // TLS-aware engineFactory at runtime; this stays for callers/tests that want the plaintext default.
 func EngineFor(dbType string) (wire.Engine, error) {
-	return engineFactory(nil, "", nil)(dbType)
+	return engineFactory(nil, "", nil, nil)(dbType)
 }
 
 // BuildMasker assembles the masking chain (remote masker + your column overlay) from config. It
@@ -151,7 +153,7 @@ func BuildMaskerWithPathLabelSync(ctx context.Context, cfg config.Agent, logger 
 // cfg.PathLabelURL is set — otherwise PathOverlay is wired with a nil Store, which is a permanent
 // no-op per its own doc comment, preserving the "nothing configured -> mask.Noop" contract callers
 // rely on.
-func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask.Remote, *remotestore.Store, *metrics.Recorder) {
+func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.RoleOverlay, *mask.Remote, *remotestore.Store, *metrics.Recorder) {
 	metricsRecorder := metrics.New(metrics.Config{
 		URL:          cfg.MaskingMetricsURL,
 		Token:        cfg.MaskingMetricsToken,
@@ -177,9 +179,9 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 	if remote.Enabled() {
 		maskers = append(maskers, remote)
 	}
-	var overlay *mask.Overlay
+	var overlay *mask.RoleOverlay
 	if len(cfg.PIIOverlay) > 0 || cfg.PIIOverlayURL != "" {
-		overlay = mask.NewOverlayWithRules(cfg.PIIOverlay)
+		overlay = mask.NewRoleOverlayWithRules(cfg.PIIOverlay)
 		maskers = append(maskers, overlay)
 	}
 	var store *remotestore.Store
@@ -196,6 +198,47 @@ func buildMaskerWithOverlay(cfg config.Agent) (mask.Masker, *mask.Overlay, *mask
 		return mask.Noop{}, nil, remote, nil, metricsRecorder
 	}
 	return mask.NewChain(maskers...), overlay, remote, store, metricsRecorder
+}
+
+// buildTrafficSampler returns an internal/pathlabel/trafficsampler.Buffer ready to be wired into
+// this agent's wire engines via engineFactory's collector parameter, or nil when the traffic-fed AI
+// classifier is disabled — either no LLM endpoint configured, or no PathLabelURL (store) to propose
+// labels to, since the classifier reuses the same remotestore.Store PathOverlay already syncs
+// against rather than opening a second one (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). Unlike
+// internal/labeller's DSN-based scan job, this needs no second, dedicated read-only credential —
+// samples come from live traffic the wire engines already observe.
+func buildTrafficSampler(cfg config.Agent, store *remotestore.Store) *trafficsampler.Buffer {
+	if cfg.TrafficSamplerLLMEndpoint == "" || store == nil {
+		return nil
+	}
+	return trafficsampler.New(cfg.TrafficSamplerMaxFields, cfg.TrafficSamplerMaxSamplesPerField)
+}
+
+// startTrafficSampler starts buf's periodic classify-and-propose loop (internal/pathlabel/
+// trafficsampler.Run) against ctx, using store as both the confirmed-label source PathOverlay
+// already reads and the Put sink for this classifier's SourceProposed labels. No-op when buf or
+// store is nil (buildTrafficSampler already returns nil together for both, but this stays
+// defensive rather than assuming that invariant at every call site).
+func startTrafficSampler(ctx context.Context, cfg config.Agent, buf *trafficsampler.Buffer, store *remotestore.Store, logger *slog.Logger) {
+	if buf == nil || store == nil {
+		return
+	}
+	classifier := aiclassifier.NewLLM(aiclassifier.LLMConfig{
+		Endpoint:      cfg.TrafficSamplerLLMEndpoint,
+		APIKey:        cfg.TrafficSamplerLLMAPIKey,
+		Categories:    cfg.TrafficSamplerLLMCategories,
+		MinConfidence: cfg.TrafficSamplerLLMMinConfidence,
+	})
+	scanner := aiclassifier.NewScanner(aiclassifier.ScannerConfig{
+		Classifier: classifier,
+		Sampler:    buf,
+		Store:      store,
+	})
+	go trafficsampler.Run(ctx, trafficsampler.RunnerConfig{
+		Buffer:              buf,
+		Scanner:             scanner,
+		ScanIntervalSeconds: cfg.TrafficSamplerScanIntervalSeconds,
+	}, logger)
 }
 
 // logMaskingGuardrails emits startup warnings when the configured masking posture is weaker than an
@@ -275,10 +318,6 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *slog.Logger) err
 	if err != nil {
 		return err
 	}
-	engine, err := engineFactory(clientTLS, cfg.OrgID, pgCatalog)(cfg.DBType)
-	if err != nil {
-		return err
-	}
 	masker, overlay, remote, pathLabelStore, metricsRecorder := buildMaskerWithOverlay(cfg)
 	startOverlaySync(ctx, cfg, overlay, logger)
 	startRecognizersSync(ctx, cfg, remote, logger)
@@ -288,7 +327,13 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *slog.Logger) err
 	if metricsRecorder != nil {
 		metricsRecorder.Start(ctx)
 	}
+	trafficSampler := buildTrafficSampler(cfg, pathLabelStore)
+	startTrafficSampler(ctx, cfg, trafficSampler, pathLabelStore, logger)
 	logMaskingGuardrails(cfg, logger)
+	engine, err := engineFactory(clientTLS, cfg.OrgID, pgCatalog, trafficSampler)(cfg.DBType)
+	if err != nil {
+		return err
+	}
 	resolver := NewHTTPCredentialResolver(cfg)
 	upTLS, err := buildUpstreamTLSPolicy(cfg)
 	if err != nil {
@@ -423,6 +468,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 	}
 	// Build the masker here (rather than letting withDefaults do it) so we can capture the overlay
 	// handle and keep it refreshed from the control plane. Respect a test-injected masker.
+	var trafficSampler *trafficsampler.Buffer
 	if deps.Masker == nil {
 		masker, overlay, remote, pathLabelStore, metricsRecorder := buildMaskerWithOverlay(cfg)
 		deps.Masker = masker
@@ -434,6 +480,8 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		if metricsRecorder != nil {
 			metricsRecorder.Start(ctx)
 		}
+		trafficSampler = buildTrafficSampler(cfg, pathLabelStore)
+		startTrafficSampler(ctx, cfg, trafficSampler, pathLabelStore, logger)
 		logMaskingGuardrails(cfg, logger)
 	}
 	// Build the engine factory with client-TLS termination (Postgres) unless a test injected one.
@@ -446,7 +494,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		if err != nil {
 			return err
 		}
-		deps.Engine = engineFactory(clientTLS, cfg.OrgID, pgCatalog)
+		deps.Engine = engineFactory(clientTLS, cfg.OrgID, pgCatalog, trafficSampler)
 		if clientTLS != nil {
 			logger.Info("[tunnel] client TLS termination ENABLED for Postgres targets.")
 		}
@@ -473,18 +521,25 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 			logger.Warn("[tunnel] SKYBRIDGE_INJECT_CREDENTIALS set but no SKYBRIDGE_CREDENTIAL_EXCHANGE_URL; using verbatim auth passthrough.")
 		}
 	}
+	// The gateway's agent listener requires a verified mTLS client certificate unconditionally (no
+	// bearer-token fallback — see internal/gateway/gateway.go's ServeAgent) — fail fast here instead
+	// of dialing in a loop that can never succeed.
+	if !cfg.WireMtlsConfigured() {
+		return fmt.Errorf(
+			"tunnel mode requires wire mTLS: set SKYBRIDGE_WIRE_MTLS_ENROLL_URL (+ SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN), " +
+				"SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM/_KEY_PEM, or SKYBRIDGE_WIRE_MTLS_IAM_AUTH",
+		)
+	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	var wireTLS *tls.Config
 	hasPresetCert := len(cfg.WireMtlsClientCertPEM) > 0 && len(cfg.WireMtlsClientKeyPEM) > 0
-	if cfg.WireMtlsConfigured() {
-		switch {
-		case cfg.WireMtlsIamAuthEnabled:
-			logger.Info(fmt.Sprintf("[tunnel] wire mTLS via AWS IAM auth configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL))
-		case hasPresetCert:
-			logger.Info("[tunnel] wire mTLS configured with a pre-issued client cert — will present it instead of the bearer token.")
-		default:
-			logger.Info(fmt.Sprintf("[tunnel] wire mTLS enrollment configured (%s) — will present a client cert instead of the bearer token once enrolled.", cfg.WireMtlsEnrollURL))
-		}
+	switch {
+	case cfg.WireMtlsIamAuthEnabled:
+		logger.Info(fmt.Sprintf("[tunnel] wire mTLS via AWS IAM auth configured (%s) — will present a client cert once enrolled.", cfg.WireMtlsEnrollURL))
+	case hasPresetCert:
+		logger.Info("[tunnel] wire mTLS configured with a pre-issued client cert — will present it.")
+	default:
+		logger.Info(fmt.Sprintf("[tunnel] wire mTLS enrollment configured (%s) — will present a client cert once enrolled.", cfg.WireMtlsEnrollURL))
 	}
 
 	wireMtlsEnrollHintLogged := false
@@ -596,7 +651,7 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		// next *actual* failure starts escalating from the base again, rather than staying stuck at
 		// whatever it climbed to during the outage that just ended.
 		backoff = reconnectBaseBackoff
-		mode := "bearer-token"
+		mode := "no client cert yet (registration will be rejected)"
 		if wireTLS != nil {
 			conn = tls.Client(conn, wireTLS)
 			mode = "mTLS"
@@ -626,7 +681,6 @@ func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps 
 		Kind:    tunnel.KindRegister,
 		AgentID: cfg.AgentID,
 		OrgID:   cfg.OrgID,
-		Token:   cfg.Token,
 	}); err != nil {
 		return err
 	}
@@ -705,7 +759,12 @@ func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, c
 	// record byte-count metadata without opting into full transcript capture).
 	recorder := newTranscriptRecorder(meta.SessionID, cfg)
 	defer flushTranscript(recorder, sess, logger)
-	if err := proxyConn(ctx, engine, st, upstream, deps.Masker, deps.Resolver, recorder); err != nil {
+	// meta.ResourceRoleID is already resolved server-side (wire-targets, per gateway.go) and decoded
+	// above — attaching it to ctx lets a mask.RoleOverlay in the chain select this connection's own
+	// PII scope override (resource_roles.default_pii_scope) without proxyConn/the wire engines
+	// needing any change (MaskRow already threads ctx through every layer).
+	maskCtx := mask.WithResourceRoleID(ctx, meta.ResourceRoleID)
+	if err := proxyConn(maskCtx, engine, st, upstream, deps.Masker, deps.Resolver, recorder); err != nil {
 		logger.Debug(fmt.Sprintf("target %q session ended: %v", meta.Target, err))
 	}
 }

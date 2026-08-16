@@ -1,6 +1,6 @@
-// Package wiremtls implements mTLS identity for the Skybridge wire gateway↔agent tunnel. It replaces
-// the plaintext SKYBRIDGE_GW_TOKEN shared-secret check with a per-agent client certificate carrying
-// a SPIFFE URI SAN:
+// Package wiremtls implements mTLS identity for the Skybridge wire gateway↔agent tunnel. Agent
+// registration is authenticated exclusively by a per-agent client certificate carrying a SPIFFE
+// URI SAN — there is no bearer-token fallback:
 //
 //	spiffe://skybridge.wire-agent/tenant/<tenant_id>/agent/<agent_id>
 //
@@ -91,8 +91,8 @@ func ServerTLSConfig(caPEM []byte) (*tls.Config, error) {
 }
 
 // Material is the wire agent's mTLS identity: its client cert/key plus the CA bundle it (and the
-// gateway) trust. A nil *Material means "no mTLS configured" — callers fall back to the legacy
-// SKYBRIDGE_GW_TOKEN shared-secret path.
+// gateway) trust. A nil *Material means "no mTLS configured" — RunTunnel refuses to dial in that
+// case (see internal/agent/agent.go) rather than falling back to any unauthenticated path.
 type Material struct {
 	CABundlePEM   []byte
 	ClientCertPEM []byte

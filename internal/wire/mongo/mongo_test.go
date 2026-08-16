@@ -207,7 +207,7 @@ func TestMaskServerAbortsOnMaskerFailure(t *testing.T) {
 	in := findReply()
 	var out bytes.Buffer
 	r := bufio.NewReader(bytes.NewReader(in))
-	err := maskServer(context.Background(), r, &out, errMasker{}, wire.NoopRecorder{}, newRequestTracker(), "")
+	err := maskServer(context.Background(), r, &out, errMasker{}, wire.NoopRecorder{}, newRequestTracker(), "", nil)
 	if !errors.Is(err, mask.ErrMaskerUnavailable) {
 		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
 	}
@@ -221,7 +221,7 @@ func TestMaskServerEndToEnd(t *testing.T) {
 	var out bytes.Buffer
 	r := bufio.NewReader(bytes.NewReader(in))
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
-	_ = maskServer(context.Background(), r, &out, overlay, wire.NoopRecorder{}, newRequestTracker(), "")
+	_ = maskServer(context.Background(), r, &out, overlay, wire.NoopRecorder{}, newRequestTracker(), "", nil)
 
 	if bytes.Contains(out.Bytes(), []byte("alice@example.com")) {
 		t.Fatal("email leaked through maskServer")

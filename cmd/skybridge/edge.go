@@ -42,6 +42,9 @@ All configuration is via SKYBRIDGE_* environment variables (no other flags). Com
     SKYBRIDGE_ENROLL_GATEWAY    enrollment host:port (typically <nlb-dns>:7101)
     SKYBRIDGE_ENROLLMENT_TOKEN  one-time token, first run only
     SKYBRIDGE_CA_BUNDLE_PEM     SaaS CA public cert (mTLS)
+    SKYBRIDGE_IAM_AUTH          mint the enroll token from the edge's ambient AWS identity
+                                instead of SKYBRIDGE_ENROLLMENT_TOKEN — safe on every restart
+    SKYBRIDGE_IAM_ENROLL_URL    control-plane origin for SKYBRIDGE_IAM_AUTH's enroll-token mint
 
   AWS / Kubernetes tool exec
     SKYBRIDGE_AWS_REGION        region for local AWS reads
@@ -142,6 +145,8 @@ func runEdge(args []string) {
 		EnrollTarget:      cfg.EnrollTarget,
 		EnrollToken:       cfg.EnrollToken,
 		TrustDomain:       cfg.TrustDomain,
+		IamAuthEnabled:    cfg.IamAuthEnabled,
+		IamEnrollURL:      cfg.IamEnrollURL,
 	}, reg, logger)
 
 	if err := client.Run(ctx); err != nil && ctx.Err() == nil {
@@ -190,6 +195,8 @@ func registerQueryStudio(ctx context.Context, cfg config.Edge, reg *edge.Registr
 		EnrollTarget:      cfg.StudioEnrollGateway,
 		EnrollToken:       cfg.StudioEnrollmentToken,
 		TrustDomain:       cfg.StudioTrustDomain,
+		IamAuthEnabled:    cfg.IamAuthEnabled,
+		IamEnrollURL:      cfg.IamEnrollURL,
 	}
 	if studioCfg.TLSDir == "" {
 		studioCfg.TLSDir = cfg.TLSDir

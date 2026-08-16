@@ -91,6 +91,14 @@ type Config struct {
 	EnrollTarget      string // Enroll endpoint host:port (defaults to Target)
 	EnrollToken       string // one-time enrollment token (needed to obtain the first cert)
 	TrustDomain       string // SPIFFE trust domain placed in the CSR SAN (cosmetic; default skybridge.edge)
+
+	// IamAuthEnabled, when true, mints its own enroll token by presigning sts:GetCallerIdentity
+	// with the edge's ambient AWS credentials (an ECS task role, in production) instead of relying
+	// on a static, single-use EnrollToken — see internal/edgeiam. Safe to use on every restart,
+	// including a redeployed task with a wiped disk. IamEnrollURL is the control-plane HTTPS
+	// origin that verifies the presigned request (see SKYBRIDGE_IAM_AUTH / SKYBRIDGE_IAM_ENROLL_URL).
+	IamAuthEnabled bool
+	IamEnrollURL   string
 }
 
 // Client maintains the call-home connection and serves dispatched tool work.
@@ -120,8 +128,45 @@ func New(cfg Config, reg *edge.Registry, logger *slog.Logger) *Client {
 	return &Client{cfg: cfg, reg: reg, logger: logger, runs: map[string]context.CancelFunc{}}
 }
 
+// proactiveRenewalSkew is how far ahead of expiry a proactive renewal kicks in -- deliberately
+// much wider than certRenewSkew (the "still usable to connect" check in ensureTLSMaterial), since
+// this loop runs independently of the Connect stream's lifecycle and only gets one attempt per
+// proactiveRenewalCheckInterval.
+var proactiveRenewalSkew = 24 * time.Hour
+
+// proactiveRenewalCheckInterval is how often the renewal loop wakes up to check cert expiry.
+// Renewal isn't on the hot path and a missed check just gets retried later, so this is coarse.
+var proactiveRenewalCheckInterval = time.Hour
+
+// renewalLoop runs for the lifetime of Run, independent of the Connect stream's own reconnect
+// cycle: a long-lived process that never drops its stream would otherwise ride renew-on-drop-only
+// all the way to expiry with nothing to trigger a refresh. See docs/design/
+// skybridge-masking-architecture.md §10.8 in curlix/curlix. No-ops in bearer mode.
+func (c *Client) renewalLoop(ctx context.Context) {
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-time.After(jitteredBackoff(proactiveRenewalCheckInterval)):
+		}
+		material, err := c.ensureTLSMaterial(ctx)
+		if err != nil || material == nil {
+			continue // bearer mode, or a transient load/enroll error -- try again next tick
+		}
+		if certValid(material.clientCertPEM, proactiveRenewalSkew) {
+			continue // not yet within the renewal window
+		}
+		if _, err := c.renewCert(ctx, material); err != nil {
+			c.logger.Warn(fmt.Sprintf("proactive cert renewal failed: %v", err))
+			continue
+		}
+		c.logger.Info("cert proactively renewed")
+	}
+}
+
 // Run dials the gateway and serves work, reconnecting with backoff until ctx is cancelled.
 func (c *Client) Run(ctx context.Context) error {
+	go c.renewalLoop(ctx)
 	backoff := time.Second
 	for {
 		material, err := c.ensureTLSMaterial(ctx)
