@@ -19,16 +19,25 @@ var mongoAggRe = regexp.MustCompile(`(?is)^\s*db\.([a-zA-Z0-9_]+)\.aggregate\s*\
 
 type mongoParsed struct {
 	collection string
-	op         string // find | aggregate
+	op         string // find | aggregate | ping
 	filter     bson.M
 	pipeline   bson.A
 	limit      int64
 }
 
+// mongoPingStatement is the sole recognized connectivity-check statement for db_query_mongo: no
+// find/aggregate op assumes a real collection exists, so a caller with no known collection (e.g.
+// Test Connection, see connections.py's _test_connection_via_connector_enabled) has nothing to
+// probe with. "ping" runs the admin ping command against the target database instead — it
+// succeeds as long as the server is reachable and authenticated, regardless of what collections
+// exist. Matched case-insensitively, trimmed, with no other statement shape accepted for it.
 func parseMongoStatement(stmt string) (mongoParsed, error) {
 	stmt = strings.TrimSpace(stmt)
 	if stmt == "" {
 		return mongoParsed{}, errEmptyQuery
+	}
+	if strings.EqualFold(stmt, "ping") {
+		return mongoParsed{op: "ping"}, nil
 	}
 	if m := mongoFindRe.FindStringSubmatch(stmt); len(m) >= 3 {
 		filter := bson.M{}
@@ -111,6 +120,18 @@ func executeMongo(ctx context.Context, target Target, database, stmt string, opt
 		return nil, err
 	}
 	defer func() { _ = client.Disconnect(context.Background()) }()
+
+	if parsed.op == "ping" {
+		if err := client.Database(dbName).RunCommand(ctx, bson.D{{Key: "ping", Value: 1}}).Err(); err != nil {
+			return nil, err
+		}
+		return map[string]any{
+			"status": "success",
+			"results": map[string]any{
+				"data": []map[string]any{{"ok": float64(1)}},
+			},
+		}, nil
+	}
 
 	coll := client.Database(dbName).Collection(parsed.collection)
 	limit := opts.MaxRows

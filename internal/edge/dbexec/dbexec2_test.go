@@ -2,6 +2,7 @@ package dbexec
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/curlix-io/skybridge/internal/edge"
@@ -93,6 +94,81 @@ func TestRunWriteMissingTarget(t *testing.T) {
 	})
 	if res["ok"] != false || res["tool"] != ToolDBExecuteWrite {
 		t.Fatalf("expected ok=false tool=%s: %+v", ToolDBExecuteWrite, res)
+	}
+}
+
+// TestRunWriteIdempotencyKeyHitBypassesTargetResolution proves a cached success is returned
+// without ever consulting the (deliberately empty) static Targets list — an idempotency-key hit
+// must not depend on the target still being resolvable, e.g. a database removed from config
+// between the original call and a retry should still return the original cached result.
+func TestRunWriteIdempotencyKeyHitBypassesTargetResolution(t *testing.T) {
+	reg := edge.NewRegistry()
+	e := New(Options{Targets: []dbquery.Target{}}) // deliberately empty -- resolution would fail
+	reg.Register(ToolDBExecuteWrite, e.runWrite)
+
+	args := map[string]any{
+		"db_type":         "postgres",
+		"database":        "app",
+		"statement":       "DELETE FROM t",
+		"idempotency_key": "retry-1",
+	}
+	e.idem.put("retry-1", requestHash("postgres", "app", "DELETE FROM t"), edge.Result{
+		"ok": true, "tool": ToolDBExecuteWrite, "results": map[string]any{"rows_affected": int64(3)},
+	})
+
+	res := reg.Dispatch(context.Background(), edge.ToolCall{Name: ToolDBExecuteWrite, Arguments: args})
+	if res["ok"] != true {
+		t.Fatalf("expected cached success returned, got %+v", res)
+	}
+	results, _ := res["results"].(map[string]any)
+	if results["rows_affected"] != int64(3) {
+		t.Fatalf("expected the cached result's payload, got %+v", res)
+	}
+}
+
+// TestRunWriteIdempotencyKeyConflictRejectsWithoutExecuting proves reusing a key with a different
+// statement is rejected as a conflict rather than either executing the new statement or silently
+// returning the old cached result for it.
+func TestRunWriteIdempotencyKeyConflictRejectsWithoutExecuting(t *testing.T) {
+	reg := edge.NewRegistry()
+	e := New(Options{Targets: []dbquery.Target{}})
+	reg.Register(ToolDBExecuteWrite, e.runWrite)
+	e.idem.put("dup-key", requestHash("postgres", "app", "DELETE FROM t"), edge.Result{"ok": true})
+
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":         "postgres",
+			"database":        "app",
+			"statement":       "DELETE FROM other_table", // different statement, same key
+			"idempotency_key": "dup-key",
+		},
+	})
+	if res["ok"] != false {
+		t.Fatalf("expected ok=false for an idempotency-key conflict, got %+v", res)
+	}
+	msg, _ := res["error"].(string)
+	if !strings.Contains(msg, "idempotency_key reused") {
+		t.Fatalf("expected a conflict error message, got %q", msg)
+	}
+}
+
+// TestRunWriteNoIdempotencyKeySkipsCacheEntirely proves the absence of an idempotency_key arg
+// leaves the pre-existing behavior unaffected -- no cache lookup, no cache write, just the
+// existing "no local target" path.
+func TestRunWriteNoIdempotencyKeySkipsCacheEntirely(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":   "postgres",
+			"database":  "app",
+			"statement": "DELETE FROM t",
+		},
+	})
+	if res["ok"] != false || res["error"] != "no local target for postgres//app" {
+		t.Fatalf("expected the ordinary no-local-target error, got %+v", res)
 	}
 }
 
