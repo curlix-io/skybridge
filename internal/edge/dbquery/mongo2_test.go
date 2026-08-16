@@ -61,3 +61,45 @@ func TestNormalizeBSONDoc_ConvertsNamedTypesRecursively(t *testing.T) {
 		t.Fatalf("expected map kind, got %v", reflect.TypeOf(out["top"]).Kind())
 	}
 }
+
+// TestMongoURIPrefersDSNOverHost proves mongoURI uses target.DSN verbatim, without ever
+// consulting Host/User/Password, when DSN is set — the case a per-call "connection" override
+// (TargetFromOverride) produces for mongo, since a real mongo URI (mongodb+srv://, replica-set
+// members, auth params) doesn't survive a host/port/user/pass decomposition.
+func TestMongoURIPrefersDSNOverHost(t *testing.T) {
+	target := Target{DSN: "mongodb+srv://u:p@cluster0.example.mongodb.net/ignored?replicaSet=rs0", Host: "should-not-be-used:27017", User: "should-not-be-used"}
+	uri, dbName, err := mongoURI(target, "app", Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if uri != target.DSN {
+		t.Fatalf("expected DSN returned verbatim, got %q", uri)
+	}
+	if dbName != "app" {
+		t.Fatalf("expected database param to win over target.DatabaseName, got %q", dbName)
+	}
+}
+
+// TestMongoURIFallsBackToHostComposition proves mongoURI still composes a URI from Host/creds
+// when DSN is empty — the pre-existing, static-Targets behavior must be unaffected.
+func TestMongoURIFallsBackToHostComposition(t *testing.T) {
+	target := Target{Host: "mongo.internal:27017", User: "u", Password: "p"}
+	uri, dbName, err := mongoURI(target, "", Options{})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if uri != "mongodb://u:p@mongo.internal:27017/" {
+		t.Fatalf("unexpected composed URI: %q", uri)
+	}
+	if dbName != "" {
+		t.Fatalf("expected empty database name to fall back to target.DatabaseName (also empty), got %q", dbName)
+	}
+}
+
+// TestMongoURIMissingHostAndDSN proves mongoURI still fails closed when neither DSN nor Host is
+// set — the "mongo target missing host" guard must survive the DSN-preference refactor.
+func TestMongoURIMissingHostAndDSN(t *testing.T) {
+	if _, _, err := mongoURI(Target{}, "db", Options{}); err == nil {
+		t.Fatal("expected an error when target has neither DSN nor Host")
+	}
+}

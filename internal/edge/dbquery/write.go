@@ -81,18 +81,9 @@ func executeWriteMongo(ctx context.Context, target Target, database, stmt string
 	if err != nil {
 		return nil, err
 	}
-	user, pass := creds(target, opts.FallbackUser, opts.FallbackPassword)
-	host := strings.TrimSpace(target.Host)
-	if host == "" {
-		return nil, fmt.Errorf("mongo target missing host")
-	}
-	dbName := strings.TrimSpace(database)
-	if dbName == "" {
-		dbName = strings.TrimSpace(target.DatabaseName)
-	}
-	uri := fmt.Sprintf("mongodb://%s:%s@%s/%s", urlEscape(user), urlEscape(pass), host, dbName)
-	if user == "" && pass == "" {
-		uri = fmt.Sprintf("mongodb://%s/%s", host, dbName)
+	uri, dbName, err := mongoURI(target, database, opts)
+	if err != nil {
+		return nil, err
 	}
 	clientOpts := options.Client().ApplyURI(uri).SetConnectTimeout(15 * time.Second)
 	client, err := mongo.Connect(ctx, clientOpts)
