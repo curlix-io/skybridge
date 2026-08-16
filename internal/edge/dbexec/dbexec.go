@@ -36,11 +36,17 @@ type Options struct {
 	// OrgID scopes path-/table-aware masking labels (see dbquery.Options.OrgID). Empty disables
 	// that scoping without otherwise affecting masking.
 	OrgID string
+	// IdempotencyTTL / IdempotencyMaxEntries bound runWrite's idempotency-key cache (see
+	// idempotency.go). Zero/negative values fall back to defaultIdempotencyTTL /
+	// defaultIdempotencyMaxEntries in newIdempotencyCache.
+	IdempotencyTTL        time.Duration
+	IdempotencyMaxEntries int
 }
 
 // Executor runs one-shot DB statements for POST /studio/exec (Design B).
 type Executor struct {
 	opts Options
+	idem *idempotencyCache
 }
 
 // New builds an Executor with defaults applied.
@@ -51,7 +57,10 @@ func New(opts Options) Executor {
 	if opts.QueryTimeout <= 0 {
 		opts.QueryTimeout = 60 * time.Second
 	}
-	return Executor{opts: opts}
+	return Executor{
+		opts: opts,
+		idem: newIdempotencyCache(opts.IdempotencyTTL, opts.IdempotencyMaxEntries),
+	}
 }
 
 // Register wires db_query_{postgres,mysql,mongo,snowflake} and db_execute_write into the edge
@@ -139,6 +148,22 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 		return edge.ErrorResult(ToolDBExecuteWrite, "db_type, database and statement are required"), nil
 	}
 
+	// Idempotency-Key (see idempotency.go and root CLAUDE.md's "dry_run + Idempotency-Key on
+	// sensitive writes" rule): a retry carrying the same key as a prior successful call returns
+	// that call's result without re-executing — checked before target resolution so a cache hit
+	// never depends on the target still being resolvable. Absent key skips this entirely — dedup
+	// is opt-in per call, not a default the caller can't turn off.
+	idemKey := strArg(args, "idempotency_key")
+	var idemHash string
+	if idemKey != "" {
+		idemHash = requestHash(dbType, database, statement)
+		if cached, hit, conflict := e.idem.get(idemKey, idemHash); hit {
+			return cached, nil
+		} else if conflict {
+			return edge.ErrorResult(ToolDBExecuteWrite, "idempotency_key reused with a different db_type/database/statement"), nil
+		}
+	}
+
 	target, ok := resolveTarget(e.opts.Targets, dbType, scope, database, args)
 	if !ok {
 		return edge.ErrorResult(ToolDBExecuteWrite, fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
@@ -167,11 +192,15 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 	}
 
 	results, _ := raw["results"].(map[string]any)
-	return edge.Result{
+	result := edge.Result{
 		"ok":      true,
 		"tool":    ToolDBExecuteWrite,
 		"results": results,
-	}, nil
+	}
+	if idemKey != "" {
+		e.idem.put(idemKey, idemHash, result)
+	}
+	return result, nil
 }
 
 // resolveTarget prefers a per-call "connection" override (see dbquery.TargetFromOverride) pushed

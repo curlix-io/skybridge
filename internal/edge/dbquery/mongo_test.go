@@ -15,6 +15,20 @@ func TestParseMongoStatementEmpty(t *testing.T) {
 	}
 }
 
+// TestParseMongoStatementPing covers the connectivity-check sentinel ("ping", case-insensitive,
+// trimmed) — the only statement shape that produces an op with no collection.
+func TestParseMongoStatementPing(t *testing.T) {
+	for _, stmt := range []string{"ping", "PING", "  Ping  "} {
+		p, err := parseMongoStatement(stmt)
+		if err != nil {
+			t.Fatalf("parseMongoStatement(%q): unexpected error: %v", stmt, err)
+		}
+		if p.op != "ping" || p.collection != "" {
+			t.Fatalf("parseMongoStatement(%q) = %+v, want op=ping with no collection", stmt, p)
+		}
+	}
+}
+
 func TestParseMongoStatementFindWithFilter(t *testing.T) {
 	p, err := parseMongoStatement(`db.users.find({"age":{"$gt":21}})`)
 	if err != nil {
