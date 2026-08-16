@@ -28,6 +28,7 @@ import (
 	connectorv1 "github.com/curlix-io/skybridge/internal/genpb/curlix/connector/v1"
 
 	"github.com/curlix-io/skybridge/internal/edge"
+	"github.com/curlix-io/skybridge/internal/edge/dbquery"
 )
 
 // jitteredBackoff returns a random duration in [d/2, d) so many edges losing the same gateway at
@@ -91,6 +92,11 @@ type Config struct {
 	EnrollTarget      string // Enroll endpoint host:port (defaults to Target)
 	EnrollToken       string // one-time enrollment token (needed to obtain the first cert)
 	TrustDomain       string // SPIFFE trust domain placed in the CSR SAN (cosmetic; default skybridge.edge)
+
+	// Targets is the same configured database target list dbexec/studiotransport use (from
+	// SKYBRIDGE_STUDIO_TARGETS, merged with any wire-proxy targets) — metadata discovery resolves
+	// an incoming account_key/driver/database triple against this list rather than opening its own.
+	Targets []dbquery.Target
 
 	// IamAuthEnabled, when true, mints its own enroll token by presigning sts:GetCallerIdentity
 	// with the edge's ambient AWS credentials (an ECS task role, in production) instead of relying
@@ -323,6 +329,8 @@ func (c *Client) serve(ctx context.Context, client connectorv1.ConnectorGatewayC
 			_ = ss.send(&connectorv1.ConnectorMessage{
 				Msg: &connectorv1.ConnectorMessage_Heartbeat{Heartbeat: &connectorv1.Heartbeat{UnixMillis: time.Now().UnixMilli()}},
 			})
+		case *connectorv1.GatewayMessage_MetadataDiscoveryRequest:
+			c.handleMetadataDiscovery(ctx, ss, m.MetadataDiscoveryRequest)
 		}
 	}
 }
@@ -415,6 +423,63 @@ func (c *Client) emitFinished(ss *safeStream, runID, stoppedReason, errDetail st
 	}
 	b, _ := json.Marshal(resp)
 	c.emit(ss, runID, &agentv1.AgentEvent{Event: &agentv1.AgentEvent_Finished{Finished: &agentv1.RunFinished{ResponseJson: string(b)}}})
+}
+
+// handleMetadataDiscovery discovers database schema metadata and sends the response back to the gateway.
+func (c *Client) handleMetadataDiscovery(ctx context.Context, ss *safeStream, req *connectorv1.MetadataDiscoveryRequest) {
+	requestID := req.GetRequestId()
+	if requestID == "" {
+		return // Ignore requests without request_id
+	}
+
+	driver := req.GetDriver()
+	database := req.GetDatabaseName()
+	accountKey := req.GetAccountKey()
+
+	if driver == "" || database == "" || accountKey == "" {
+		// Send error response
+		_ = ss.send(&connectorv1.ConnectorMessage{
+			Msg: &connectorv1.ConnectorMessage_MetadataDiscoveryResponse{MetadataDiscoveryResponse: &connectorv1.MetadataDiscoveryResponse{
+				RequestId: requestID,
+				Success:   false,
+				Error:     "missing required fields: driver, database_name, account_key",
+			}},
+		})
+		return
+	}
+
+	// Discover metadata by calling dbquery directly
+	objects, err := c.discoverMetadata(ctx, driver, database, accountKey)
+	if err != nil {
+		c.logger.Debug(fmt.Sprintf("metadata discovery failed for %s.%s: %v", driver, database, err))
+		_ = ss.send(&connectorv1.ConnectorMessage{
+			Msg: &connectorv1.ConnectorMessage_MetadataDiscoveryResponse{MetadataDiscoveryResponse: &connectorv1.MetadataDiscoveryResponse{
+				RequestId: requestID,
+				Success:   false,
+				Error:     err.Error(),
+			}},
+		})
+		return
+	}
+
+	// Send successful response
+	_ = ss.send(&connectorv1.ConnectorMessage{
+		Msg: &connectorv1.ConnectorMessage_MetadataDiscoveryResponse{MetadataDiscoveryResponse: &connectorv1.MetadataDiscoveryResponse{
+			RequestId: requestID,
+			Success:   true,
+			Objects:   objects,
+		}},
+	})
+}
+
+// discoverMetadata resolves a target and discovers its database schema metadata.
+// It delegates to the dbquery package for driver-specific implementation.
+func (c *Client) discoverMetadata(ctx context.Context, driver, database, accountKey string) ([]*connectorv1.DatabaseObject, error) {
+	target, ok := dbquery.Resolve(c.cfg.Targets, driver, accountKey, database)
+	if !ok {
+		return nil, fmt.Errorf("metadata discovery: no configured target for driver=%s account=%s database=%s", driver, accountKey, database)
+	}
+	return dbquery.DiscoverDatabaseMetadata(ctx, driver, target, database)
 }
 
 // safeStream serializes Send across goroutines (grpc-go forbids concurrent SendMsg on one stream).
