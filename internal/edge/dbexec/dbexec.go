@@ -91,7 +91,7 @@ func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (
 	readOnly := boolArg(args, "read_only", true)
 	maxRows := intArg(args, "max_rows", e.opts.MaxRows)
 
-	target, ok := dbquery.Resolve(e.opts.Targets, dbType, scope, database)
+	target, ok := resolveTarget(e.opts.Targets, dbType, scope, database, args)
 	if !ok {
 		return edge.ErrorResult(toolName(dbType), fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
 	}
@@ -139,7 +139,7 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 		return edge.ErrorResult(ToolDBExecuteWrite, "db_type, database and statement are required"), nil
 	}
 
-	target, ok := dbquery.Resolve(e.opts.Targets, dbType, scope, database)
+	target, ok := resolveTarget(e.opts.Targets, dbType, scope, database, args)
 	if !ok {
 		return edge.ErrorResult(ToolDBExecuteWrite, fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
 	}
@@ -172,6 +172,22 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 		"tool":    ToolDBExecuteWrite,
 		"results": results,
 	}, nil
+}
+
+// resolveTarget prefers a per-call "connection" override (see dbquery.TargetFromOverride) pushed
+// alongside the dispatch over the connector's static Targets list — this is what lets a database
+// the control plane resolved fresh (e.g. one added after the connector's last deploy, or one
+// identified by a Data-sources connection name rather than a static aws_account_id/database_name
+// pair) actually work, instead of always requiring a matching static-target entry. Falls back to
+// dbquery.Resolve when no valid override is present, so a connector relying purely on static
+// Targets/SKYBRIDGE_STUDIO_TARGETS config is unaffected.
+func resolveTarget(targets []dbquery.Target, dbType, scope, database string, args map[string]any) (dbquery.Target, bool) {
+	if conn, ok := args["connection"].(map[string]any); ok {
+		if t, ok := dbquery.TargetFromOverride(dbType, database, conn); ok {
+			return t, true
+		}
+	}
+	return dbquery.Resolve(targets, dbType, scope, database)
 }
 
 func toolName(dbType string) string {

@@ -132,6 +132,22 @@ func TestExecuteWriteMongoDialsWithCancelledContext(t *testing.T) {
 	}
 }
 
+// TestExecuteWriteMongoDSNOverrideBypassesHostGuard proves a Target with only DSN set (as built
+// by TargetFromOverride from a per-call "connection" argument with no "host") reaches the dial
+// step instead of failing executeWriteMongo's "mongo target missing host" guard — mongoURI must
+// prefer target.DSN before ever checking target.Host.
+func TestExecuteWriteMongoDSNOverrideBypassesHostGuard(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	_, err := Execute(ctx, Target{DSN: "mongodb://127.0.0.1:1/db"}, "mongo", "db", `db.users.insertOne({"a":1})`, Options{Write: true, Timeout: 200 * time.Millisecond})
+	if err == nil {
+		t.Fatal("expected an error from a cancelled context during mongo write dial")
+	}
+	if err.Error() == "mongo target missing host" {
+		t.Fatalf("DSN override must bypass the missing-host guard, got: %v", err)
+	}
+}
+
 func TestExecuteWriteSQLEmptyStatement(t *testing.T) {
 	_, err := Execute(context.Background(), Target{Host: "h"}, "postgres", "db", "  ", Options{Write: true})
 	if err != errEmptyQuery {
