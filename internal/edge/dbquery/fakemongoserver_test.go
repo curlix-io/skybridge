@@ -148,6 +148,9 @@ type fakeMongoServerOpts struct {
 	// single fmEstring per doc) returned as the sole batch for a find/aggregate command.
 	findNote string
 	aggNote  string
+	// listCollNames, when non-empty, answers a listCollections command with one {name: ...}
+	// document per entry, in order — drives discoverMongoMetadata's ListCollectionNames call.
+	listCollNames []string
 }
 
 // fakeMongoServer speaks just enough of the MongoDB wire protocol (legacy OP_QUERY/OP_REPLY for
@@ -187,6 +190,15 @@ func fmServeConn(conn net.Conn, opts fakeMongoServerOpts) {
 			continue
 		}
 		switch {
+		case fmContains(body, "listCollections") && len(opts.listCollNames) > 0:
+			docs := make([][]byte, 0, len(opts.listCollNames))
+			for i, name := range opts.listCollNames {
+				doc := fmBdoc(fmEstring("name", name), fmEstring("type", "collection"))
+				docs = append(docs, fmEnested(0x03, itoaFakePG(i), doc))
+			}
+			batch := fmBdoc(docs...)
+			cursor := fmBdoc(fmEnested(0x04, "firstBatch", batch), fmEstring("ns", "db.$cmd.listCollections"), fmEint64("id", 0))
+			_, _ = conn.Write(fmOpMsgReply(fmBdoc(fmEnested(0x03, "cursor", cursor), fmEdouble("ok", 1)), reqID))
 		case fmContains(body, "find") && opts.findNote != "":
 			batch := fmBdoc(fmEnested(0x03, "0", fmBdoc(fmEstring("note", opts.findNote))))
 			cursor := fmBdoc(fmEnested(0x04, "firstBatch", batch), fmEstring("ns", "db.users"), fmEint64("id", 0))

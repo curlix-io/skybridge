@@ -202,6 +202,48 @@ func TestRunWriteDialFailureSurfacesAsErrorResult(t *testing.T) {
 	}
 }
 
+// TestRunWriteDryRunSkipsExecution proves dry_run short-circuits before dbquery.Execute: the
+// target still resolves to a real (unreachable) host, but no dial is attempted — a dial attempt
+// would surface as ok=false (see TestRunWriteDialFailureSurfacesAsErrorResult), so ok=true here
+// is only possible if runWrite returned before calling dbquery.Execute.
+func TestRunWriteDryRunSkipsExecution(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{
+		Targets: []dbquery.Target{{DBType: "postgres", DatabaseName: "app", Host: "127.0.0.1:1"}},
+	})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":   "postgres",
+			"database":  "app",
+			"statement": "DELETE FROM t",
+			"dry_run":   true,
+		},
+	})
+	if res["ok"] != true || res["tool"] != ToolDBExecuteWrite || res["status"] != "dry_run" {
+		t.Fatalf("expected ok=true status=dry_run tool=%s: %+v", ToolDBExecuteWrite, res)
+	}
+}
+
+// TestRunWriteDryRunStillValidatesTarget proves dry_run does not bypass target resolution — a
+// missing target must still fail closed rather than report a false "validated" dry_run success.
+func TestRunWriteDryRunStillValidatesTarget(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":   "postgres",
+			"database":  "app",
+			"statement": "DELETE FROM t",
+			"dry_run":   true,
+		},
+	})
+	if res["ok"] != false || res["tool"] != ToolDBExecuteWrite {
+		t.Fatalf("expected ok=false tool=%s: %+v", ToolDBExecuteWrite, res)
+	}
+}
+
 // TestRunReadOnlyDialFailureSurfacesAsErrorResult is the read-only counterpart: run() (used by
 // runPostgres/runMySQL/runMongo) resolves a target then fails to dial/execute, exercising the
 // dbquery.Execute error branch inside run() (as opposed to the "no local target" branch already
@@ -220,6 +262,80 @@ func TestRunReadOnlyDialFailureSurfacesAsErrorResult(t *testing.T) {
 	})
 	if res["ok"] != false || res["tool"] != ToolDBQueryPostgres {
 		t.Fatalf("expected ok=false tool=%s: %+v", ToolDBQueryPostgres, res)
+	}
+}
+
+// TestRunPostgresConnectionOverrideBypassesStaticTargets proves a "connection" override lets a
+// database succeed target resolution with zero entries in the connector's static Targets list —
+// the actual fix for dynamic per-call connection push (previously dead: the edge only ever
+// consulted Resolve() against the static list, silently ignoring any "connection" argument). Uses
+// an unreachable host so the assertion is specifically about resolution, not a real dial.
+func TestRunPostgresConnectionOverrideBypassesStaticTargets(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}}) // deliberately empty static list
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBQueryPostgres,
+		Arguments: map[string]any{
+			"database":  "app",
+			"statement": "SELECT 1",
+			"connection": map[string]any{
+				"host": "127.0.0.1",
+				"port": float64(1),
+			},
+		},
+	})
+	// A dial failure (not "no local target") proves resolveTarget accepted the override instead of
+	// falling through to the empty static list's "no local target" error.
+	msg, _ := res["error"].(string)
+	if res["ok"] != false {
+		t.Fatalf("expected ok=false (unreachable host), got %+v", res)
+	}
+	if msg == "no local target for postgres//app" {
+		t.Fatalf("connection override should have bypassed static-target resolution, got: %s", msg)
+	}
+}
+
+// TestRunWriteConnectionOverrideBypassesStaticTargets is the write-path counterpart.
+func TestRunWriteConnectionOverrideBypassesStaticTargets(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":   "postgres",
+			"database":  "app",
+			"statement": "DELETE FROM t",
+			"connection": map[string]any{
+				"host": "127.0.0.1",
+				"port": float64(1),
+			},
+		},
+	})
+	msg, _ := res["error"].(string)
+	if res["ok"] != false {
+		t.Fatalf("expected ok=false (unreachable host), got %+v", res)
+	}
+	if msg == "no local target for postgres//app" {
+		t.Fatalf("connection override should have bypassed static-target resolution, got: %s", msg)
+	}
+}
+
+// TestRunPostgresMalformedConnectionOverrideFallsBackToStaticTargets proves a malformed override
+// (wrong type, or a map missing both host and dsn) is ignored rather than treated as a hard error
+// — resolveTarget must fall back to Resolve() against the static list.
+func TestRunPostgresMalformedConnectionOverrideFallsBackToStaticTargets(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBQueryPostgres,
+		Arguments: map[string]any{
+			"database":   "app",
+			"statement":  "SELECT 1",
+			"connection": "not a map",
+		},
+	})
+	if res["ok"] != false || res["error"] != "no local target for postgres//app" {
+		t.Fatalf("expected fall-through to static-target 'no local target' error, got %+v", res)
 	}
 }
 

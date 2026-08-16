@@ -96,15 +96,23 @@ func parseMongoStatement(stmt string) (mongoParsed, error) {
 	return mongoParsed{}, fmt.Errorf("unsupported mongo statement shape (use db.COL.find({}) or db.COL.aggregate([...]))")
 }
 
-func executeMongo(ctx context.Context, target Target, database, stmt string, opts Options, masker mask.Masker) (map[string]any, error) {
-	parsed, err := parseMongoStatement(stmt)
-	if err != nil {
-		return nil, err
+// mongoURI resolves the URI executeMongo/executeWriteMongo connect with. target.DSN, when set
+// (see its doc comment — populated by TargetFromOverride from a per-call "connection" argument),
+// is used verbatim ahead of composing one from Host/User/Password: a real dispatched URI may carry
+// replica-set members, mongodb+srv://, or auth/topology query params that a host/port/user/pass
+// decomposition can't reconstruct.
+func mongoURI(target Target, database string, opts Options) (string, string, error) {
+	if dsn := strings.TrimSpace(target.DSN); dsn != "" {
+		dbName := strings.TrimSpace(database)
+		if dbName == "" {
+			dbName = strings.TrimSpace(target.DatabaseName)
+		}
+		return dsn, dbName, nil
 	}
 	user, pass := creds(target, opts.FallbackUser, opts.FallbackPassword)
 	host := strings.TrimSpace(target.Host)
 	if host == "" {
-		return nil, fmt.Errorf("mongo target missing host")
+		return "", "", fmt.Errorf("mongo target missing host")
 	}
 	dbName := strings.TrimSpace(database)
 	if dbName == "" {
@@ -113,6 +121,18 @@ func executeMongo(ctx context.Context, target Target, database, stmt string, opt
 	uri := fmt.Sprintf("mongodb://%s:%s@%s/%s", urlEscape(user), urlEscape(pass), host, dbName)
 	if user == "" && pass == "" {
 		uri = fmt.Sprintf("mongodb://%s/%s", host, dbName)
+	}
+	return uri, dbName, nil
+}
+
+func executeMongo(ctx context.Context, target Target, database, stmt string, opts Options, masker mask.Masker) (map[string]any, error) {
+	parsed, err := parseMongoStatement(stmt)
+	if err != nil {
+		return nil, err
+	}
+	uri, dbName, err := mongoURI(target, database, opts)
+	if err != nil {
+		return nil, err
 	}
 	clientOpts := options.Client().ApplyURI(uri).SetConnectTimeout(15 * time.Second)
 	client, err := mongo.Connect(ctx, clientOpts)
