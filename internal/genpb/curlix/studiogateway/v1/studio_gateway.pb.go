@@ -177,6 +177,110 @@ func (x *EnrollResponse) GetNotAfterUnix() int64 {
 	return 0
 }
 
+type RenewRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CsrPem        string                 `protobuf:"bytes,1,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"` // fresh CSR for a new keypair; identity comes from the mTLS channel's
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewRequest) Reset() {
+	*x = RenewRequest{}
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewRequest) ProtoMessage() {}
+
+func (x *RenewRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewRequest.ProtoReflect.Descriptor instead.
+func (*RenewRequest) Descriptor() ([]byte, []int) {
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RenewRequest) GetCsrPem() string {
+	if x != nil {
+		return x.CsrPem
+	}
+	return ""
+}
+
+type RenewResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ClientCertPem string                 `protobuf:"bytes,1,opt,name=client_cert_pem,json=clientCertPem,proto3" json:"client_cert_pem,omitempty"` // freshly signed leaf cert (same identity as the calling cert)
+	CaBundlePem   string                 `protobuf:"bytes,2,opt,name=ca_bundle_pem,json=caBundlePem,proto3" json:"ca_bundle_pem,omitempty"`       // CA chain the agent trusts for the gateway
+	NotAfterUnix  int64                  `protobuf:"varint,3,opt,name=not_after_unix,json=notAfterUnix,proto3" json:"not_after_unix,omitempty"`   // new cert expiry
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewResponse) Reset() {
+	*x = RenewResponse{}
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewResponse) ProtoMessage() {}
+
+func (x *RenewResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewResponse.ProtoReflect.Descriptor instead.
+func (*RenewResponse) Descriptor() ([]byte, []int) {
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RenewResponse) GetClientCertPem() string {
+	if x != nil {
+		return x.ClientCertPem
+	}
+	return ""
+}
+
+func (x *RenewResponse) GetCaBundlePem() string {
+	if x != nil {
+		return x.CaBundlePem
+	}
+	return ""
+}
+
+func (x *RenewResponse) GetNotAfterUnix() int64 {
+	if x != nil {
+		return x.NotAfterUnix
+	}
+	return 0
+}
+
 // Identity fields mirror Register; see curlix.connector.v1.PreConnectRequest's comment.
 type PreConnectRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -188,7 +292,7 @@ type PreConnectRequest struct {
 
 func (x *PreConnectRequest) Reset() {
 	*x = PreConnectRequest{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[2]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -200,7 +304,7 @@ func (x *PreConnectRequest) String() string {
 func (*PreConnectRequest) ProtoMessage() {}
 
 func (x *PreConnectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[2]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -213,7 +317,7 @@ func (x *PreConnectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreConnectRequest.ProtoReflect.Descriptor instead.
 func (*PreConnectRequest) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{2}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PreConnectRequest) GetTenantId() string {
@@ -241,7 +345,7 @@ type PreConnectResponse struct {
 
 func (x *PreConnectResponse) Reset() {
 	*x = PreConnectResponse{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[3]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -253,7 +357,7 @@ func (x *PreConnectResponse) String() string {
 func (*PreConnectResponse) ProtoMessage() {}
 
 func (x *PreConnectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[3]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -266,7 +370,7 @@ func (x *PreConnectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreConnectResponse.ProtoReflect.Descriptor instead.
 func (*PreConnectResponse) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{3}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PreConnectResponse) GetOk() bool {
@@ -303,7 +407,7 @@ type TargetBinding struct {
 
 func (x *TargetBinding) Reset() {
 	*x = TargetBinding{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[4]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -315,7 +419,7 @@ func (x *TargetBinding) String() string {
 func (*TargetBinding) ProtoMessage() {}
 
 func (x *TargetBinding) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[4]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -328,7 +432,7 @@ func (x *TargetBinding) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use TargetBinding.ProtoReflect.Descriptor instead.
 func (*TargetBinding) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{4}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *TargetBinding) GetDbType() string {
@@ -368,7 +472,7 @@ type ExecuteIdentity struct {
 
 func (x *ExecuteIdentity) Reset() {
 	*x = ExecuteIdentity{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[5]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -380,7 +484,7 @@ func (x *ExecuteIdentity) String() string {
 func (*ExecuteIdentity) ProtoMessage() {}
 
 func (x *ExecuteIdentity) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[5]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -393,7 +497,7 @@ func (x *ExecuteIdentity) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteIdentity.ProtoReflect.Descriptor instead.
 func (*ExecuteIdentity) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{5}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *ExecuteIdentity) GetUsername() string {
@@ -451,7 +555,7 @@ type ExecuteRequest struct {
 
 func (x *ExecuteRequest) Reset() {
 	*x = ExecuteRequest{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[6]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -463,7 +567,7 @@ func (x *ExecuteRequest) String() string {
 func (*ExecuteRequest) ProtoMessage() {}
 
 func (x *ExecuteRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[6]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -476,7 +580,7 @@ func (x *ExecuteRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteRequest.ProtoReflect.Descriptor instead.
 func (*ExecuteRequest) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{6}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *ExecuteRequest) GetDbType() string {
@@ -555,7 +659,7 @@ type Register struct {
 
 func (x *Register) Reset() {
 	*x = Register{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[7]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[9]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -567,7 +671,7 @@ func (x *Register) String() string {
 func (*Register) ProtoMessage() {}
 
 func (x *Register) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[7]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[9]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -580,7 +684,7 @@ func (x *Register) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Register.ProtoReflect.Descriptor instead.
 func (*Register) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{7}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{9}
 }
 
 func (x *Register) GetTenantId() string {
@@ -628,7 +732,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[8]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -640,7 +744,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[8]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -653,7 +757,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{8}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *Heartbeat) GetUnixMillis() int64 {
@@ -683,7 +787,7 @@ type SessionAck struct {
 
 func (x *SessionAck) Reset() {
 	*x = SessionAck{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[9]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -695,7 +799,7 @@ func (x *SessionAck) String() string {
 func (*SessionAck) ProtoMessage() {}
 
 func (x *SessionAck) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[9]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -708,7 +812,7 @@ func (x *SessionAck) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionAck.ProtoReflect.Descriptor instead.
 func (*SessionAck) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{9}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *SessionAck) GetSessionId() string {
@@ -743,7 +847,7 @@ type SessionEvent struct {
 
 func (x *SessionEvent) Reset() {
 	*x = SessionEvent{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[10]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -755,7 +859,7 @@ func (x *SessionEvent) String() string {
 func (*SessionEvent) ProtoMessage() {}
 
 func (x *SessionEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[10]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -768,7 +872,7 @@ func (x *SessionEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionEvent.ProtoReflect.Descriptor instead.
 func (*SessionEvent) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{10}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *SessionEvent) GetSessionId() string {
@@ -800,7 +904,7 @@ type AgentMessage struct {
 
 func (x *AgentMessage) Reset() {
 	*x = AgentMessage{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[11]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -812,7 +916,7 @@ func (x *AgentMessage) String() string {
 func (*AgentMessage) ProtoMessage() {}
 
 func (x *AgentMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[11]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -825,7 +929,7 @@ func (x *AgentMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use AgentMessage.ProtoReflect.Descriptor instead.
 func (*AgentMessage) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{11}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *AgentMessage) GetMsg() isAgentMessage_Msg {
@@ -908,7 +1012,7 @@ type Registered struct {
 
 func (x *Registered) Reset() {
 	*x = Registered{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[12]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -920,7 +1024,7 @@ func (x *Registered) String() string {
 func (*Registered) ProtoMessage() {}
 
 func (x *Registered) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[12]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -933,7 +1037,7 @@ func (x *Registered) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Registered.ProtoReflect.Descriptor instead.
 func (*Registered) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{12}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Registered) GetLeaseId() string {
@@ -958,7 +1062,7 @@ type ExecuteAssignment struct {
 
 func (x *ExecuteAssignment) Reset() {
 	*x = ExecuteAssignment{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[13]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[15]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -970,7 +1074,7 @@ func (x *ExecuteAssignment) String() string {
 func (*ExecuteAssignment) ProtoMessage() {}
 
 func (x *ExecuteAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[13]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[15]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -983,7 +1087,7 @@ func (x *ExecuteAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteAssignment.ProtoReflect.Descriptor instead.
 func (*ExecuteAssignment) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{13}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{15}
 }
 
 func (x *ExecuteAssignment) GetSessionId() string {
@@ -1032,7 +1136,7 @@ type CancelSession struct {
 
 func (x *CancelSession) Reset() {
 	*x = CancelSession{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[14]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1044,7 +1148,7 @@ func (x *CancelSession) String() string {
 func (*CancelSession) ProtoMessage() {}
 
 func (x *CancelSession) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[14]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1057,7 +1161,7 @@ func (x *CancelSession) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelSession.ProtoReflect.Descriptor instead.
 func (*CancelSession) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{14}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *CancelSession) GetSessionId() string {
@@ -1083,7 +1187,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[15]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[17]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1095,7 +1199,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[15]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[17]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1108,7 +1212,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{15}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{17}
 }
 
 func (x *Ping) GetUnixMillis() int64 {
@@ -1133,7 +1237,7 @@ type GatewayMessage struct {
 
 func (x *GatewayMessage) Reset() {
 	*x = GatewayMessage{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[16]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[18]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1145,7 +1249,7 @@ func (x *GatewayMessage) String() string {
 func (*GatewayMessage) ProtoMessage() {}
 
 func (x *GatewayMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[16]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[18]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1158,7 +1262,7 @@ func (x *GatewayMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GatewayMessage.ProtoReflect.Descriptor instead.
 func (*GatewayMessage) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{16}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{18}
 }
 
 func (x *GatewayMessage) GetMsg() isGatewayMessage_Msg {
@@ -1242,7 +1346,7 @@ type SessionStarted struct {
 
 func (x *SessionStarted) Reset() {
 	*x = SessionStarted{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[17]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[19]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1254,7 +1358,7 @@ func (x *SessionStarted) String() string {
 func (*SessionStarted) ProtoMessage() {}
 
 func (x *SessionStarted) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[17]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[19]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1267,7 +1371,7 @@ func (x *SessionStarted) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use SessionStarted.ProtoReflect.Descriptor instead.
 func (*SessionStarted) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{17}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{19}
 }
 
 func (x *SessionStarted) GetStartedUnixMillis() int64 {
@@ -1290,7 +1394,7 @@ type Progress struct {
 
 func (x *Progress) Reset() {
 	*x = Progress{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[18]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[20]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1302,7 +1406,7 @@ func (x *Progress) String() string {
 func (*Progress) ProtoMessage() {}
 
 func (x *Progress) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[18]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[20]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1315,7 +1419,7 @@ func (x *Progress) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Progress.ProtoReflect.Descriptor instead.
 func (*Progress) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{18}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{20}
 }
 
 func (x *Progress) GetStatus() string {
@@ -1352,7 +1456,7 @@ type RowBatch struct {
 
 func (x *RowBatch) Reset() {
 	*x = RowBatch{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[19]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[21]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1364,7 +1468,7 @@ func (x *RowBatch) String() string {
 func (*RowBatch) ProtoMessage() {}
 
 func (x *RowBatch) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[19]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[21]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1377,7 +1481,7 @@ func (x *RowBatch) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use RowBatch.ProtoReflect.Descriptor instead.
 func (*RowBatch) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{19}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{21}
 }
 
 func (x *RowBatch) GetColumnsJson() string {
@@ -1412,7 +1516,7 @@ type ResultFinished struct {
 
 func (x *ResultFinished) Reset() {
 	*x = ResultFinished{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[20]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[22]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1424,7 +1528,7 @@ func (x *ResultFinished) String() string {
 func (*ResultFinished) ProtoMessage() {}
 
 func (x *ResultFinished) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[20]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[22]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1437,7 +1541,7 @@ func (x *ResultFinished) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ResultFinished.ProtoReflect.Descriptor instead.
 func (*ResultFinished) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{20}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{22}
 }
 
 func (x *ResultFinished) GetResponseJson() string {
@@ -1459,7 +1563,7 @@ type ExecuteError struct {
 
 func (x *ExecuteError) Reset() {
 	*x = ExecuteError{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[21]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[23]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1471,7 +1575,7 @@ func (x *ExecuteError) String() string {
 func (*ExecuteError) ProtoMessage() {}
 
 func (x *ExecuteError) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[21]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[23]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1484,7 +1588,7 @@ func (x *ExecuteError) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteError.ProtoReflect.Descriptor instead.
 func (*ExecuteError) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{21}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{23}
 }
 
 func (x *ExecuteError) GetCode() string {
@@ -1524,7 +1628,7 @@ type ExecuteEvent struct {
 
 func (x *ExecuteEvent) Reset() {
 	*x = ExecuteEvent{}
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[22]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[24]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1536,7 +1640,7 @@ func (x *ExecuteEvent) String() string {
 func (*ExecuteEvent) ProtoMessage() {}
 
 func (x *ExecuteEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[22]
+	mi := &file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[24]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1549,7 +1653,7 @@ func (x *ExecuteEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ExecuteEvent.ProtoReflect.Descriptor instead.
 func (*ExecuteEvent) Descriptor() ([]byte, []int) {
-	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{22}
+	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP(), []int{24}
 }
 
 func (x *ExecuteEvent) GetEvent() isExecuteEvent_Event {
@@ -1649,6 +1753,12 @@ const file_curlix_studiogateway_v1_studio_gateway_proto_rawDesc = "" +
 	"\bagent_id\x18\x03 \x01(\tR\aagentId\x12\x17\n" +
 	"\acsr_pem\x18\x04 \x01(\tR\x06csrPem\"\x82\x01\n" +
 	"\x0eEnrollResponse\x12&\n" +
+	"\x0fclient_cert_pem\x18\x01 \x01(\tR\rclientCertPem\x12\"\n" +
+	"\rca_bundle_pem\x18\x02 \x01(\tR\vcaBundlePem\x12$\n" +
+	"\x0enot_after_unix\x18\x03 \x01(\x03R\fnotAfterUnix\"'\n" +
+	"\fRenewRequest\x12\x17\n" +
+	"\acsr_pem\x18\x01 \x01(\tR\x06csrPem\"\x81\x01\n" +
+	"\rRenewResponse\x12&\n" +
 	"\x0fclient_cert_pem\x18\x01 \x01(\tR\rclientCertPem\x12\"\n" +
 	"\rca_bundle_pem\x18\x02 \x01(\tR\vcaBundlePem\x12$\n" +
 	"\x0enot_after_unix\x18\x03 \x01(\x03R\fnotAfterUnix\"K\n" +
@@ -1754,12 +1864,13 @@ const file_curlix_studiogateway_v1_studio_gateway_proto_rawDesc = "" +
 	"\trow_batch\x18\x03 \x01(\v2!.curlix.studiogateway.v1.RowBatchH\x00R\browBatch\x12E\n" +
 	"\bfinished\x18\x04 \x01(\v2'.curlix.studiogateway.v1.ResultFinishedH\x00R\bfinished\x12=\n" +
 	"\x05error\x18\x05 \x01(\v2%.curlix.studiogateway.v1.ExecuteErrorH\x00R\x05errorB\a\n" +
-	"\x05event2\xb0\x02\n" +
+	"\x05event2\x88\x03\n" +
 	"\rStudioGateway\x12]\n" +
 	"\aConnect\x12%.curlix.studiogateway.v1.AgentMessage\x1a'.curlix.studiogateway.v1.GatewayMessage(\x010\x01\x12Y\n" +
 	"\x06Enroll\x12&.curlix.studiogateway.v1.EnrollRequest\x1a'.curlix.studiogateway.v1.EnrollResponse\x12e\n" +
 	"\n" +
-	"PreConnect\x12*.curlix.studiogateway.v1.PreConnectRequest\x1a+.curlix.studiogateway.v1.PreConnectResponseB\x86\x02\n" +
+	"PreConnect\x12*.curlix.studiogateway.v1.PreConnectRequest\x1a+.curlix.studiogateway.v1.PreConnectResponse\x12V\n" +
+	"\x05Renew\x12%.curlix.studiogateway.v1.RenewRequest\x1a&.curlix.studiogateway.v1.RenewResponseB\x86\x02\n" +
 	"\x1bcom.curlix.studiogateway.v1B\x12StudioGatewayProtoP\x01ZUgithub.com/curlix-io/skybridge/internal/genpb/curlix/studiogateway/v1;studiogatewayv1\xa2\x02\x03CSX\xaa\x02\x17Curlix.Studiogateway.V1\xca\x02\x17Curlix\\Studiogateway\\V1\xe2\x02#Curlix\\Studiogateway\\V1\\GPBMetadata\xea\x02\x19Curlix::Studiogateway::V1b\x06proto3"
 
 var (
@@ -1774,58 +1885,62 @@ func file_curlix_studiogateway_v1_studio_gateway_proto_rawDescGZIP() []byte {
 	return file_curlix_studiogateway_v1_studio_gateway_proto_rawDescData
 }
 
-var file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 23)
+var file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 25)
 var file_curlix_studiogateway_v1_studio_gateway_proto_goTypes = []any{
 	(*EnrollRequest)(nil),      // 0: curlix.studiogateway.v1.EnrollRequest
 	(*EnrollResponse)(nil),     // 1: curlix.studiogateway.v1.EnrollResponse
-	(*PreConnectRequest)(nil),  // 2: curlix.studiogateway.v1.PreConnectRequest
-	(*PreConnectResponse)(nil), // 3: curlix.studiogateway.v1.PreConnectResponse
-	(*TargetBinding)(nil),      // 4: curlix.studiogateway.v1.TargetBinding
-	(*ExecuteIdentity)(nil),    // 5: curlix.studiogateway.v1.ExecuteIdentity
-	(*ExecuteRequest)(nil),     // 6: curlix.studiogateway.v1.ExecuteRequest
-	(*Register)(nil),           // 7: curlix.studiogateway.v1.Register
-	(*Heartbeat)(nil),          // 8: curlix.studiogateway.v1.Heartbeat
-	(*SessionAck)(nil),         // 9: curlix.studiogateway.v1.SessionAck
-	(*SessionEvent)(nil),       // 10: curlix.studiogateway.v1.SessionEvent
-	(*AgentMessage)(nil),       // 11: curlix.studiogateway.v1.AgentMessage
-	(*Registered)(nil),         // 12: curlix.studiogateway.v1.Registered
-	(*ExecuteAssignment)(nil),  // 13: curlix.studiogateway.v1.ExecuteAssignment
-	(*CancelSession)(nil),      // 14: curlix.studiogateway.v1.CancelSession
-	(*Ping)(nil),               // 15: curlix.studiogateway.v1.Ping
-	(*GatewayMessage)(nil),     // 16: curlix.studiogateway.v1.GatewayMessage
-	(*SessionStarted)(nil),     // 17: curlix.studiogateway.v1.SessionStarted
-	(*Progress)(nil),           // 18: curlix.studiogateway.v1.Progress
-	(*RowBatch)(nil),           // 19: curlix.studiogateway.v1.RowBatch
-	(*ResultFinished)(nil),     // 20: curlix.studiogateway.v1.ResultFinished
-	(*ExecuteError)(nil),       // 21: curlix.studiogateway.v1.ExecuteError
-	(*ExecuteEvent)(nil),       // 22: curlix.studiogateway.v1.ExecuteEvent
+	(*RenewRequest)(nil),       // 2: curlix.studiogateway.v1.RenewRequest
+	(*RenewResponse)(nil),      // 3: curlix.studiogateway.v1.RenewResponse
+	(*PreConnectRequest)(nil),  // 4: curlix.studiogateway.v1.PreConnectRequest
+	(*PreConnectResponse)(nil), // 5: curlix.studiogateway.v1.PreConnectResponse
+	(*TargetBinding)(nil),      // 6: curlix.studiogateway.v1.TargetBinding
+	(*ExecuteIdentity)(nil),    // 7: curlix.studiogateway.v1.ExecuteIdentity
+	(*ExecuteRequest)(nil),     // 8: curlix.studiogateway.v1.ExecuteRequest
+	(*Register)(nil),           // 9: curlix.studiogateway.v1.Register
+	(*Heartbeat)(nil),          // 10: curlix.studiogateway.v1.Heartbeat
+	(*SessionAck)(nil),         // 11: curlix.studiogateway.v1.SessionAck
+	(*SessionEvent)(nil),       // 12: curlix.studiogateway.v1.SessionEvent
+	(*AgentMessage)(nil),       // 13: curlix.studiogateway.v1.AgentMessage
+	(*Registered)(nil),         // 14: curlix.studiogateway.v1.Registered
+	(*ExecuteAssignment)(nil),  // 15: curlix.studiogateway.v1.ExecuteAssignment
+	(*CancelSession)(nil),      // 16: curlix.studiogateway.v1.CancelSession
+	(*Ping)(nil),               // 17: curlix.studiogateway.v1.Ping
+	(*GatewayMessage)(nil),     // 18: curlix.studiogateway.v1.GatewayMessage
+	(*SessionStarted)(nil),     // 19: curlix.studiogateway.v1.SessionStarted
+	(*Progress)(nil),           // 20: curlix.studiogateway.v1.Progress
+	(*RowBatch)(nil),           // 21: curlix.studiogateway.v1.RowBatch
+	(*ResultFinished)(nil),     // 22: curlix.studiogateway.v1.ResultFinished
+	(*ExecuteError)(nil),       // 23: curlix.studiogateway.v1.ExecuteError
+	(*ExecuteEvent)(nil),       // 24: curlix.studiogateway.v1.ExecuteEvent
 }
 var file_curlix_studiogateway_v1_studio_gateway_proto_depIdxs = []int32{
-	4,  // 0: curlix.studiogateway.v1.Register.targets:type_name -> curlix.studiogateway.v1.TargetBinding
-	22, // 1: curlix.studiogateway.v1.SessionEvent.event:type_name -> curlix.studiogateway.v1.ExecuteEvent
-	7,  // 2: curlix.studiogateway.v1.AgentMessage.register:type_name -> curlix.studiogateway.v1.Register
-	8,  // 3: curlix.studiogateway.v1.AgentMessage.heartbeat:type_name -> curlix.studiogateway.v1.Heartbeat
-	9,  // 4: curlix.studiogateway.v1.AgentMessage.session_ack:type_name -> curlix.studiogateway.v1.SessionAck
-	10, // 5: curlix.studiogateway.v1.AgentMessage.session_event:type_name -> curlix.studiogateway.v1.SessionEvent
-	6,  // 6: curlix.studiogateway.v1.ExecuteAssignment.request:type_name -> curlix.studiogateway.v1.ExecuteRequest
-	5,  // 7: curlix.studiogateway.v1.ExecuteAssignment.identity:type_name -> curlix.studiogateway.v1.ExecuteIdentity
-	12, // 8: curlix.studiogateway.v1.GatewayMessage.registered:type_name -> curlix.studiogateway.v1.Registered
-	13, // 9: curlix.studiogateway.v1.GatewayMessage.execute_assignment:type_name -> curlix.studiogateway.v1.ExecuteAssignment
-	14, // 10: curlix.studiogateway.v1.GatewayMessage.cancel_session:type_name -> curlix.studiogateway.v1.CancelSession
-	15, // 11: curlix.studiogateway.v1.GatewayMessage.ping:type_name -> curlix.studiogateway.v1.Ping
-	17, // 12: curlix.studiogateway.v1.ExecuteEvent.started:type_name -> curlix.studiogateway.v1.SessionStarted
-	18, // 13: curlix.studiogateway.v1.ExecuteEvent.progress:type_name -> curlix.studiogateway.v1.Progress
-	19, // 14: curlix.studiogateway.v1.ExecuteEvent.row_batch:type_name -> curlix.studiogateway.v1.RowBatch
-	20, // 15: curlix.studiogateway.v1.ExecuteEvent.finished:type_name -> curlix.studiogateway.v1.ResultFinished
-	21, // 16: curlix.studiogateway.v1.ExecuteEvent.error:type_name -> curlix.studiogateway.v1.ExecuteError
-	11, // 17: curlix.studiogateway.v1.StudioGateway.Connect:input_type -> curlix.studiogateway.v1.AgentMessage
+	6,  // 0: curlix.studiogateway.v1.Register.targets:type_name -> curlix.studiogateway.v1.TargetBinding
+	24, // 1: curlix.studiogateway.v1.SessionEvent.event:type_name -> curlix.studiogateway.v1.ExecuteEvent
+	9,  // 2: curlix.studiogateway.v1.AgentMessage.register:type_name -> curlix.studiogateway.v1.Register
+	10, // 3: curlix.studiogateway.v1.AgentMessage.heartbeat:type_name -> curlix.studiogateway.v1.Heartbeat
+	11, // 4: curlix.studiogateway.v1.AgentMessage.session_ack:type_name -> curlix.studiogateway.v1.SessionAck
+	12, // 5: curlix.studiogateway.v1.AgentMessage.session_event:type_name -> curlix.studiogateway.v1.SessionEvent
+	8,  // 6: curlix.studiogateway.v1.ExecuteAssignment.request:type_name -> curlix.studiogateway.v1.ExecuteRequest
+	7,  // 7: curlix.studiogateway.v1.ExecuteAssignment.identity:type_name -> curlix.studiogateway.v1.ExecuteIdentity
+	14, // 8: curlix.studiogateway.v1.GatewayMessage.registered:type_name -> curlix.studiogateway.v1.Registered
+	15, // 9: curlix.studiogateway.v1.GatewayMessage.execute_assignment:type_name -> curlix.studiogateway.v1.ExecuteAssignment
+	16, // 10: curlix.studiogateway.v1.GatewayMessage.cancel_session:type_name -> curlix.studiogateway.v1.CancelSession
+	17, // 11: curlix.studiogateway.v1.GatewayMessage.ping:type_name -> curlix.studiogateway.v1.Ping
+	19, // 12: curlix.studiogateway.v1.ExecuteEvent.started:type_name -> curlix.studiogateway.v1.SessionStarted
+	20, // 13: curlix.studiogateway.v1.ExecuteEvent.progress:type_name -> curlix.studiogateway.v1.Progress
+	21, // 14: curlix.studiogateway.v1.ExecuteEvent.row_batch:type_name -> curlix.studiogateway.v1.RowBatch
+	22, // 15: curlix.studiogateway.v1.ExecuteEvent.finished:type_name -> curlix.studiogateway.v1.ResultFinished
+	23, // 16: curlix.studiogateway.v1.ExecuteEvent.error:type_name -> curlix.studiogateway.v1.ExecuteError
+	13, // 17: curlix.studiogateway.v1.StudioGateway.Connect:input_type -> curlix.studiogateway.v1.AgentMessage
 	0,  // 18: curlix.studiogateway.v1.StudioGateway.Enroll:input_type -> curlix.studiogateway.v1.EnrollRequest
-	2,  // 19: curlix.studiogateway.v1.StudioGateway.PreConnect:input_type -> curlix.studiogateway.v1.PreConnectRequest
-	16, // 20: curlix.studiogateway.v1.StudioGateway.Connect:output_type -> curlix.studiogateway.v1.GatewayMessage
-	1,  // 21: curlix.studiogateway.v1.StudioGateway.Enroll:output_type -> curlix.studiogateway.v1.EnrollResponse
-	3,  // 22: curlix.studiogateway.v1.StudioGateway.PreConnect:output_type -> curlix.studiogateway.v1.PreConnectResponse
-	20, // [20:23] is the sub-list for method output_type
-	17, // [17:20] is the sub-list for method input_type
+	4,  // 19: curlix.studiogateway.v1.StudioGateway.PreConnect:input_type -> curlix.studiogateway.v1.PreConnectRequest
+	2,  // 20: curlix.studiogateway.v1.StudioGateway.Renew:input_type -> curlix.studiogateway.v1.RenewRequest
+	18, // 21: curlix.studiogateway.v1.StudioGateway.Connect:output_type -> curlix.studiogateway.v1.GatewayMessage
+	1,  // 22: curlix.studiogateway.v1.StudioGateway.Enroll:output_type -> curlix.studiogateway.v1.EnrollResponse
+	5,  // 23: curlix.studiogateway.v1.StudioGateway.PreConnect:output_type -> curlix.studiogateway.v1.PreConnectResponse
+	3,  // 24: curlix.studiogateway.v1.StudioGateway.Renew:output_type -> curlix.studiogateway.v1.RenewResponse
+	21, // [21:25] is the sub-list for method output_type
+	17, // [17:21] is the sub-list for method input_type
 	17, // [17:17] is the sub-list for extension type_name
 	17, // [17:17] is the sub-list for extension extendee
 	0,  // [0:17] is the sub-list for field type_name
@@ -1836,19 +1951,19 @@ func file_curlix_studiogateway_v1_studio_gateway_proto_init() {
 	if File_curlix_studiogateway_v1_studio_gateway_proto != nil {
 		return
 	}
-	file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[11].OneofWrappers = []any{
+	file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[13].OneofWrappers = []any{
 		(*AgentMessage_Register)(nil),
 		(*AgentMessage_Heartbeat)(nil),
 		(*AgentMessage_SessionAck)(nil),
 		(*AgentMessage_SessionEvent)(nil),
 	}
-	file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[16].OneofWrappers = []any{
+	file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[18].OneofWrappers = []any{
 		(*GatewayMessage_Registered)(nil),
 		(*GatewayMessage_ExecuteAssignment)(nil),
 		(*GatewayMessage_CancelSession)(nil),
 		(*GatewayMessage_Ping)(nil),
 	}
-	file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[22].OneofWrappers = []any{
+	file_curlix_studiogateway_v1_studio_gateway_proto_msgTypes[24].OneofWrappers = []any{
 		(*ExecuteEvent_Started)(nil),
 		(*ExecuteEvent_Progress)(nil),
 		(*ExecuteEvent_RowBatch)(nil),
@@ -1861,7 +1976,7 @@ func file_curlix_studiogateway_v1_studio_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_curlix_studiogateway_v1_studio_gateway_proto_rawDesc), len(file_curlix_studiogateway_v1_studio_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   23,
+			NumMessages:   25,
 			NumExtensions: 0,
 			NumServices:   1,
 		},

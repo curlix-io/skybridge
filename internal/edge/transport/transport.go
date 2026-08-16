@@ -278,6 +278,8 @@ func (c *Client) serve(ctx context.Context, client connectorv1.ConnectorGatewayC
 			_ = ss.send(&connectorv1.ConnectorMessage{
 				Msg: &connectorv1.ConnectorMessage_Heartbeat{Heartbeat: &connectorv1.Heartbeat{UnixMillis: time.Now().UnixMilli()}},
 			})
+		case *connectorv1.GatewayMessage_MetadataDiscoveryRequest:
+			c.handleMetadataDiscovery(ctx, ss, m.MetadataDiscoveryRequest)
 		}
 	}
 }
@@ -370,6 +372,68 @@ func (c *Client) emitFinished(ss *safeStream, runID, stoppedReason, errDetail st
 	}
 	b, _ := json.Marshal(resp)
 	c.emit(ss, runID, &agentv1.AgentEvent{Event: &agentv1.AgentEvent_Finished{Finished: &agentv1.RunFinished{ResponseJson: string(b)}}})
+}
+
+// handleMetadataDiscovery discovers database schema metadata and sends the response back to the gateway.
+func (c *Client) handleMetadataDiscovery(ctx context.Context, ss *safeStream, req *connectorv1.MetadataDiscoveryRequest) {
+	requestID := req.GetRequestId()
+	if requestID == "" {
+		return // Ignore requests without request_id
+	}
+
+	driver := req.GetDriver()
+	database := req.GetDatabaseName()
+	accountKey := req.GetAccountKey()
+
+	if driver == "" || database == "" || accountKey == "" {
+		// Send error response
+		_ = ss.send(&connectorv1.ConnectorMessage{
+			Msg: &connectorv1.ConnectorMessage_MetadataDiscoveryResponse{MetadataDiscoveryResponse: &connectorv1.MetadataDiscoveryResponse{
+				RequestId: requestID,
+				Success:   false,
+				Error:     "missing required fields: driver, database_name, account_key",
+			}},
+		})
+		return
+	}
+
+	// Discover metadata by calling dbquery directly
+	objects, err := c.discoverMetadata(ctx, driver, database, accountKey)
+	if err != nil {
+		c.logger.Debug(fmt.Sprintf("metadata discovery failed for %s.%s: %v", driver, database, err))
+		_ = ss.send(&connectorv1.ConnectorMessage{
+			Msg: &connectorv1.ConnectorMessage_MetadataDiscoveryResponse{MetadataDiscoveryResponse: &connectorv1.MetadataDiscoveryResponse{
+				RequestId: requestID,
+				Success:   false,
+				Error:     err.Error(),
+			}},
+		})
+		return
+	}
+
+	// Send successful response
+	_ = ss.send(&connectorv1.ConnectorMessage{
+		Msg: &connectorv1.ConnectorMessage_MetadataDiscoveryResponse{MetadataDiscoveryResponse: &connectorv1.MetadataDiscoveryResponse{
+			RequestId: requestID,
+			Success:   true,
+			Objects:   objects,
+		}},
+	})
+}
+
+// discoverMetadata resolves a target and discovers its database schema metadata.
+// It delegates to the dbquery package for driver-specific implementation.
+func (c *Client) discoverMetadata(ctx context.Context, driver, database, accountKey string) ([]*connectorv1.DatabaseObject, error) {
+	// TODO: Implement target resolution. The edge should:
+	// 1. Load configured targets (from env var SKYBRIDGE_STUDIO_TARGETS or similar)
+	// 2. Resolve accountKey (AWS account ID) + driver + database to a Target
+	//    using: dbquery.Resolve(targets, driver, accountKey, database)
+	// 3. Call: dbquery.DiscoverDatabaseMetadata(ctx, driver, target, database)
+	// 4. Return the discovered objects or error
+	//
+	// For now, return a placeholder indicating this needs to be wired to target configuration.
+
+	return nil, fmt.Errorf("metadata discovery: need to wire target resolution from edge config")
 }
 
 // safeStream serializes Send across goroutines (grpc-go forbids concurrent SendMsg on one stream).

@@ -1,6 +1,6 @@
 # Metadata Discovery via Connect Stream
 
-**Status:** Gateway routing implemented in curlix (SaaS). Edge handlers pending.
+**Status:** SaaS gateway routing + edge transport handlers implemented. Edge target resolution pending.
 
 ## Overview
 
@@ -157,27 +157,25 @@ Metadata discovery should:
 
 ### Implementation Checklist
 
-- [ ] Add proto stubs to skybridge
-  ```bash
-  make gen  # in skybridge repo
-  ```
-
-- [ ] Handle `MetadataDiscoveryRequest` in `transport.go`
-  - [ ] Extract request fields
-  - [ ] Dispatch to appropriate executor based on driver
-  - [ ] Build and send `MetadataDiscoveryResponse`
-
-- [ ] Implement metadata executors in `internal/edge/dbquery/metadata.go`
-  - [ ] `executePostgresMetadata()`
-  - [ ] `executeMysqlMetadata()`
-  - [ ] `executeMongoMetadata()`
-  - [ ] Helper: resolve credentials from registry
-  - [ ] Helper: convert raw results to `DatabaseObject` format
-
+- [x] Add proto stubs to skybridge (regenerate with `make gen`)
+- [x] Implement metadata executors in `internal/edge/dbquery/metadata.go`
+  - [x] `DiscoverDatabaseMetadata()` - main dispatcher
+  - [x] `discoverPostgresMetadata()` - pg_catalog queries
+  - [x] `discoverMysqlMetadata()` - INFORMATION_SCHEMA queries
+  - [x] `discoverMongoMetadata()` - ListCollectionNames()
+  - [x] Helper: `creds()` - extract username/password from Target
+  - [x] Helper: `urlEscape()` - escape credentials for connection strings
+- [x] Handle `MetadataDiscoveryRequest` in `internal/edge/transport/transport.go`
+  - [x] `handleMetadataDiscovery()` - extract and validate request
+  - [x] `discoverMetadata()` - dispatch to dbquery (target resolution TODO)
+  - [x] Build and send `MetadataDiscoveryResponse`
+- [ ] Wire target resolution in `discoverMetadata()`
+  - [ ] Load configured targets from edge environment
+  - [ ] Resolve accountKey to Target using `dbquery.Resolve()`
 - [ ] Testing
-  - [ ] Unit tests with fake database servers (reuse existing fakes)
-  - [ ] Integration test: SaaS → gateway → edge → database
-  - [ ] Error cases: connection failures, permission denied, timeout
+  - [ ] Unit tests with fake database servers (fakepostgresserver, fakemysqlserver, fakemongoserver exist)
+  - [ ] Integration test: transport handler → dbquery → fake database
+  - [ ] Error cases: connection failures, permission denied, timeout, missing target
 
 ### Example: Postgres Executor
 

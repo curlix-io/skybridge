@@ -175,6 +175,110 @@ func (x *EnrollResponse) GetNotAfterUnix() int64 {
 	return 0
 }
 
+type RenewRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	CsrPem        string                 `protobuf:"bytes,1,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"` // fresh CSR for a new keypair; identity comes from the mTLS channel's
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewRequest) Reset() {
+	*x = RenewRequest{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[2]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewRequest) ProtoMessage() {}
+
+func (x *RenewRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[2]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewRequest.ProtoReflect.Descriptor instead.
+func (*RenewRequest) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{2}
+}
+
+func (x *RenewRequest) GetCsrPem() string {
+	if x != nil {
+		return x.CsrPem
+	}
+	return ""
+}
+
+type RenewResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	ClientCertPem string                 `protobuf:"bytes,1,opt,name=client_cert_pem,json=clientCertPem,proto3" json:"client_cert_pem,omitempty"` // freshly signed leaf cert (same identity as the calling cert)
+	CaBundlePem   string                 `protobuf:"bytes,2,opt,name=ca_bundle_pem,json=caBundlePem,proto3" json:"ca_bundle_pem,omitempty"`       // CA chain the connector trusts for the gateway
+	NotAfterUnix  int64                  `protobuf:"varint,3,opt,name=not_after_unix,json=notAfterUnix,proto3" json:"not_after_unix,omitempty"`   // new cert expiry
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RenewResponse) Reset() {
+	*x = RenewResponse{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[3]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RenewResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RenewResponse) ProtoMessage() {}
+
+func (x *RenewResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[3]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RenewResponse.ProtoReflect.Descriptor instead.
+func (*RenewResponse) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{3}
+}
+
+func (x *RenewResponse) GetClientCertPem() string {
+	if x != nil {
+		return x.ClientCertPem
+	}
+	return ""
+}
+
+func (x *RenewResponse) GetCaBundlePem() string {
+	if x != nil {
+		return x.CaBundlePem
+	}
+	return ""
+}
+
+func (x *RenewResponse) GetNotAfterUnix() int64 {
+	if x != nil {
+		return x.NotAfterUnix
+	}
+	return 0
+}
+
 // Identity fields mirror Register. In mTLS mode the client cert (already presented on the
 // channel) is authoritative over these, exactly like Connect's own identity resolution; in
 // bearer mode the bound token is authoritative. This message exists so a connector that hasn't
@@ -189,7 +293,7 @@ type PreConnectRequest struct {
 
 func (x *PreConnectRequest) Reset() {
 	*x = PreConnectRequest{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[2]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[4]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -201,7 +305,7 @@ func (x *PreConnectRequest) String() string {
 func (*PreConnectRequest) ProtoMessage() {}
 
 func (x *PreConnectRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[2]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[4]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -214,7 +318,7 @@ func (x *PreConnectRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreConnectRequest.ProtoReflect.Descriptor instead.
 func (*PreConnectRequest) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{2}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{4}
 }
 
 func (x *PreConnectRequest) GetTenantId() string {
@@ -242,7 +346,7 @@ type PreConnectResponse struct {
 
 func (x *PreConnectResponse) Reset() {
 	*x = PreConnectResponse{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[3]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[5]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -254,7 +358,7 @@ func (x *PreConnectResponse) String() string {
 func (*PreConnectResponse) ProtoMessage() {}
 
 func (x *PreConnectResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[3]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[5]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -267,7 +371,7 @@ func (x *PreConnectResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use PreConnectResponse.ProtoReflect.Descriptor instead.
 func (*PreConnectResponse) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{3}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{5}
 }
 
 func (x *PreConnectResponse) GetOk() bool {
@@ -302,7 +406,7 @@ type Register struct {
 
 func (x *Register) Reset() {
 	*x = Register{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[4]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[6]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -314,7 +418,7 @@ func (x *Register) String() string {
 func (*Register) ProtoMessage() {}
 
 func (x *Register) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[4]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[6]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -327,7 +431,7 @@ func (x *Register) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Register.ProtoReflect.Descriptor instead.
 func (*Register) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{4}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{6}
 }
 
 func (x *Register) GetTenantId() string {
@@ -360,7 +464,7 @@ type Heartbeat struct {
 
 func (x *Heartbeat) Reset() {
 	*x = Heartbeat{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[5]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[7]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -372,7 +476,7 @@ func (x *Heartbeat) String() string {
 func (*Heartbeat) ProtoMessage() {}
 
 func (x *Heartbeat) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[5]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[7]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -385,7 +489,7 @@ func (x *Heartbeat) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Heartbeat.ProtoReflect.Descriptor instead.
 func (*Heartbeat) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{5}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{7}
 }
 
 func (x *Heartbeat) GetUnixMillis() int64 {
@@ -406,7 +510,7 @@ type WorkEvent struct {
 
 func (x *WorkEvent) Reset() {
 	*x = WorkEvent{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[6]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[8]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -418,7 +522,7 @@ func (x *WorkEvent) String() string {
 func (*WorkEvent) ProtoMessage() {}
 
 func (x *WorkEvent) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[6]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[8]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -431,7 +535,7 @@ func (x *WorkEvent) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkEvent.ProtoReflect.Descriptor instead.
 func (*WorkEvent) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{6}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{8}
 }
 
 func (x *WorkEvent) GetRunId() string {
@@ -448,6 +552,76 @@ func (x *WorkEvent) GetEvent() *v1.AgentEvent {
 	return nil
 }
 
+// Metadata discovery result: connector responds with discovered schema info.
+// Matched with gateway's request via request_id.
+type MetadataDiscoveryResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"` // matches the request this responds to
+	Success       bool                   `protobuf:"varint,2,opt,name=success,proto3" json:"success,omitempty"`                     // whether discovery succeeded
+	Error         string                 `protobuf:"bytes,3,opt,name=error,proto3" json:"error,omitempty"`                          // empty on success
+	Objects       []*DatabaseObject      `protobuf:"bytes,4,rep,name=objects,proto3" json:"objects,omitempty"`                      // discovered tables/views/functions/etc.
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetadataDiscoveryResponse) Reset() {
+	*x = MetadataDiscoveryResponse{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[9]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetadataDiscoveryResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetadataDiscoveryResponse) ProtoMessage() {}
+
+func (x *MetadataDiscoveryResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[9]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetadataDiscoveryResponse.ProtoReflect.Descriptor instead.
+func (*MetadataDiscoveryResponse) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *MetadataDiscoveryResponse) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *MetadataDiscoveryResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *MetadataDiscoveryResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *MetadataDiscoveryResponse) GetObjects() []*DatabaseObject {
+	if x != nil {
+		return x.Objects
+	}
+	return nil
+}
+
 type ConnectorMessage struct {
 	state protoimpl.MessageState `protogen:"open.v1"`
 	// Types that are valid to be assigned to Msg:
@@ -455,6 +629,7 @@ type ConnectorMessage struct {
 	//	*ConnectorMessage_Register
 	//	*ConnectorMessage_WorkEvent
 	//	*ConnectorMessage_Heartbeat
+	//	*ConnectorMessage_MetadataDiscoveryResponse
 	Msg           isConnectorMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -462,7 +637,7 @@ type ConnectorMessage struct {
 
 func (x *ConnectorMessage) Reset() {
 	*x = ConnectorMessage{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[7]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[10]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -474,7 +649,7 @@ func (x *ConnectorMessage) String() string {
 func (*ConnectorMessage) ProtoMessage() {}
 
 func (x *ConnectorMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[7]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[10]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -487,7 +662,7 @@ func (x *ConnectorMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use ConnectorMessage.ProtoReflect.Descriptor instead.
 func (*ConnectorMessage) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{7}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{10}
 }
 
 func (x *ConnectorMessage) GetMsg() isConnectorMessage_Msg {
@@ -524,6 +699,15 @@ func (x *ConnectorMessage) GetHeartbeat() *Heartbeat {
 	return nil
 }
 
+func (x *ConnectorMessage) GetMetadataDiscoveryResponse() *MetadataDiscoveryResponse {
+	if x != nil {
+		if x, ok := x.Msg.(*ConnectorMessage_MetadataDiscoveryResponse); ok {
+			return x.MetadataDiscoveryResponse
+		}
+	}
+	return nil
+}
+
 type isConnectorMessage_Msg interface {
 	isConnectorMessage_Msg()
 }
@@ -540,11 +724,17 @@ type ConnectorMessage_Heartbeat struct {
 	Heartbeat *Heartbeat `protobuf:"bytes,3,opt,name=heartbeat,proto3,oneof"`
 }
 
+type ConnectorMessage_MetadataDiscoveryResponse struct {
+	MetadataDiscoveryResponse *MetadataDiscoveryResponse `protobuf:"bytes,4,opt,name=metadata_discovery_response,json=metadataDiscoveryResponse,proto3,oneof"`
+}
+
 func (*ConnectorMessage_Register) isConnectorMessage_Msg() {}
 
 func (*ConnectorMessage_WorkEvent) isConnectorMessage_Msg() {}
 
 func (*ConnectorMessage_Heartbeat) isConnectorMessage_Msg() {}
+
+func (*ConnectorMessage_MetadataDiscoveryResponse) isConnectorMessage_Msg() {}
 
 type Registered struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -555,7 +745,7 @@ type Registered struct {
 
 func (x *Registered) Reset() {
 	*x = Registered{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[8]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[11]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -567,7 +757,7 @@ func (x *Registered) String() string {
 func (*Registered) ProtoMessage() {}
 
 func (x *Registered) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[8]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[11]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -580,7 +770,7 @@ func (x *Registered) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Registered.ProtoReflect.Descriptor instead.
 func (*Registered) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{8}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{11}
 }
 
 func (x *Registered) GetSessionId() string {
@@ -601,7 +791,7 @@ type WorkAssignment struct {
 
 func (x *WorkAssignment) Reset() {
 	*x = WorkAssignment{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[9]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[12]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -613,7 +803,7 @@ func (x *WorkAssignment) String() string {
 func (*WorkAssignment) ProtoMessage() {}
 
 func (x *WorkAssignment) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[9]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[12]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -626,7 +816,7 @@ func (x *WorkAssignment) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use WorkAssignment.ProtoReflect.Descriptor instead.
 func (*WorkAssignment) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{9}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{12}
 }
 
 func (x *WorkAssignment) GetRunId() string {
@@ -653,7 +843,7 @@ type CancelWork struct {
 
 func (x *CancelWork) Reset() {
 	*x = CancelWork{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[10]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[13]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -665,7 +855,7 @@ func (x *CancelWork) String() string {
 func (*CancelWork) ProtoMessage() {}
 
 func (x *CancelWork) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[10]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[13]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -678,7 +868,7 @@ func (x *CancelWork) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use CancelWork.ProtoReflect.Descriptor instead.
 func (*CancelWork) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{10}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{13}
 }
 
 func (x *CancelWork) GetRunId() string {
@@ -704,7 +894,7 @@ type Ping struct {
 
 func (x *Ping) Reset() {
 	*x = Ping{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[11]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[14]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -716,7 +906,7 @@ func (x *Ping) String() string {
 func (*Ping) ProtoMessage() {}
 
 func (x *Ping) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[11]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[14]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -729,7 +919,7 @@ func (x *Ping) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use Ping.ProtoReflect.Descriptor instead.
 func (*Ping) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{11}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{14}
 }
 
 func (x *Ping) GetUnixMillis() int64 {
@@ -737,6 +927,84 @@ func (x *Ping) GetUnixMillis() int64 {
 		return x.UnixMillis
 	}
 	return 0
+}
+
+// Metadata discovery request: gateway asks connector to discover schema info.
+// Connector responds with MetadataDiscoveryResponse on the same stream, matched by request_id.
+type MetadataDiscoveryRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	RequestId     string                 `protobuf:"bytes,1,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`          // unique identifier for pairing request/response
+	AccountKey    string                 `protobuf:"bytes,2,opt,name=account_key,json=accountKey,proto3" json:"account_key,omitempty"`       // registered account identifier (aws account, env, etc.)
+	Driver        string                 `protobuf:"bytes,3,opt,name=driver,proto3" json:"driver,omitempty"`                                 // postgres, mysql, mongo, snowflake, etc.
+	DatabaseName  string                 `protobuf:"bytes,4,opt,name=database_name,json=databaseName,proto3" json:"database_name,omitempty"` // which database to describe
+	ObjectType    string                 `protobuf:"bytes,5,opt,name=object_type,json=objectType,proto3" json:"object_type,omitempty"`       // optional: "tables", "views", "functions", etc. for filtering
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *MetadataDiscoveryRequest) Reset() {
+	*x = MetadataDiscoveryRequest{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[15]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *MetadataDiscoveryRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*MetadataDiscoveryRequest) ProtoMessage() {}
+
+func (x *MetadataDiscoveryRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[15]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use MetadataDiscoveryRequest.ProtoReflect.Descriptor instead.
+func (*MetadataDiscoveryRequest) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{15}
+}
+
+func (x *MetadataDiscoveryRequest) GetRequestId() string {
+	if x != nil {
+		return x.RequestId
+	}
+	return ""
+}
+
+func (x *MetadataDiscoveryRequest) GetAccountKey() string {
+	if x != nil {
+		return x.AccountKey
+	}
+	return ""
+}
+
+func (x *MetadataDiscoveryRequest) GetDriver() string {
+	if x != nil {
+		return x.Driver
+	}
+	return ""
+}
+
+func (x *MetadataDiscoveryRequest) GetDatabaseName() string {
+	if x != nil {
+		return x.DatabaseName
+	}
+	return ""
+}
+
+func (x *MetadataDiscoveryRequest) GetObjectType() string {
+	if x != nil {
+		return x.ObjectType
+	}
+	return ""
 }
 
 type GatewayMessage struct {
@@ -747,6 +1015,7 @@ type GatewayMessage struct {
 	//	*GatewayMessage_WorkAssignment
 	//	*GatewayMessage_CancelWork
 	//	*GatewayMessage_Ping
+	//	*GatewayMessage_MetadataDiscoveryRequest
 	Msg           isGatewayMessage_Msg `protobuf_oneof:"msg"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -754,7 +1023,7 @@ type GatewayMessage struct {
 
 func (x *GatewayMessage) Reset() {
 	*x = GatewayMessage{}
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[12]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[16]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -766,7 +1035,7 @@ func (x *GatewayMessage) String() string {
 func (*GatewayMessage) ProtoMessage() {}
 
 func (x *GatewayMessage) ProtoReflect() protoreflect.Message {
-	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[12]
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[16]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -779,7 +1048,7 @@ func (x *GatewayMessage) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use GatewayMessage.ProtoReflect.Descriptor instead.
 func (*GatewayMessage) Descriptor() ([]byte, []int) {
-	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{12}
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{16}
 }
 
 func (x *GatewayMessage) GetMsg() isGatewayMessage_Msg {
@@ -825,6 +1094,15 @@ func (x *GatewayMessage) GetPing() *Ping {
 	return nil
 }
 
+func (x *GatewayMessage) GetMetadataDiscoveryRequest() *MetadataDiscoveryRequest {
+	if x != nil {
+		if x, ok := x.Msg.(*GatewayMessage_MetadataDiscoveryRequest); ok {
+			return x.MetadataDiscoveryRequest
+		}
+	}
+	return nil
+}
+
 type isGatewayMessage_Msg interface {
 	isGatewayMessage_Msg()
 }
@@ -845,6 +1123,10 @@ type GatewayMessage_Ping struct {
 	Ping *Ping `protobuf:"bytes,4,opt,name=ping,proto3,oneof"`
 }
 
+type GatewayMessage_MetadataDiscoveryRequest struct {
+	MetadataDiscoveryRequest *MetadataDiscoveryRequest `protobuf:"bytes,5,opt,name=metadata_discovery_request,json=metadataDiscoveryRequest,proto3,oneof"`
+}
+
 func (*GatewayMessage_Registered) isGatewayMessage_Msg() {}
 
 func (*GatewayMessage_WorkAssignment) isGatewayMessage_Msg() {}
@@ -852,6 +1134,348 @@ func (*GatewayMessage_WorkAssignment) isGatewayMessage_Msg() {}
 func (*GatewayMessage_CancelWork) isGatewayMessage_Msg() {}
 
 func (*GatewayMessage_Ping) isGatewayMessage_Msg() {}
+
+func (*GatewayMessage_MetadataDiscoveryRequest) isGatewayMessage_Msg() {}
+
+type DescribeDatabaseConnectionRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	AccountKey    string                 `protobuf:"bytes,1,opt,name=account_key,json=accountKey,proto3" json:"account_key,omitempty"`       // registered account identifier (aws account, etc.)
+	Driver        string                 `protobuf:"bytes,2,opt,name=driver,proto3" json:"driver,omitempty"`                                 // postgres, mysql, mongo, snowflake, etc.
+	DatabaseName  string                 `protobuf:"bytes,3,opt,name=database_name,json=databaseName,proto3" json:"database_name,omitempty"` // which database to describe
+	ObjectType    string                 `protobuf:"bytes,4,opt,name=object_type,json=objectType,proto3" json:"object_type,omitempty"`       // optional: "tables", "views", "functions", etc. for filtering
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DescribeDatabaseConnectionRequest) Reset() {
+	*x = DescribeDatabaseConnectionRequest{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[17]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescribeDatabaseConnectionRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescribeDatabaseConnectionRequest) ProtoMessage() {}
+
+func (x *DescribeDatabaseConnectionRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[17]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescribeDatabaseConnectionRequest.ProtoReflect.Descriptor instead.
+func (*DescribeDatabaseConnectionRequest) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{17}
+}
+
+func (x *DescribeDatabaseConnectionRequest) GetAccountKey() string {
+	if x != nil {
+		return x.AccountKey
+	}
+	return ""
+}
+
+func (x *DescribeDatabaseConnectionRequest) GetDriver() string {
+	if x != nil {
+		return x.Driver
+	}
+	return ""
+}
+
+func (x *DescribeDatabaseConnectionRequest) GetDatabaseName() string {
+	if x != nil {
+		return x.DatabaseName
+	}
+	return ""
+}
+
+func (x *DescribeDatabaseConnectionRequest) GetObjectType() string {
+	if x != nil {
+		return x.ObjectType
+	}
+	return ""
+}
+
+type DatabaseObject struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SchemaName    string                 `protobuf:"bytes,1,opt,name=schema_name,json=schemaName,proto3" json:"schema_name,omitempty"` // namespace (postgres schema, mysql database, etc.)
+	ObjectName    string                 `protobuf:"bytes,2,opt,name=object_name,json=objectName,proto3" json:"object_name,omitempty"` // table, view, function, etc.
+	Kind          string                 `protobuf:"bytes,3,opt,name=kind,proto3" json:"kind,omitempty"`                               // r=table, v=view, m=matview, f=foreign, S=seq, etc.
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DatabaseObject) Reset() {
+	*x = DatabaseObject{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[18]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DatabaseObject) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DatabaseObject) ProtoMessage() {}
+
+func (x *DatabaseObject) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[18]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DatabaseObject.ProtoReflect.Descriptor instead.
+func (*DatabaseObject) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{18}
+}
+
+func (x *DatabaseObject) GetSchemaName() string {
+	if x != nil {
+		return x.SchemaName
+	}
+	return ""
+}
+
+func (x *DatabaseObject) GetObjectName() string {
+	if x != nil {
+		return x.ObjectName
+	}
+	return ""
+}
+
+func (x *DatabaseObject) GetKind() string {
+	if x != nil {
+		return x.Kind
+	}
+	return ""
+}
+
+type ColumnInfo struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Name          string                 `protobuf:"bytes,1,opt,name=name,proto3" json:"name,omitempty"`
+	Type          string                 `protobuf:"bytes,2,opt,name=type,proto3" json:"type,omitempty"` // column type (int, varchar, etc.)
+	Nullable      bool                   `protobuf:"varint,3,opt,name=nullable,proto3" json:"nullable,omitempty"`
+	DefaultValue  string                 `protobuf:"bytes,4,opt,name=default_value,json=defaultValue,proto3" json:"default_value,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *ColumnInfo) Reset() {
+	*x = ColumnInfo{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[19]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *ColumnInfo) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*ColumnInfo) ProtoMessage() {}
+
+func (x *ColumnInfo) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[19]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use ColumnInfo.ProtoReflect.Descriptor instead.
+func (*ColumnInfo) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{19}
+}
+
+func (x *ColumnInfo) GetName() string {
+	if x != nil {
+		return x.Name
+	}
+	return ""
+}
+
+func (x *ColumnInfo) GetType() string {
+	if x != nil {
+		return x.Type
+	}
+	return ""
+}
+
+func (x *ColumnInfo) GetNullable() bool {
+	if x != nil {
+		return x.Nullable
+	}
+	return false
+}
+
+func (x *ColumnInfo) GetDefaultValue() string {
+	if x != nil {
+		return x.DefaultValue
+	}
+	return ""
+}
+
+type TableDetail struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SchemaName    string                 `protobuf:"bytes,1,opt,name=schema_name,json=schemaName,proto3" json:"schema_name,omitempty"`
+	TableName     string                 `protobuf:"bytes,2,opt,name=table_name,json=tableName,proto3" json:"table_name,omitempty"`
+	Columns       []*ColumnInfo          `protobuf:"bytes,3,rep,name=columns,proto3" json:"columns,omitempty"`
+	Indexes       []string               `protobuf:"bytes,4,rep,name=indexes,proto3" json:"indexes,omitempty"`
+	Constraints   []string               `protobuf:"bytes,5,rep,name=constraints,proto3" json:"constraints,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *TableDetail) Reset() {
+	*x = TableDetail{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[20]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *TableDetail) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*TableDetail) ProtoMessage() {}
+
+func (x *TableDetail) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[20]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use TableDetail.ProtoReflect.Descriptor instead.
+func (*TableDetail) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{20}
+}
+
+func (x *TableDetail) GetSchemaName() string {
+	if x != nil {
+		return x.SchemaName
+	}
+	return ""
+}
+
+func (x *TableDetail) GetTableName() string {
+	if x != nil {
+		return x.TableName
+	}
+	return ""
+}
+
+func (x *TableDetail) GetColumns() []*ColumnInfo {
+	if x != nil {
+		return x.Columns
+	}
+	return nil
+}
+
+func (x *TableDetail) GetIndexes() []string {
+	if x != nil {
+		return x.Indexes
+	}
+	return nil
+}
+
+func (x *TableDetail) GetConstraints() []string {
+	if x != nil {
+		return x.Constraints
+	}
+	return nil
+}
+
+type DescribeDatabaseConnectionResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Success       bool                   `protobuf:"varint,1,opt,name=success,proto3" json:"success,omitempty"`
+	Error         string                 `protobuf:"bytes,2,opt,name=error,proto3" json:"error,omitempty"`                                // empty on success; human-readable error message on failure
+	Objects       []*DatabaseObject      `protobuf:"bytes,3,rep,name=objects,proto3" json:"objects,omitempty"`                            // for list operations (schemas, tables, views, etc.)
+	TableDetail   *TableDetail           `protobuf:"bytes,4,opt,name=table_detail,json=tableDetail,proto3" json:"table_detail,omitempty"` // for detailed schema of a specific table
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *DescribeDatabaseConnectionResponse) Reset() {
+	*x = DescribeDatabaseConnectionResponse{}
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[21]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *DescribeDatabaseConnectionResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*DescribeDatabaseConnectionResponse) ProtoMessage() {}
+
+func (x *DescribeDatabaseConnectionResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_curlix_connector_v1_connector_gateway_proto_msgTypes[21]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use DescribeDatabaseConnectionResponse.ProtoReflect.Descriptor instead.
+func (*DescribeDatabaseConnectionResponse) Descriptor() ([]byte, []int) {
+	return file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP(), []int{21}
+}
+
+func (x *DescribeDatabaseConnectionResponse) GetSuccess() bool {
+	if x != nil {
+		return x.Success
+	}
+	return false
+}
+
+func (x *DescribeDatabaseConnectionResponse) GetError() string {
+	if x != nil {
+		return x.Error
+	}
+	return ""
+}
+
+func (x *DescribeDatabaseConnectionResponse) GetObjects() []*DatabaseObject {
+	if x != nil {
+		return x.Objects
+	}
+	return nil
+}
+
+func (x *DescribeDatabaseConnectionResponse) GetTableDetail() *TableDetail {
+	if x != nil {
+		return x.TableDetail
+	}
+	return nil
+}
 
 var File_curlix_connector_v1_connector_gateway_proto protoreflect.FileDescriptor
 
@@ -864,6 +1488,12 @@ const file_curlix_connector_v1_connector_gateway_proto_rawDesc = "" +
 	"\fconnector_id\x18\x03 \x01(\tR\vconnectorId\x12\x17\n" +
 	"\acsr_pem\x18\x04 \x01(\tR\x06csrPem\"\x82\x01\n" +
 	"\x0eEnrollResponse\x12&\n" +
+	"\x0fclient_cert_pem\x18\x01 \x01(\tR\rclientCertPem\x12\"\n" +
+	"\rca_bundle_pem\x18\x02 \x01(\tR\vcaBundlePem\x12$\n" +
+	"\x0enot_after_unix\x18\x03 \x01(\x03R\fnotAfterUnix\"'\n" +
+	"\fRenewRequest\x12\x17\n" +
+	"\acsr_pem\x18\x01 \x01(\tR\x06csrPem\"\x81\x01\n" +
+	"\rRenewResponse\x12&\n" +
 	"\x0fclient_cert_pem\x18\x01 \x01(\tR\rclientCertPem\x12\"\n" +
 	"\rca_bundle_pem\x18\x02 \x01(\tR\vcaBundlePem\x12$\n" +
 	"\x0enot_after_unix\x18\x03 \x01(\x03R\fnotAfterUnix\"S\n" +
@@ -883,12 +1513,19 @@ const file_curlix_connector_v1_connector_gateway_proto_rawDesc = "" +
 	"unixMillis\"U\n" +
 	"\tWorkEvent\x12\x15\n" +
 	"\x06run_id\x18\x01 \x01(\tR\x05runId\x121\n" +
-	"\x05event\x18\x02 \x01(\v2\x1b.curlix.agent.v1.AgentEventR\x05event\"\xd7\x01\n" +
+	"\x05event\x18\x02 \x01(\v2\x1b.curlix.agent.v1.AgentEventR\x05event\"\xa9\x01\n" +
+	"\x19MetadataDiscoveryResponse\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x18\n" +
+	"\asuccess\x18\x02 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x03 \x01(\tR\x05error\x12=\n" +
+	"\aobjects\x18\x04 \x03(\v2#.curlix.connector.v1.DatabaseObjectR\aobjects\"\xc9\x02\n" +
 	"\x10ConnectorMessage\x12;\n" +
 	"\bregister\x18\x01 \x01(\v2\x1d.curlix.connector.v1.RegisterH\x00R\bregister\x12?\n" +
 	"\n" +
 	"work_event\x18\x02 \x01(\v2\x1e.curlix.connector.v1.WorkEventH\x00R\tworkEvent\x12>\n" +
-	"\theartbeat\x18\x03 \x01(\v2\x1e.curlix.connector.v1.HeartbeatH\x00R\theartbeatB\x05\n" +
+	"\theartbeat\x18\x03 \x01(\v2\x1e.curlix.connector.v1.HeartbeatH\x00R\theartbeat\x12p\n" +
+	"\x1bmetadata_discovery_response\x18\x04 \x01(\v2..curlix.connector.v1.MetadataDiscoveryResponseH\x00R\x19metadataDiscoveryResponseB\x05\n" +
 	"\x03msg\"+\n" +
 	"\n" +
 	"Registered\x12\x1d\n" +
@@ -903,7 +1540,16 @@ const file_curlix_connector_v1_connector_gateway_proto_rawDesc = "" +
 	"\x06reason\x18\x02 \x01(\tR\x06reason\"'\n" +
 	"\x04Ping\x12\x1f\n" +
 	"\vunix_millis\x18\x01 \x01(\x03R\n" +
-	"unixMillis\"\x9f\x02\n" +
+	"unixMillis\"\xb8\x01\n" +
+	"\x18MetadataDiscoveryRequest\x12\x1d\n" +
+	"\n" +
+	"request_id\x18\x01 \x01(\tR\trequestId\x12\x1f\n" +
+	"\vaccount_key\x18\x02 \x01(\tR\n" +
+	"accountKey\x12\x16\n" +
+	"\x06driver\x18\x03 \x01(\tR\x06driver\x12#\n" +
+	"\rdatabase_name\x18\x04 \x01(\tR\fdatabaseName\x12\x1f\n" +
+	"\vobject_type\x18\x05 \x01(\tR\n" +
+	"objectType\"\x8e\x03\n" +
 	"\x0eGatewayMessage\x12A\n" +
 	"\n" +
 	"registered\x18\x01 \x01(\v2\x1f.curlix.connector.v1.RegisteredH\x00R\n" +
@@ -911,13 +1557,48 @@ const file_curlix_connector_v1_connector_gateway_proto_rawDesc = "" +
 	"\x0fwork_assignment\x18\x02 \x01(\v2#.curlix.connector.v1.WorkAssignmentH\x00R\x0eworkAssignment\x12B\n" +
 	"\vcancel_work\x18\x03 \x01(\v2\x1f.curlix.connector.v1.CancelWorkH\x00R\n" +
 	"cancelWork\x12/\n" +
-	"\x04ping\x18\x04 \x01(\v2\x19.curlix.connector.v1.PingH\x00R\x04pingB\x05\n" +
-	"\x03msg2\x9f\x02\n" +
+	"\x04ping\x18\x04 \x01(\v2\x19.curlix.connector.v1.PingH\x00R\x04ping\x12m\n" +
+	"\x1ametadata_discovery_request\x18\x05 \x01(\v2-.curlix.connector.v1.MetadataDiscoveryRequestH\x00R\x18metadataDiscoveryRequestB\x05\n" +
+	"\x03msg\"\xa2\x01\n" +
+	"!DescribeDatabaseConnectionRequest\x12\x1f\n" +
+	"\vaccount_key\x18\x01 \x01(\tR\n" +
+	"accountKey\x12\x16\n" +
+	"\x06driver\x18\x02 \x01(\tR\x06driver\x12#\n" +
+	"\rdatabase_name\x18\x03 \x01(\tR\fdatabaseName\x12\x1f\n" +
+	"\vobject_type\x18\x04 \x01(\tR\n" +
+	"objectType\"f\n" +
+	"\x0eDatabaseObject\x12\x1f\n" +
+	"\vschema_name\x18\x01 \x01(\tR\n" +
+	"schemaName\x12\x1f\n" +
+	"\vobject_name\x18\x02 \x01(\tR\n" +
+	"objectName\x12\x12\n" +
+	"\x04kind\x18\x03 \x01(\tR\x04kind\"u\n" +
+	"\n" +
+	"ColumnInfo\x12\x12\n" +
+	"\x04name\x18\x01 \x01(\tR\x04name\x12\x12\n" +
+	"\x04type\x18\x02 \x01(\tR\x04type\x12\x1a\n" +
+	"\bnullable\x18\x03 \x01(\bR\bnullable\x12#\n" +
+	"\rdefault_value\x18\x04 \x01(\tR\fdefaultValue\"\xc4\x01\n" +
+	"\vTableDetail\x12\x1f\n" +
+	"\vschema_name\x18\x01 \x01(\tR\n" +
+	"schemaName\x12\x1d\n" +
+	"\n" +
+	"table_name\x18\x02 \x01(\tR\ttableName\x129\n" +
+	"\acolumns\x18\x03 \x03(\v2\x1f.curlix.connector.v1.ColumnInfoR\acolumns\x12\x18\n" +
+	"\aindexes\x18\x04 \x03(\tR\aindexes\x12 \n" +
+	"\vconstraints\x18\x05 \x03(\tR\vconstraints\"\xd8\x01\n" +
+	"\"DescribeDatabaseConnectionResponse\x12\x18\n" +
+	"\asuccess\x18\x01 \x01(\bR\asuccess\x12\x14\n" +
+	"\x05error\x18\x02 \x01(\tR\x05error\x12=\n" +
+	"\aobjects\x18\x03 \x03(\v2#.curlix.connector.v1.DatabaseObjectR\aobjects\x12C\n" +
+	"\ftable_detail\x18\x04 \x01(\v2 .curlix.connector.v1.TableDetailR\vtableDetail2\xff\x03\n" +
 	"\x10ConnectorGateway\x12Y\n" +
 	"\aConnect\x12%.curlix.connector.v1.ConnectorMessage\x1a#.curlix.connector.v1.GatewayMessage(\x010\x01\x12Q\n" +
 	"\x06Enroll\x12\".curlix.connector.v1.EnrollRequest\x1a#.curlix.connector.v1.EnrollResponse\x12]\n" +
 	"\n" +
-	"PreConnect\x12&.curlix.connector.v1.PreConnectRequest\x1a'.curlix.connector.v1.PreConnectResponseB\xed\x01\n" +
+	"PreConnect\x12&.curlix.connector.v1.PreConnectRequest\x1a'.curlix.connector.v1.PreConnectResponse\x12N\n" +
+	"\x05Renew\x12!.curlix.connector.v1.RenewRequest\x1a\".curlix.connector.v1.RenewResponse\x12\x8d\x01\n" +
+	"\x1aDescribeDatabaseConnection\x126.curlix.connector.v1.DescribeDatabaseConnectionRequest\x1a7.curlix.connector.v1.DescribeDatabaseConnectionResponseB\xed\x01\n" +
 	"\x17com.curlix.connector.v1B\x15ConnectorGatewayProtoP\x01ZMgithub.com/curlix-io/skybridge/internal/genpb/curlix/connector/v1;connectorv1\xa2\x02\x03CCX\xaa\x02\x13Curlix.Connector.V1\xca\x02\x13Curlix\\Connector\\V1\xe2\x02\x1fCurlix\\Connector\\V1\\GPBMetadata\xea\x02\x15Curlix::Connector::V1b\x06proto3"
 
 var (
@@ -932,45 +1613,64 @@ func file_curlix_connector_v1_connector_gateway_proto_rawDescGZIP() []byte {
 	return file_curlix_connector_v1_connector_gateway_proto_rawDescData
 }
 
-var file_curlix_connector_v1_connector_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 13)
+var file_curlix_connector_v1_connector_gateway_proto_msgTypes = make([]protoimpl.MessageInfo, 22)
 var file_curlix_connector_v1_connector_gateway_proto_goTypes = []any{
-	(*EnrollRequest)(nil),      // 0: curlix.connector.v1.EnrollRequest
-	(*EnrollResponse)(nil),     // 1: curlix.connector.v1.EnrollResponse
-	(*PreConnectRequest)(nil),  // 2: curlix.connector.v1.PreConnectRequest
-	(*PreConnectResponse)(nil), // 3: curlix.connector.v1.PreConnectResponse
-	(*Register)(nil),           // 4: curlix.connector.v1.Register
-	(*Heartbeat)(nil),          // 5: curlix.connector.v1.Heartbeat
-	(*WorkEvent)(nil),          // 6: curlix.connector.v1.WorkEvent
-	(*ConnectorMessage)(nil),   // 7: curlix.connector.v1.ConnectorMessage
-	(*Registered)(nil),         // 8: curlix.connector.v1.Registered
-	(*WorkAssignment)(nil),     // 9: curlix.connector.v1.WorkAssignment
-	(*CancelWork)(nil),         // 10: curlix.connector.v1.CancelWork
-	(*Ping)(nil),               // 11: curlix.connector.v1.Ping
-	(*GatewayMessage)(nil),     // 12: curlix.connector.v1.GatewayMessage
-	(*v1.AgentEvent)(nil),      // 13: curlix.agent.v1.AgentEvent
-	(*v1.StartRun)(nil),        // 14: curlix.agent.v1.StartRun
+	(*EnrollRequest)(nil),                      // 0: curlix.connector.v1.EnrollRequest
+	(*EnrollResponse)(nil),                     // 1: curlix.connector.v1.EnrollResponse
+	(*RenewRequest)(nil),                       // 2: curlix.connector.v1.RenewRequest
+	(*RenewResponse)(nil),                      // 3: curlix.connector.v1.RenewResponse
+	(*PreConnectRequest)(nil),                  // 4: curlix.connector.v1.PreConnectRequest
+	(*PreConnectResponse)(nil),                 // 5: curlix.connector.v1.PreConnectResponse
+	(*Register)(nil),                           // 6: curlix.connector.v1.Register
+	(*Heartbeat)(nil),                          // 7: curlix.connector.v1.Heartbeat
+	(*WorkEvent)(nil),                          // 8: curlix.connector.v1.WorkEvent
+	(*MetadataDiscoveryResponse)(nil),          // 9: curlix.connector.v1.MetadataDiscoveryResponse
+	(*ConnectorMessage)(nil),                   // 10: curlix.connector.v1.ConnectorMessage
+	(*Registered)(nil),                         // 11: curlix.connector.v1.Registered
+	(*WorkAssignment)(nil),                     // 12: curlix.connector.v1.WorkAssignment
+	(*CancelWork)(nil),                         // 13: curlix.connector.v1.CancelWork
+	(*Ping)(nil),                               // 14: curlix.connector.v1.Ping
+	(*MetadataDiscoveryRequest)(nil),           // 15: curlix.connector.v1.MetadataDiscoveryRequest
+	(*GatewayMessage)(nil),                     // 16: curlix.connector.v1.GatewayMessage
+	(*DescribeDatabaseConnectionRequest)(nil),  // 17: curlix.connector.v1.DescribeDatabaseConnectionRequest
+	(*DatabaseObject)(nil),                     // 18: curlix.connector.v1.DatabaseObject
+	(*ColumnInfo)(nil),                         // 19: curlix.connector.v1.ColumnInfo
+	(*TableDetail)(nil),                        // 20: curlix.connector.v1.TableDetail
+	(*DescribeDatabaseConnectionResponse)(nil), // 21: curlix.connector.v1.DescribeDatabaseConnectionResponse
+	(*v1.AgentEvent)(nil),                      // 22: curlix.agent.v1.AgentEvent
+	(*v1.StartRun)(nil),                        // 23: curlix.agent.v1.StartRun
 }
 var file_curlix_connector_v1_connector_gateway_proto_depIdxs = []int32{
-	13, // 0: curlix.connector.v1.WorkEvent.event:type_name -> curlix.agent.v1.AgentEvent
-	4,  // 1: curlix.connector.v1.ConnectorMessage.register:type_name -> curlix.connector.v1.Register
-	6,  // 2: curlix.connector.v1.ConnectorMessage.work_event:type_name -> curlix.connector.v1.WorkEvent
-	5,  // 3: curlix.connector.v1.ConnectorMessage.heartbeat:type_name -> curlix.connector.v1.Heartbeat
-	14, // 4: curlix.connector.v1.WorkAssignment.start:type_name -> curlix.agent.v1.StartRun
-	8,  // 5: curlix.connector.v1.GatewayMessage.registered:type_name -> curlix.connector.v1.Registered
-	9,  // 6: curlix.connector.v1.GatewayMessage.work_assignment:type_name -> curlix.connector.v1.WorkAssignment
-	10, // 7: curlix.connector.v1.GatewayMessage.cancel_work:type_name -> curlix.connector.v1.CancelWork
-	11, // 8: curlix.connector.v1.GatewayMessage.ping:type_name -> curlix.connector.v1.Ping
-	7,  // 9: curlix.connector.v1.ConnectorGateway.Connect:input_type -> curlix.connector.v1.ConnectorMessage
-	0,  // 10: curlix.connector.v1.ConnectorGateway.Enroll:input_type -> curlix.connector.v1.EnrollRequest
-	2,  // 11: curlix.connector.v1.ConnectorGateway.PreConnect:input_type -> curlix.connector.v1.PreConnectRequest
-	12, // 12: curlix.connector.v1.ConnectorGateway.Connect:output_type -> curlix.connector.v1.GatewayMessage
-	1,  // 13: curlix.connector.v1.ConnectorGateway.Enroll:output_type -> curlix.connector.v1.EnrollResponse
-	3,  // 14: curlix.connector.v1.ConnectorGateway.PreConnect:output_type -> curlix.connector.v1.PreConnectResponse
-	12, // [12:15] is the sub-list for method output_type
-	9,  // [9:12] is the sub-list for method input_type
-	9,  // [9:9] is the sub-list for extension type_name
-	9,  // [9:9] is the sub-list for extension extendee
-	0,  // [0:9] is the sub-list for field type_name
+	22, // 0: curlix.connector.v1.WorkEvent.event:type_name -> curlix.agent.v1.AgentEvent
+	18, // 1: curlix.connector.v1.MetadataDiscoveryResponse.objects:type_name -> curlix.connector.v1.DatabaseObject
+	6,  // 2: curlix.connector.v1.ConnectorMessage.register:type_name -> curlix.connector.v1.Register
+	8,  // 3: curlix.connector.v1.ConnectorMessage.work_event:type_name -> curlix.connector.v1.WorkEvent
+	7,  // 4: curlix.connector.v1.ConnectorMessage.heartbeat:type_name -> curlix.connector.v1.Heartbeat
+	9,  // 5: curlix.connector.v1.ConnectorMessage.metadata_discovery_response:type_name -> curlix.connector.v1.MetadataDiscoveryResponse
+	23, // 6: curlix.connector.v1.WorkAssignment.start:type_name -> curlix.agent.v1.StartRun
+	11, // 7: curlix.connector.v1.GatewayMessage.registered:type_name -> curlix.connector.v1.Registered
+	12, // 8: curlix.connector.v1.GatewayMessage.work_assignment:type_name -> curlix.connector.v1.WorkAssignment
+	13, // 9: curlix.connector.v1.GatewayMessage.cancel_work:type_name -> curlix.connector.v1.CancelWork
+	14, // 10: curlix.connector.v1.GatewayMessage.ping:type_name -> curlix.connector.v1.Ping
+	15, // 11: curlix.connector.v1.GatewayMessage.metadata_discovery_request:type_name -> curlix.connector.v1.MetadataDiscoveryRequest
+	19, // 12: curlix.connector.v1.TableDetail.columns:type_name -> curlix.connector.v1.ColumnInfo
+	18, // 13: curlix.connector.v1.DescribeDatabaseConnectionResponse.objects:type_name -> curlix.connector.v1.DatabaseObject
+	20, // 14: curlix.connector.v1.DescribeDatabaseConnectionResponse.table_detail:type_name -> curlix.connector.v1.TableDetail
+	10, // 15: curlix.connector.v1.ConnectorGateway.Connect:input_type -> curlix.connector.v1.ConnectorMessage
+	0,  // 16: curlix.connector.v1.ConnectorGateway.Enroll:input_type -> curlix.connector.v1.EnrollRequest
+	4,  // 17: curlix.connector.v1.ConnectorGateway.PreConnect:input_type -> curlix.connector.v1.PreConnectRequest
+	2,  // 18: curlix.connector.v1.ConnectorGateway.Renew:input_type -> curlix.connector.v1.RenewRequest
+	17, // 19: curlix.connector.v1.ConnectorGateway.DescribeDatabaseConnection:input_type -> curlix.connector.v1.DescribeDatabaseConnectionRequest
+	16, // 20: curlix.connector.v1.ConnectorGateway.Connect:output_type -> curlix.connector.v1.GatewayMessage
+	1,  // 21: curlix.connector.v1.ConnectorGateway.Enroll:output_type -> curlix.connector.v1.EnrollResponse
+	5,  // 22: curlix.connector.v1.ConnectorGateway.PreConnect:output_type -> curlix.connector.v1.PreConnectResponse
+	3,  // 23: curlix.connector.v1.ConnectorGateway.Renew:output_type -> curlix.connector.v1.RenewResponse
+	21, // 24: curlix.connector.v1.ConnectorGateway.DescribeDatabaseConnection:output_type -> curlix.connector.v1.DescribeDatabaseConnectionResponse
+	20, // [20:25] is the sub-list for method output_type
+	15, // [15:20] is the sub-list for method input_type
+	15, // [15:15] is the sub-list for extension type_name
+	15, // [15:15] is the sub-list for extension extendee
+	0,  // [0:15] is the sub-list for field type_name
 }
 
 func init() { file_curlix_connector_v1_connector_gateway_proto_init() }
@@ -978,16 +1678,18 @@ func file_curlix_connector_v1_connector_gateway_proto_init() {
 	if File_curlix_connector_v1_connector_gateway_proto != nil {
 		return
 	}
-	file_curlix_connector_v1_connector_gateway_proto_msgTypes[7].OneofWrappers = []any{
+	file_curlix_connector_v1_connector_gateway_proto_msgTypes[10].OneofWrappers = []any{
 		(*ConnectorMessage_Register)(nil),
 		(*ConnectorMessage_WorkEvent)(nil),
 		(*ConnectorMessage_Heartbeat)(nil),
+		(*ConnectorMessage_MetadataDiscoveryResponse)(nil),
 	}
-	file_curlix_connector_v1_connector_gateway_proto_msgTypes[12].OneofWrappers = []any{
+	file_curlix_connector_v1_connector_gateway_proto_msgTypes[16].OneofWrappers = []any{
 		(*GatewayMessage_Registered)(nil),
 		(*GatewayMessage_WorkAssignment)(nil),
 		(*GatewayMessage_CancelWork)(nil),
 		(*GatewayMessage_Ping)(nil),
+		(*GatewayMessage_MetadataDiscoveryRequest)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
@@ -995,7 +1697,7 @@ func file_curlix_connector_v1_connector_gateway_proto_init() {
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_curlix_connector_v1_connector_gateway_proto_rawDesc), len(file_curlix_connector_v1_connector_gateway_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   13,
+			NumMessages:   22,
 			NumExtensions: 0,
 			NumServices:   1,
 		},
