@@ -92,7 +92,8 @@ func runEdge(args []string) {
 	}
 
 	reg := edge.NewRegistry()
-	registerQueryStudio(ctx, cfg, reg, masker, logger)
+	execTargets := dbquery.MergeWireTargets(dbquery.ParseTargets(cfg.StudioTargetsJSON), cfg.WireProxy.Targets)
+	registerQueryStudio(ctx, cfg, execTargets, reg, masker, logger)
 
 	if cfg.GatewayAddr == "" {
 		if cfg.WireProxyEnabled() || cfg.StudioEnabled() {
@@ -142,6 +143,7 @@ func runEdge(args []string) {
 		EnrollTarget:      cfg.EnrollTarget,
 		EnrollToken:       cfg.EnrollToken,
 		TrustDomain:       cfg.TrustDomain,
+		Targets:           execTargets,
 	}, reg, logger)
 
 	if err := client.Run(ctx); err != nil && ctx.Err() == nil {
@@ -154,8 +156,7 @@ func runEdge(args []string) {
 // (registered on reg, dispatched over the connector-gateway transport already running above) and
 // the second, independent Studio Gateway dial for Query Studio's own dispatch. Always compiled in;
 // dormant unless cfg.StudioEnabled() (SKYBRIDGE_STUDIO_GATEWAY set).
-func registerQueryStudio(ctx context.Context, cfg config.Edge, reg *edge.Registry, masker mask.Masker, logger *slog.Logger) {
-	execTargets := dbquery.MergeWireTargets(dbquery.ParseTargets(cfg.StudioTargetsJSON), cfg.WireProxy.Targets)
+func registerQueryStudio(ctx context.Context, cfg config.Edge, execTargets []dbquery.Target, reg *edge.Registry, masker mask.Masker, logger *slog.Logger) {
 	dbexec.Register(reg, dbexec.Options{
 		Targets:          execTargets,
 		FallbackUser:     cfg.StudioDBUser,

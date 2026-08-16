@@ -1,6 +1,6 @@
 # Metadata Discovery via Connect Stream
 
-**Status:** SaaS gateway routing + edge transport handlers implemented. Edge target resolution pending.
+**Status:** SaaS gateway routing + edge transport handlers + edge target resolution implemented. Testing pending.
 
 ## Overview
 
@@ -169,13 +169,21 @@ Metadata discovery should:
   - [x] `handleMetadataDiscovery()` - extract and validate request
   - [x] `discoverMetadata()` - dispatch to dbquery (target resolution TODO)
   - [x] Build and send `MetadataDiscoveryResponse`
-- [ ] Wire target resolution in `discoverMetadata()`
-  - [ ] Load configured targets from edge environment
-  - [ ] Resolve accountKey to Target using `dbquery.Resolve()`
-- [ ] Testing
-  - [ ] Unit tests with fake database servers (fakepostgresserver, fakemysqlserver, fakemongoserver exist)
-  - [ ] Integration test: transport handler → dbquery → fake database
-  - [ ] Error cases: connection failures, permission denied, timeout, missing target
+- [x] Wire target resolution in `discoverMetadata()`
+  - [x] Load configured targets from edge environment
+  - [x] Resolve accountKey to Target using `dbquery.Resolve()`
+- [x] Testing
+  - [x] Unit tests with fake database servers (`internal/edge/dbquery/metadata_test.go`, reusing/extending
+    the existing fakepostgresserver/fakemysqlserver/fakemongoserver helpers)
+  - [x] Integration test: transport handler → dbquery → fake database
+    (`internal/edge/transport/metadata_test.go`'s `TestServeHandlesMetadataDiscoveryRequest`)
+  - [x] Error cases: missing target (both packages), missing host per driver, unsupported driver
+  - [x] E2E: `examples/metadata-discovery-e2e/` — a stand-in Connector Gateway
+    (`main.go`) plus `run-e2e.sh`, which spins up real Postgres/MySQL/MongoDB containers (reusing
+    `examples/demo`'s seed files), runs a real `skybridge edge` process against them, and dispatches
+    a real `MetadataDiscoveryRequest` per driver over the real Connect stream. Deliberately not a
+    `go test` — CLAUDE.md's testing contract keeps `go test ./...` hermetic; this is the documented,
+    manually-run exception. Not wired into CI.
 
 ### Example: Postgres Executor
 
