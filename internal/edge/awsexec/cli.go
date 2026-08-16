@@ -43,6 +43,13 @@ func (e Executor) RunReadOnlyCLI(ctx context.Context, args map[string]any) (edge
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout
 	cmd.Stderr = &stderr
+	// WaitDelay bounds how long Wait (called by Run below) will block on the stdout/stderr pipes
+	// after a timeout kills the aws process. exec.CommandContext's default Cancel only kills the
+	// direct child; a real `aws` invocation (or a test double) that has spawned its own child
+	// process holding those pipes open would otherwise wedge this call — and the whole CI test
+	// binary, per the 600s-hang regression this guards against — until that grandchild exits on its
+	// own. Once WaitDelay elapses, Wait force-closes the pipes so Run returns instead of blocking.
+	cmd.WaitDelay = 5 * time.Second
 
 	runErr := cmd.Run()
 	timedOut := runCtx.Err() == context.DeadlineExceeded

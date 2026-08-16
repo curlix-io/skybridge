@@ -105,6 +105,43 @@ func TestRunReadOnlyCLITimesOut(t *testing.T) {
 	}
 }
 
+// TestRunReadOnlyCLITimesOutWithOrphanedGrandchild is the regression test for a real CI hang: a
+// timed-out aws process that had backgrounded its own child before dying leaves that child holding
+// the inherited stdout/stderr pipes open. exec.CommandContext's default Cancel only kills the
+// direct child, so without cmd.WaitDelay, Wait (called by Run) blocks forever waiting for those
+// pipes to reach EOF — which happened for real in CI (a 600s job-level timeout, not the 20ms
+// CLITimeout below). WaitDelay must force the pipes closed so this returns promptly regardless.
+func TestRunReadOnlyCLITimesOutWithOrphanedGrandchild(t *testing.T) {
+	dir := t.TempDir()
+	script := dir + "/aws"
+	// The backgrounded `sleep 999 &` inherits the parent's stdout/stderr fds and outlives it once
+	// the parent (this script's own shell process, the direct child Run() started) is killed.
+	if err := os.WriteFile(script, []byte("#!/bin/sh\nsleep 999 &\nsleep 999\n"), 0o755); err != nil {
+		t.Fatalf("write script: %v", err)
+	}
+	e := New(Options{AWSBinary: script, CLITimeout: 20 * time.Millisecond})
+
+	done := make(chan struct{})
+	var res edge.Result
+	var err error
+	go func() {
+		res, err = e.RunReadOnlyCLI(context.Background(), map[string]any{"command": "aws ec2 describe-instances"})
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("RunReadOnlyCLI did not return within 10s — orphaned grandchild wedged the pipe wait")
+	}
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res["timed_out"] != true {
+		t.Fatalf("expected timed_out=true: %+v", res)
+	}
+}
+
 func TestRunReadOnlyCLIExecutionFailsForMissingBinary(t *testing.T) {
 	e := New(Options{AWSBinary: "/nonexistent/binary/does-not-exist"})
 	res, err := e.RunReadOnlyCLI(context.Background(), map[string]any{"command": "aws ec2 describe-instances"})

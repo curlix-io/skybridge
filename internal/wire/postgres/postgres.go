@@ -60,6 +60,18 @@ type Engine struct {
 	// catalog resolves tableOIDs to (schema, table) names via a dedicated agent-owned connection
 	// (see catalog.go) — nil leaves ObjectID unresolved exactly as before this feature existed.
 	catalog *CatalogResolver
+	// collector, when non-nil, receives every free-text column's pre-mask value keyed by its resolved
+	// ObjectID/Path, feeding an AI classifier's sample buffer (internal/pathlabel/trafficsampler)
+	// instead of requiring a second, dedicated read-only DSN to sample from (see
+	// docs/AI_PATH_LABELLING_DESIGN.md §5.2). nil leaves this a no-op, exactly as before this feature
+	// existed.
+	collector sampleCollector
+}
+
+// sampleCollector matches trafficsampler.Buffer's Observe method — kept as a local interface so this
+// package doesn't import internal/pathlabel/trafficsampler just for a method set.
+type sampleCollector interface {
+	Observe(objectID, fieldPath, value string)
 }
 
 // New returns a Postgres engine that declines client SSL (plaintext client link).
@@ -83,6 +95,16 @@ func (e *Engine) WithOrgID(orgID string) *Engine {
 func (e *Engine) WithCatalogResolver(resolver *CatalogResolver) *Engine {
 	c := *e
 	c.catalog = resolver
+	return &c
+}
+
+// WithSampleCollector returns a copy of the engine that feeds every free-text column's pre-mask
+// value into collector, keyed by its resolved ObjectID/Path, for an AI classifier to sample from
+// live traffic instead of a second dedicated DSN (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). nil
+// (the default) leaves this disabled — the safe no-op this package has always had.
+func (e *Engine) WithSampleCollector(collector sampleCollector) *Engine {
+	c := *e
+	c.collector = collector
 	return &c
 }
 
@@ -118,7 +140,7 @@ func (e *Engine) Proxy(ctx context.Context, client, upstream net.Conn, masker ma
 	})
 	// server -> client: parse + mask DataRows.
 	wire.SafeGo(errc, func() error {
-		return pipeBackend(ctx, upstream, client, masker, recorder, e.objectIDFor(database))
+		return pipeBackend(ctx, upstream, client, masker, recorder, e.objectIDFor(database), e.collector)
 	})
 
 	err = <-errc
@@ -248,7 +270,7 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, mas
 	})
 	// upstream -> client: parse + mask DataRows, reusing the reader that buffered the post-auth tail.
 	wire.SafeGo(errc, func() error {
-		return pipeBackendReader(ctx, ur, client, masker, recorder, e.objectIDFor(database))
+		return pipeBackendReader(ctx, ur, client, masker, recorder, e.objectIDFor(database), e.collector)
 	})
 
 	err = <-errc
@@ -323,13 +345,13 @@ func negotiateStartup(client net.Conn, clientTLS *tls.Config) (net.Conn, *bufio.
 type objectIDResolver func(ctx context.Context, tableOID uint32, attnum int16) (objID, columnName string)
 
 // pipeBackend reads typed backend messages from server, masks DataRows, and writes to client.
-func pipeBackend(ctx context.Context, server io.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder, resolveObjectID objectIDResolver) error {
-	return pipeBackendReader(ctx, bufio.NewReaderSize(server, 1<<16), client, masker, recorder, resolveObjectID)
+func pipeBackend(ctx context.Context, server io.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder, resolveObjectID objectIDResolver, collector sampleCollector) error {
+	return pipeBackendReader(ctx, bufio.NewReaderSize(server, 1<<16), client, masker, recorder, resolveObjectID, collector)
 }
 
 // pipeBackendReader is pipeBackend over an already-buffered reader. The injection path uses it so
 // the post-auth bytes the auth handshake left buffered in br are not lost.
-func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder, resolveObjectID objectIDResolver) error {
+func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, masker mask.Masker, recorder wire.Recorder, resolveObjectID objectIDResolver, collector sampleCollector) error {
 	bw := bufio.NewWriterSize(client, 1<<16)
 	var cols []mask.Column
 	header := make([]byte, 5)
@@ -355,7 +377,7 @@ func pipeBackendReader(ctx context.Context, br *bufio.Reader, client io.Writer, 
 		case 'T': // RowDescription
 			cols = parseRowDescription(ctx, payload, resolveObjectID)
 		case 'D': // DataRow
-			masked, values, err := maskDataRow(ctx, payload, cols, masker)
+			masked, values, err := maskDataRow(ctx, payload, cols, masker, collector)
 			if err != nil {
 				if errors.Is(err, mask.ErrMaskerUnavailable) {
 					return err
@@ -542,7 +564,7 @@ func parseRowDescription(ctx context.Context, p []byte, resolveObjectID objectID
 // maskDataRow decodes a 'D' payload, runs the masker, and re-encodes it. Also returns the masked
 // field values (already decoded here) so the caller can render a replay-transcript line without
 // re-parsing the re-encoded payload.
-func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.Masker) ([]byte, [][]byte, error) {
+func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.Masker, collector sampleCollector) ([]byte, [][]byte, error) {
 	if len(p) < 2 {
 		return p, nil, nil
 	}
@@ -574,6 +596,9 @@ func maskDataRow(ctx context.Context, p []byte, cols []mask.Column, masker mask.
 			mc[i] = cols[i]
 		} else {
 			mc[i] = mask.Column{Text: true, FreeText: true} // unknown column on protocol drift: treat as text
+		}
+		if collector != nil && mc[i].FreeText && mc[i].ObjectID != "" && row[i] != nil {
+			collector.Observe(mc[i].ObjectID, mc[i].Path, string(row[i]))
 		}
 	}
 	masked, err := masker.MaskRow(ctx, mc, row)

@@ -58,6 +58,12 @@ type Engine struct {
 	// (ProxyInject, see clientauth.go) so the client's session-token password does not ride in
 	// cleartext.
 	clientTLS *tls.Config
+	// collector, when non-nil, receives every free-text string field's pre-mask value keyed by its
+	// resolved ObjectID/path, feeding an AI classifier's sample buffer
+	// (internal/pathlabel/trafficsampler) instead of requiring a second, dedicated read-only DSN to
+	// sample from (see docs/AI_PATH_LABELLING_DESIGN.md §5.2). nil leaves this a no-op, exactly as
+	// before this feature existed.
+	collector sampleCollector
 }
 
 // New returns a MongoDB engine.
@@ -72,6 +78,17 @@ func NewWithClientTLS(cfg *tls.Config) *Engine { return &Engine{clientTLS: cfg} 
 func (e *Engine) WithOrgID(orgID string) *Engine {
 	c := *e
 	c.orgID = orgID
+	return &c
+}
+
+// WithSampleCollector returns a copy of the engine that feeds every free-text string field's
+// pre-mask value into collector, keyed by its resolved ObjectID/path, for an AI classifier to
+// sample from live traffic instead of a second dedicated DSN (see
+// docs/AI_PATH_LABELLING_DESIGN.md §5.2). nil (the default) leaves this disabled — the safe no-op
+// this package has always had.
+func (e *Engine) WithSampleCollector(collector sampleCollector) *Engine {
+	c := *e
+	c.collector = collector
 	return &c
 }
 
@@ -173,7 +190,7 @@ func (e *Engine) pump(ctx context.Context, client, upstream net.Conn, masker mas
 		return proxyClientRequests(bufio.NewReaderSize(client, 1<<16), upstream, recorder, tracker)
 	})
 	wire.SafeGo(errc, func() error {
-		return maskServer(ctx, bufio.NewReaderSize(upstream, 1<<16), client, masker, recorder, tracker, e.orgID)
+		return maskServer(ctx, bufio.NewReaderSize(upstream, 1<<16), client, masker, recorder, tracker, e.orgID, e.collector)
 	})
 	err := <-errc
 	_ = client.Close()
@@ -203,8 +220,8 @@ func proxyClientRequests(r *bufio.Reader, w io.Writer, recorder wire.Recorder, t
 	}
 }
 
-func maskServer(ctx context.Context, r *bufio.Reader, w io.Writer, masker mask.Masker, recorder wire.Recorder, tracker *requestTracker, orgID string) error {
-	bm := &bsonMasker{ctx: ctx, masker: masker, recorder: recorder, tracker: tracker, orgID: orgID}
+func maskServer(ctx context.Context, r *bufio.Reader, w io.Writer, masker mask.Masker, recorder wire.Recorder, tracker *requestTracker, orgID string, collector sampleCollector) error {
+	bm := &bsonMasker{ctx: ctx, masker: masker, recorder: recorder, tracker: tracker, orgID: orgID, collector: collector}
 	for {
 		msg, err := readMessage(r)
 		if err != nil {

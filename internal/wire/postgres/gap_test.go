@@ -718,7 +718,7 @@ func TestProxy_NilMaskerAndRecorderDefaultSafely(t *testing.T) {
 func TestPipeBackendReader_WriteFailurePropagates(t *testing.T) {
 	server := new(bytes.Buffer)
 	writeMsg(t, server, 'C', []byte("SELECT 1"))
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), &limitWriter{n: 0}, mask.Noop{}, wire.NoopRecorder{}, nil)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), &limitWriter{n: 0}, mask.Noop{}, wire.NoopRecorder{}, nil, nil)
 	if err == nil {
 		t.Fatal("expected the client write failure to propagate")
 	}

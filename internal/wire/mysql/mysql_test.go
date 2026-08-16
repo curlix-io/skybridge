@@ -201,7 +201,7 @@ func TestLenEncStrRejectsOverflowingLength(t *testing.T) {
 // unchanged rather than attempting to decode it.
 func TestMaskTextRowRejectsOverflowingLength(t *testing.T) {
 	row := []byte{0xFE, '0', '0', '0', '0', '0', '0', '0', 0xF3}
-	_, _, ok, err := maskTextRow(context.Background(), row, nil, mask.Noop{})
+	_, _, ok, err := maskTextRow(context.Background(), row, nil, mask.Noop{}, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -221,7 +221,7 @@ func TestMaskTextRow(t *testing.T) {
 	row = appendLenEncInt(row, uint64(len("alice@example.com")))
 	row = append(row, "alice@example.com"...)
 
-	out, _, ok, err := maskTextRow(context.Background(), row, cols, overlay)
+	out, _, ok, err := maskTextRow(context.Background(), row, cols, overlay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -240,11 +240,59 @@ func TestMaskTextRow(t *testing.T) {
 	}
 }
 
+// fakeCollector records every Observe call, standing in for trafficsampler.Buffer.
+type fakeCollector struct {
+	observed map[string]string
+}
+
+func (c *fakeCollector) Observe(objectID, fieldPath, value string) {
+	if c.observed == nil {
+		c.observed = make(map[string]string)
+	}
+	c.observed[objectID+"|"+fieldPath] = value
+}
+
+// TestMaskTextRow_CollectsSamplesForFreeTextColumnsWithObjectID mirrors the equivalent postgres/
+// dbquery tests: a free-text column carrying a resolved ObjectID observes its pre-mask value; a
+// typed column and a column with no resolved ObjectID do not.
+func TestMaskTextRow_CollectsSamplesForFreeTextColumnsWithObjectID(t *testing.T) {
+	cols := []mask.Column{
+		{Name: "note", Path: "note", ObjectID: "org1:mysql:app:users", Text: true, FreeText: true},
+		{Name: "id", Path: "id", ObjectID: "org1:mysql:app:users", Text: true, FreeText: false},
+		{Name: "other", Path: "other", ObjectID: "", Text: true, FreeText: true},
+	}
+	var row []byte
+	row = appendLenEncInt(row, uint64(len("hello")))
+	row = append(row, "hello"...)
+	row = appendLenEncInt(row, 1)
+	row = append(row, '7')
+	row = appendLenEncInt(row, uint64(len("unscoped")))
+	row = append(row, "unscoped"...)
+
+	col := &fakeCollector{}
+	_, _, ok, err := maskTextRow(context.Background(), row, cols, mask.Noop{}, col)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ok {
+		t.Fatal("maskTextRow returned ok=false")
+	}
+	if col.observed["org1:mysql:app:users|note"] != "hello" {
+		t.Fatalf("expected a sample observed for the free-text column with a resolved ObjectID, got %v", col.observed)
+	}
+	if _, ok := col.observed["org1:mysql:app:users|id"]; ok {
+		t.Fatal("expected no sample observed for a typed (non-free-text) column")
+	}
+	if _, ok := col.observed["|other"]; ok {
+		t.Fatal("expected no sample observed for a column with no resolved ObjectID")
+	}
+}
+
 func TestMaskTextRowPreservesNull(t *testing.T) {
 	cols := []mask.Column{{Name: "email", Text: true, FreeText: true}}
 	overlay := mask.NewOverlay(map[string]string{"email": "[redacted]"})
 	row := []byte{0xFB} // single NULL
-	out, _, ok, err := maskTextRow(context.Background(), row, cols, overlay)
+	out, _, ok, err := maskTextRow(context.Background(), row, cols, overlay, nil)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -259,7 +307,7 @@ func TestMaskTextRowPropagatesMaskerError(t *testing.T) {
 	row = appendLenEncInt(row, uint64(len("alice@example.com")))
 	row = append(row, "alice@example.com"...)
 
-	_, _, ok, err := maskTextRow(context.Background(), row, cols, errMasker{})
+	_, _, ok, err := maskTextRow(context.Background(), row, cols, errMasker{}, nil)
 	if !errors.Is(err, mask.ErrMaskerUnavailable) {
 		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
 	}

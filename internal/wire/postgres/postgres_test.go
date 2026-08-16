@@ -236,7 +236,7 @@ func TestMaskDataRowNeverRedactsTypedTimestampColumn(t *testing.T) {
 	// Presidio's DATE_TIME recognizer's real-world false-positive behavior on ordinary timestamps.
 	masker := dateTimeGuessingMasker{}
 
-	out, values, err := maskDataRow(context.Background(), payload, cols, masker)
+	out, values, err := maskDataRow(context.Background(), payload, cols, masker, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -285,7 +285,7 @@ func TestMaskDataRowRedactsNamedColumn(t *testing.T) {
 	payload := dataRowPayload([]byte("7"), []byte("a@b.com"))
 	masker := columnMasker{redact: map[string]bool{"email": true}}
 
-	out, _, err := maskDataRow(context.Background(), payload, cols, masker)
+	out, _, err := maskDataRow(context.Background(), payload, cols, masker, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -313,10 +313,50 @@ func TestMaskDataRowRedactsNamedColumn(t *testing.T) {
 	}
 }
 
+// fakeCollector records every Observe call, standing in for trafficsampler.Buffer.
+type fakeCollector struct {
+	observed map[string]string
+}
+
+func (c *fakeCollector) Observe(objectID, fieldPath, value string) {
+	if c.observed == nil {
+		c.observed = make(map[string]string)
+	}
+	c.observed[objectID+"|"+fieldPath] = value
+}
+
+// TestMaskDataRow_CollectsSamplesForFreeTextColumnsWithObjectID exercises the new SampleCollector
+// wiring end to end through maskDataRow: a free-text column carrying a resolved ObjectID observes
+// its pre-mask value, a typed (non-free-text) column and a column with no resolved ObjectID do not
+// — matching internal/edge/dbquery/mask.go's equivalent gate for the one-shot exec path.
+func TestMaskDataRow_CollectsSamplesForFreeTextColumnsWithObjectID(t *testing.T) {
+	cols := []mask.Column{
+		{Name: "note", Path: "note", ObjectID: "org1:postgres:app:users", Text: true, FreeText: true},
+		{Name: "id", Path: "id", ObjectID: "org1:postgres:app:users", Text: true, FreeText: false},
+		{Name: "other", Path: "other", ObjectID: "", Text: true, FreeText: true},
+	}
+	payload := dataRowPayload([]byte("hello"), []byte("7"), []byte("unscoped"))
+	col := &fakeCollector{}
+
+	_, _, err := maskDataRow(context.Background(), payload, cols, mask.Noop{}, col)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if col.observed["org1:postgres:app:users|note"] != "hello" {
+		t.Fatalf("expected a sample observed for the free-text column with a resolved ObjectID, got %v", col.observed)
+	}
+	if _, ok := col.observed["org1:postgres:app:users|id"]; ok {
+		t.Fatal("expected no sample observed for a typed (non-free-text) column")
+	}
+	if _, ok := col.observed["|other"]; ok {
+		t.Fatal("expected no sample observed for a column with no resolved ObjectID")
+	}
+}
+
 func TestMaskDataRowPreservesNull(t *testing.T) {
 	cols := parseRowDescription(context.Background(), rowDescriptionPayload("id", "email"), nil)
 	payload := dataRowPayload([]byte("7"), nil)
-	out, _, err := maskDataRow(context.Background(), payload, cols, mask.Noop{})
+	out, _, err := maskDataRow(context.Background(), payload, cols, mask.Noop{}, nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -345,7 +385,7 @@ func TestPipeBackendMasksStream(t *testing.T) {
 
 	client := new(bytes.Buffer)
 	masker := columnMasker{redact: map[string]bool{"email": true}}
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, masker, wire.NoopRecorder{}, nil)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, masker, wire.NoopRecorder{}, nil, nil)
 	if err == nil || err.Error() != "EOF" {
 		t.Fatalf("expected EOF at stream end, got %v", err)
 	}
@@ -399,7 +439,7 @@ func TestPipeBackendAbortsOnMaskerFailure(t *testing.T) {
 	writeRaw('Z', []byte{'I'})
 
 	client := new(bytes.Buffer)
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, errMasker{}, wire.NoopRecorder{}, nil)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, errMasker{}, wire.NoopRecorder{}, nil, nil)
 	if !errors.Is(err, mask.ErrMaskerUnavailable) {
 		t.Fatalf("expected ErrMaskerUnavailable, got %v", err)
 	}
@@ -639,7 +679,7 @@ func TestPipeBackendReader_ShortHeaderLength(t *testing.T) {
 	server.Write(l[:])
 
 	client := new(bytes.Buffer)
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil, nil)
 	if !errors.Is(err, errProtocol) {
 		t.Fatalf("expected errProtocol for an undersized message length, got %v", err)
 	}
@@ -660,7 +700,7 @@ func TestPipeBackendReader_OversizedLengthRejectedNotAllocated(t *testing.T) {
 	server.Write(l[:])
 
 	client := new(bytes.Buffer)
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil, nil)
 	if !errors.Is(err, errProtocol) {
 		t.Fatalf("expected errProtocol for an oversized message length, got %v", err)
 	}
@@ -673,7 +713,7 @@ func TestPipeBackendReader_FlushesOnBufferDrain(t *testing.T) {
 	server := new(bytes.Buffer)
 	writeMsg(t, server, 'C', []byte("SELECT 1"))
 	client := new(bytes.Buffer)
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil, nil)
 	if err == nil || !errors.Is(err, io.EOF) {
 		t.Fatalf("expected EOF at stream end, got %v", err)
 	}
@@ -733,7 +773,7 @@ func TestMaskDataRow_TruncatedFieldLengthHeader(t *testing.T) {
 	buf.Write(u16[:])
 	buf.Write([]byte{0, 0}) // only 2 of the 4 length bytes present
 
-	_, _, err := maskDataRow(context.Background(), buf.Bytes(), nil, mask.Noop{})
+	_, _, err := maskDataRow(context.Background(), buf.Bytes(), nil, mask.Noop{}, nil)
 	if !errors.Is(err, errProtocol) {
 		t.Fatalf("expected errProtocol, got %v", err)
 	}
@@ -751,7 +791,7 @@ func TestMaskDataRow_TruncatedFieldValue(t *testing.T) {
 	buf.Write(flen[:])
 	buf.WriteString("short") // far fewer than 100 bytes actually present
 
-	_, _, err := maskDataRow(context.Background(), buf.Bytes(), nil, mask.Noop{})
+	_, _, err := maskDataRow(context.Background(), buf.Bytes(), nil, mask.Noop{}, nil)
 	if !errors.Is(err, errProtocol) {
 		t.Fatalf("expected errProtocol, got %v", err)
 	}
@@ -768,7 +808,7 @@ func (badLengthMasker) MaskRow(_ context.Context, cols []mask.Column, row [][]by
 func TestMaskDataRow_MaskerReturnsWrongFieldCount(t *testing.T) {
 	cols := parseRowDescription(context.Background(), rowDescriptionPayload("id", "email"), nil)
 	payload := dataRowPayload([]byte("1"), []byte("a@b.com"))
-	_, _, err := maskDataRow(context.Background(), payload, cols, badLengthMasker{})
+	_, _, err := maskDataRow(context.Background(), payload, cols, badLengthMasker{}, nil)
 	if !errors.Is(err, errProtocol) {
 		t.Fatalf("expected errProtocol when the masker changes the field count, got %v", err)
 	}
@@ -892,7 +932,7 @@ func TestPipeBackend_StripsSASLPlusFromAuthentication(t *testing.T) {
 	writeRaw('Z', []byte{'I'})
 
 	client := new(bytes.Buffer)
-	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil)
+	err := pipeBackend(context.Background(), bytes.NewReader(server.Bytes()), client, mask.Noop{}, wire.NoopRecorder{}, nil, nil)
 	if err == nil || err.Error() != "EOF" {
 		t.Fatalf("expected EOF at stream end, got %v", err)
 	}

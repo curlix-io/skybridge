@@ -500,6 +500,13 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_UPSTREAM_TLS_CA_FILE` / `_PEM` | system roots | trust roots used by `verify-ca` / `verify-full` (e.g. the RDS CA bundle) |
 | `SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME` | dial host | override the verified hostname / SNI sent to the upstream |
 | `SKYBRIDGE_POSTGRES_CATALOG_DSN` | — | dedicated, read-only Postgres credential (`postgres://user:pass@host:port`) the agent uses on a separate connection it owns for `pg_class`/`pg_namespace` lookups, resolving `PathOverlay`'s table identity for Postgres wire-proxy connections (see [Path-scoped labels](./REDACTION.md#path-scoped-labels-mask-pathoverlay)); unset leaves Postgres's `ObjectID` unresolved, same as before this existed |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT` | — | enables a traffic-fed AI path-label classifier that samples free-text values straight out of live wire-proxy/`dbquery` traffic already flowing through this agent — no second, dedicated read-only DSN required (see `docs/AI_PATH_LABELLING_DESIGN.md` §5.2). Also requires `SKYBRIDGE_PATH_LABEL_URL` (proposals are pushed through the same store `PathOverlay` already syncs against); unset (or no `SKYBRIDGE_PATH_LABEL_URL`) disables it entirely |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_API_KEY` | — | bearer/API key for the LLM endpoint above |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_CATEGORIES` | — | comma-separated PII category taxonomy the classifier is constrained to return |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_MIN_CONFIDENCE` | `0.5` | minimum confidence to accept a classifier proposal |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_MAX_FIELDS` | `10000` | max distinct `(ObjectID, FieldPath)` pairs buffered at once (LRU-evicted beyond this) |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_MAX_SAMPLES_PER_FIELD` | `20` | max sample values retained per field |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_SCAN_INTERVAL_SECONDS` | `300` | how often buffered fields are classified and proposed |
 
 Switch databases by changing `SKYBRIDGE_DB_TYPE`; everything else is identical.
 
@@ -676,7 +683,7 @@ truth — the table below is a summary, not a replacement).
 | `SKYBRIDGE_STUDIO_MAX_SESSIONS` | `8` | Caps concurrent Query Studio dispatch sessions on one `edge`-role process. |
 | `SKYBRIDGE_GW_CLIENT_CONN_PER_MIN` / `SKYBRIDGE_GW_ORG_CONN_PER_MIN` | unset (no limit); default `60`/min per client IP once `SKYBRIDGE_GW_CONTROL_PLANE_URL` is set | Gateway-side per-client / per-org *new*-connection-rate ceilings — the main throughput/abuse knobs on the `gateway` role in tunnel mode. |
 | `SKYBRIDGE_GW_ORG_MAX_CONCURRENT_CLIENTS` | unset (no limit); default `1000` once `SKYBRIDGE_GW_CONTROL_PLANE_URL` is set | Caps how many client connections one org can have relayed *simultaneously* — unlike the rate limits above, this bounds the standing total, so one org holding many connections open indefinitely can't exhaust the gateway process's goroutines/file descriptors at every other org's expense. |
-| `SKYBRIDGE_GW_AGENT_CONN_PER_MIN` | unset (no limit) | Caps agent *registration* attempts per client IP per minute — separate from the client-facing limits above; throttles how fast the agent listener's bearer-token check (`SKYBRIDGE_GW_TOKEN`) can be probed. |
+| `SKYBRIDGE_GW_AGENT_CONN_PER_MIN` | unset (no limit) | Caps agent *registration* attempts per client IP per minute — separate from the client-facing limits above; throttles how fast the agent listener's mTLS handshake (`SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM`, required — there is no bearer-token mode) can be probed. |
 
 Everything else in `internal/config/config.go` (TLS, credential exchange, enrollment) is
 correctness/security configuration, not a performance knob.
@@ -745,13 +752,18 @@ until it's actually close to expiry.
 
 #### Keeping mTLS identity alive across redeploys
 
-⚠️ **On ECS/Fargate, a plain `SKYBRIDGE_TLS_DIR` cache does not survive a redeploy.** Any task
-replacement (new image, new task definition, a CPU/memory bump — anything that spins up a fresh
-task) wipes that disk. Since `SKYBRIDGE_ENROLLMENT_TOKEN` is **single-use**, the new task can't just
-re-enroll: the token was already consumed by the task it replaced, and the deploy fails.
+⚠️ **On any platform that gives you ephemeral local disk — ECS/Fargate, EKS/Kubernetes pods, or
+similar — a plain `SKYBRIDGE_TLS_DIR` cache does not survive a redeploy.** Any replacement (a new
+ECS task from a new image/task definition or a CPU/memory bump, or a Kubernetes pod rescheduled by a
+rollout, node drain, or eviction — anything that spins up a fresh instance) wipes that disk. Since
+`SKYBRIDGE_ENROLLMENT_TOKEN` is **single-use**, the replacement can't just re-enroll: the token was
+already consumed by the instance it replaced, and the deploy fails.
 
-**Fix:** point the edge at an AWS Secrets Manager secret and it will keep its identity there too,
-so a replacement task picks up right where the old one left off — no new token required.
+**Fix 1 (cache the cert):** point the edge at an AWS Secrets Manager secret and it will keep its
+identity there too, so a replacement task/pod picks up right where the old one left off — no new
+token required. This works the same way on EKS as on ECS/Fargate, as long as the pod's IAM role
+(e.g. via IRSA/Pod Identity) can reach Secrets Manager — `SKYBRIDGE_TLS_DIR` itself can stay
+ephemeral (`emptyDir` or container-local disk) either way.
 
 | Identity | Env var |
 |---|---|
@@ -762,6 +774,55 @@ so a replacement task picks up right where the old one left off — no new token
 Point one of these at a secret ARN the task's IAM role can `GetSecretValue`/`PutSecretValue` on
 (`internal/certstore`), and the edge mirrors its cert there on first enrollment, then loads from it
 on every subsequent start.
+
+**Fix 2 (skip the static token entirely — AWS IAM auth, 2026-08-12).** This is the stronger fix:
+instead of a human-minted, single-use `SKYBRIDGE_ENROLLMENT_TOKEN`, the edge presigns its own
+`sts:GetCallerIdentity` call with whatever ambient AWS credentials it already has — an ECS task
+role, or an EKS pod's IRSA/Pod Identity role — and exchanges that for a fresh enroll token from your
+control plane. Nothing is consumed by minting it, so it's safe to call on *every* restart — a
+redeployed task or rescheduled pod with a wiped disk just mints a new one instead of hitting the
+"token already used by the instance I'm replacing" failure.
+This is the same pattern behind Teleport's `iam` join method, HashiCorp Vault's `aws` auth method,
+and HashiCorp Boundary's KMS-registered workers: re-prove identity from a platform-native source on
+every boot rather than persisting a bootstrap secret.
+
+```sh
+SKYBRIDGE_IAM_AUTH=true \
+SKYBRIDGE_IAM_ENROLL_URL=https://api.example.com \
+go run ./cmd/skybridge edge
+```
+
+Covers both the connector (edge → Connector Gateway) and Studio (edge → Studio Gateway) identities
+in one flag; `internal/wiremtls` (agent → relay gateway tunnel) has its own equivalent,
+`SKYBRIDGE_WIRE_MTLS_IAM_AUTH` (paired with `SKYBRIDGE_WIRE_MTLS_ENROLL_URL`). The control plane
+must implement the corresponding server-side STS-replay verification — see `internal/edgeiam` for
+the exact request shape presigned and posted. Fix 1's Secrets Manager cache still applies on top of
+this: a cached, still-valid cert is always reused first, so Fix 2 only triggers a mint on an actual
+cache miss (first enrollment, or every identity provider's own cert TTL expiring).
+
+#### Reconnect resilience (2026-08-12)
+
+Both call-home clients (`internal/edge/transport` for the Connector Gateway, and
+`internal/edge/studiotransport` for the Studio Gateway) share the same reconnect design, matched
+to the same fixes on the Curlix-SaaS side (`docs/design/skybridge-masking-architecture.md` §10.5
+in the `curlix` repo):
+
+- **Jittered exponential backoff** (`jitteredBackoff`, `[d/2, d)`) on every reconnect, starting at
+  1s and doubling up to `Config.MaxBackoff` (default 30s) — avoids a thundering herd of edges
+  reconnecting to the same gateway in lockstep.
+- **Backoff only resets to baseline after a stable connection** (`backoffResetAfter`, 60s) — a
+  connection that connects and drops again immediately (bad keepalive, a flapping listener) keeps
+  the backoff ladder escalating instead of retrying at a 0-delay pace forever.
+- **Auth failures get a distinct, higher floor** (`authFailureBackoffFloor`, 120s) — an
+  `Unauthenticated` `Connect` error (expired/revoked credential) is a config problem, not a
+  transient blip; retrying at the ordinary backoff cadence would otherwise hammer the gateway
+  every few seconds until a human fixes the credential.
+- **`PreConnect` pre-flight** — before opening the full `Connect` stream, the client makes one
+  cheap unary `PreConnect` call. A gateway that's draining (redeploying) or has revoked this
+  identity answers `{ok: false, retry_after_seconds, reason}`, and the client sleeps that long
+  (jittered) before trying again — no failed stream handshake needed to find out. This is
+  advisory: a gateway that predates this RPC (or any transient error calling it) is treated as "go
+  ahead," so it never blocks a connection on its own.
 
 ### Docs
 

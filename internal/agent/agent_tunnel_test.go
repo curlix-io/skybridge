@@ -13,6 +13,7 @@ import (
 	"github.com/curlix-io/skybridge/internal/config"
 	"github.com/curlix-io/skybridge/internal/mask"
 	"github.com/curlix-io/skybridge/internal/tunnel"
+	"github.com/curlix-io/skybridge/internal/wire"
 )
 
 // fakeDialer returns a stub Dial func that hands back one end of an in-memory pipe, recording the
@@ -84,6 +85,85 @@ func TestServeTunnelConnServesOneStream(t *testing.T) {
 	}
 	if gotAddr != "db.internal:5432" {
 		t.Fatalf("expected dial to db.internal:5432, got %q", gotAddr)
+	}
+}
+
+// ctxCapturingEngine is a minimal wire.Engine test double whose Proxy just records the ctx it was
+// called with (used to prove serveStream attaches resource_role_id before invoking the engine —
+// see TestServeStreamAttachesResourceRoleIDToContext below), then returns immediately.
+type ctxCapturingEngine struct {
+	name      string
+	capturedC context.Context
+}
+
+func (e *ctxCapturingEngine) Name() string { return e.name }
+
+func (e *ctxCapturingEngine) Proxy(ctx context.Context, _, _ net.Conn, _ mask.Masker, _ wire.Recorder) error {
+	e.capturedC = ctx
+	return nil
+}
+
+func TestServeStreamAttachesResourceRoleIDToContext(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer serverEnd.Close()
+	clientSess := tunnel.Client(clientEnd)
+	defer clientSess.Close()
+	serverSess := tunnel.Server(serverEnd)
+	defer serverSess.Close()
+
+	meta := tunnel.OpenMeta{Addr: "db.internal:5432", DBType: "postgres", ResourceRoleID: "role-1"}
+	if _, err := clientSess.Open(meta.Encode()); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	st, err := serverSess.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	engine := &ctxCapturingEngine{name: "postgres"}
+	dialed := make(chan struct{})
+	deps := Deps{
+		Dial:   fakeDialer(new(string), dialed),
+		Engine: func(string) (wire.Engine, error) { return engine, nil },
+		Masker: mask.Noop{},
+	}
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if got := mask.ResourceRoleIDFromContext(engine.capturedC); got != "role-1" {
+		t.Fatalf("expected resource_role_id %q attached to the ctx passed to Engine.Proxy, got %q", "role-1", got)
+	}
+}
+
+func TestServeStreamNoResourceRoleIDLeavesContextUnset(t *testing.T) {
+	clientEnd, serverEnd := net.Pipe()
+	defer clientEnd.Close()
+	defer serverEnd.Close()
+	clientSess := tunnel.Client(clientEnd)
+	defer clientSess.Close()
+	serverSess := tunnel.Server(serverEnd)
+	defer serverSess.Close()
+
+	meta := tunnel.OpenMeta{Addr: "db.internal:5432", DBType: "postgres"}
+	if _, err := clientSess.Open(meta.Encode()); err != nil {
+		t.Fatalf("open: %v", err)
+	}
+	st, err := serverSess.Accept()
+	if err != nil {
+		t.Fatalf("accept: %v", err)
+	}
+
+	engine := &ctxCapturingEngine{name: "postgres"}
+	dialed := make(chan struct{})
+	deps := Deps{
+		Dial:   fakeDialer(new(string), dialed),
+		Engine: func(string) (wire.Engine, error) { return engine, nil },
+		Masker: mask.Noop{},
+	}
+	serveStream(context.Background(), st, serverSess, config.Agent{}, deps, slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if got := mask.ResourceRoleIDFromContext(engine.capturedC); got != "" {
+		t.Fatalf("expected no resource_role_id attached, got %q", got)
 	}
 }
 
