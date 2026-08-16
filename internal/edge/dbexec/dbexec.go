@@ -124,6 +124,12 @@ func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (
 // EnforceReadOnly — the statement runs exactly as given via dbquery.Options{Write: true}. Curlix's
 // allow/deny decision, made before this call was dispatched, is the only gate; the edge does not
 // re-derive it from the statement's shape.
+//
+// A "dry_run" arg (default false) short-circuits before dbquery.Execute: the target/args are still
+// resolved and validated (so a genuine "no local target" error still surfaces), but no statement
+// ever reaches the database. Mirrors studiotransport's existing ExecuteAssignment.DryRun behavior
+// for the Studio Gateway session path — this is the equivalent for the Connector Gateway dispatch
+// path db_execute_write runs on.
 func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Result, error) {
 	dbType := strArg(args, "db_type")
 	database := strArg(args, "database")
@@ -136,6 +142,17 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 	target, ok := dbquery.Resolve(e.opts.Targets, dbType, scope, database)
 	if !ok {
 		return edge.ErrorResult(ToolDBExecuteWrite, fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
+	}
+
+	if boolArg(args, "dry_run", false) {
+		return edge.Result{
+			"ok":     true,
+			"tool":   ToolDBExecuteWrite,
+			"status": "dry_run",
+			"results": map[string]any{
+				"message": "validated locally, not executed",
+			},
+		}, nil
 	}
 
 	raw, err := dbquery.Execute(ctx, target, dbType, database, statement, dbquery.Options{
