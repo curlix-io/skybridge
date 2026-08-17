@@ -16,13 +16,6 @@ type Target struct {
 	Host         string `json:"host"`
 	User         string `json:"user,omitempty"`
 	Password     string `json:"password,omitempty"`
-	// DSN carries a full connection URI when the target can't be decomposed into Host/User/
-	// Password -- currently only populated for Mongo (replica-set members, mongodb+srv://
-	// DNS-seedlist scheme, and auth/topology query params don't survive that decomposition,
-	// unlike Postgres/MySQL DSNs). When set, executeMongo uses it directly instead of building a
-	// URI from Host/User/Password. See docs/design/skybridge-dynamic-connection-catalog.md
-	// (Curlix backend repo) for the per-call override this is populated from.
-	DSN string `json:"dsn,omitempty"`
 	SSLMode      string `json:"sslmode,omitempty"` // postgres
 	Name         string `json:"name,omitempty"`    // optional logical name (wire targets)
 	// Snowflake-only: Host carries the account locator (e.g. "xy12345.us-east-1"), not a
