@@ -28,6 +28,7 @@ import (
 	connectorv1 "github.com/curlix-io/skybridge/internal/genpb/curlix/connector/v1"
 
 	"github.com/curlix-io/skybridge/internal/edge"
+	"github.com/curlix-io/skybridge/internal/edge/dbquery"
 )
 
 // jitteredBackoff returns a random duration in [d/2, d) so many edges losing the same gateway at
@@ -91,6 +92,11 @@ type Config struct {
 	EnrollTarget      string // Enroll endpoint host:port (defaults to Target)
 	EnrollToken       string // one-time enrollment token (needed to obtain the first cert)
 	TrustDomain       string // SPIFFE trust domain placed in the CSR SAN (cosmetic; default skybridge.edge)
+
+	// Targets is the same configured database target list dbexec/studiotransport use (from
+	// SKYBRIDGE_STUDIO_TARGETS, merged with any wire-proxy targets) — metadata discovery resolves
+	// an incoming account_key/driver/database triple against this list rather than opening its own.
+	Targets []dbquery.Target
 
 	// IamAuthEnabled, when true, mints its own enroll token by presigning sts:GetCallerIdentity
 	// with the edge's ambient AWS credentials (an ECS task role, in production) instead of relying
@@ -469,16 +475,11 @@ func (c *Client) handleMetadataDiscovery(ctx context.Context, ss *safeStream, re
 // discoverMetadata resolves a target and discovers its database schema metadata.
 // It delegates to the dbquery package for driver-specific implementation.
 func (c *Client) discoverMetadata(ctx context.Context, driver, database, accountKey string) ([]*connectorv1.DatabaseObject, error) {
-	// TODO: Implement target resolution. The edge should:
-	// 1. Load configured targets (from env var SKYBRIDGE_STUDIO_TARGETS or similar)
-	// 2. Resolve accountKey (AWS account ID) + driver + database to a Target
-	//    using: dbquery.Resolve(targets, driver, accountKey, database)
-	// 3. Call: dbquery.DiscoverDatabaseMetadata(ctx, driver, target, database)
-	// 4. Return the discovered objects or error
-	//
-	// For now, return a placeholder indicating this needs to be wired to target configuration.
-
-	return nil, fmt.Errorf("metadata discovery: need to wire target resolution from edge config")
+	target, ok := dbquery.Resolve(c.cfg.Targets, driver, accountKey, database)
+	if !ok {
+		return nil, fmt.Errorf("metadata discovery: no configured target for driver=%s account=%s database=%s", driver, accountKey, database)
+	}
+	return dbquery.DiscoverDatabaseMetadata(ctx, driver, target, database)
 }
 
 // safeStream serializes Send across goroutines (grpc-go forbids concurrent SendMsg on one stream).

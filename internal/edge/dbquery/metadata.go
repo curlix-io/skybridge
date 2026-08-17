@@ -64,11 +64,6 @@ func discoverPostgresMetadata(ctx context.Context, target Target, database strin
 	}
 	defer db.Close()
 
-	// Set connection timeout
-	if err := db.PingContext(ctx); err != nil {
-		return nil, err
-	}
-
 	// Query to get tables, views, materialized views, and sequences
 	query := `
 		SELECT
@@ -117,7 +112,7 @@ func discoverMysqlMetadata(ctx context.Context, target Target, database string) 
 		host = host + ":3306"
 	}
 
-	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&timeout=30s",
+	dsn := fmt.Sprintf("%s:%s@tcp(%s)/%s?parseTime=true&timeout=30s&interpolateParams=true",
 		urlEscape(user), urlEscape(pass), host, database)
 
 	db, err := sql.Open("mysql", dsn)
@@ -125,11 +120,6 @@ func discoverMysqlMetadata(ctx context.Context, target Target, database string) 
 		return nil, err
 	}
 	defer db.Close()
-
-	// Set connection timeout
-	if err := db.PingContext(ctx); err != nil {
-		return nil, err
-	}
 
 	// Query to get tables and views
 	query := `
@@ -193,11 +183,6 @@ func discoverMongoMetadata(ctx context.Context, target Target, database string) 
 		return nil, err
 	}
 	defer client.Disconnect(ctx)
-
-	// Ping to verify connection
-	if err := client.Ping(ctx, nil); err != nil {
-		return nil, err
-	}
 
 	db := client.Database(database)
 

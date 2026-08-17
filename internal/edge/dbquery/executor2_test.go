@@ -136,6 +136,20 @@ func TestExecuteMongoDialsWithCancelledContext(t *testing.T) {
 	}
 }
 
+// TestExecuteMongoPingReachesRunCommandNotFindOrAggregate proves the "ping" statement dials
+// (unlike TestExecuteMongoBadStatementNeverDials's unparseable-statement case, which never
+// reaches a dial at all) via RunCommand — an unreachable host still surfaces a real dial/server-
+// selection error rather than a "no local target"/parse error, and it does so with no collection
+// set on the target (see TestParseMongoStatementPing), which coll.Find/Aggregate would need.
+func TestExecuteMongoPingReachesRunCommandNotFindOrAggregate(t *testing.T) {
+	ctx, cancel := context.WithTimeout(context.Background(), 150*time.Millisecond)
+	defer cancel()
+	_, err := Execute(ctx, Target{Host: "127.0.0.1:1"}, "mongo", "db", "ping", Options{})
+	if err == nil {
+		t.Fatal("expected a server-selection error against an unreachable host")
+	}
+}
+
 // TestExecuteDatabaseNameFallsBackToTargetDatabaseName exercises the "database == ”" branch in
 // every executor's dbName resolution (they all fall back to target.DatabaseName). Using an empty
 // database string with postgres against a cancelled context proves the fallback path runs (a host

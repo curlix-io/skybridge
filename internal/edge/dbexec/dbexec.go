@@ -36,11 +36,17 @@ type Options struct {
 	// OrgID scopes path-/table-aware masking labels (see dbquery.Options.OrgID). Empty disables
 	// that scoping without otherwise affecting masking.
 	OrgID string
+	// IdempotencyTTL / IdempotencyMaxEntries bound runWrite's idempotency-key cache (see
+	// idempotency.go). Zero/negative values fall back to defaultIdempotencyTTL /
+	// defaultIdempotencyMaxEntries in newIdempotencyCache.
+	IdempotencyTTL        time.Duration
+	IdempotencyMaxEntries int
 }
 
 // Executor runs one-shot DB statements for POST /studio/exec (Design B).
 type Executor struct {
 	opts Options
+	idem *idempotencyCache
 }
 
 // New builds an Executor with defaults applied.
@@ -51,7 +57,10 @@ func New(opts Options) Executor {
 	if opts.QueryTimeout <= 0 {
 		opts.QueryTimeout = 60 * time.Second
 	}
-	return Executor{opts: opts}
+	return Executor{
+		opts: opts,
+		idem: newIdempotencyCache(opts.IdempotencyTTL, opts.IdempotencyMaxEntries),
+	}
 }
 
 // Register wires db_query_{postgres,mysql,mongo,snowflake} and db_execute_write into the edge
@@ -91,7 +100,7 @@ func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (
 	readOnly := boolArg(args, "read_only", true)
 	maxRows := intArg(args, "max_rows", e.opts.MaxRows)
 
-	target, ok := e.resolveTarget(args, dbType, scope, database)
+	target, ok := resolveTarget(e.opts.Targets, dbType, scope, database, args)
 	if !ok {
 		return edge.ErrorResult(toolName(dbType), fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
 	}
@@ -124,6 +133,12 @@ func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (
 // EnforceReadOnly — the statement runs exactly as given via dbquery.Options{Write: true}. Curlix's
 // allow/deny decision, made before this call was dispatched, is the only gate; the edge does not
 // re-derive it from the statement's shape.
+//
+// A "dry_run" arg (default false) short-circuits before dbquery.Execute: the target/args are still
+// resolved and validated (so a genuine "no local target" error still surfaces), but no statement
+// ever reaches the database. Mirrors studiotransport's existing ExecuteAssignment.DryRun behavior
+// for the Studio Gateway session path — this is the equivalent for the Connector Gateway dispatch
+// path db_execute_write runs on.
 func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Result, error) {
 	dbType := strArg(args, "db_type")
 	database := strArg(args, "database")
@@ -133,9 +148,36 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 		return edge.ErrorResult(ToolDBExecuteWrite, "db_type, database and statement are required"), nil
 	}
 
-	target, ok := e.resolveTarget(args, dbType, scope, database)
+	// Idempotency-Key (see idempotency.go and root CLAUDE.md's "dry_run + Idempotency-Key on
+	// sensitive writes" rule): a retry carrying the same key as a prior successful call returns
+	// that call's result without re-executing — checked before target resolution so a cache hit
+	// never depends on the target still being resolvable. Absent key skips this entirely — dedup
+	// is opt-in per call, not a default the caller can't turn off.
+	idemKey := strArg(args, "idempotency_key")
+	var idemHash string
+	if idemKey != "" {
+		idemHash = requestHash(dbType, database, statement)
+		if cached, hit, conflict := e.idem.get(idemKey, idemHash); hit {
+			return cached, nil
+		} else if conflict {
+			return edge.ErrorResult(ToolDBExecuteWrite, "idempotency_key reused with a different db_type/database/statement"), nil
+		}
+	}
+
+	target, ok := resolveTarget(e.opts.Targets, dbType, scope, database, args)
 	if !ok {
 		return edge.ErrorResult(ToolDBExecuteWrite, fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
+	}
+
+	if boolArg(args, "dry_run", false) {
+		return edge.Result{
+			"ok":     true,
+			"tool":   ToolDBExecuteWrite,
+			"status": "dry_run",
+			"results": map[string]any{
+				"message": "validated locally, not executed",
+			},
+		}, nil
 	}
 
 	raw, err := dbquery.Execute(ctx, target, dbType, database, statement, dbquery.Options{
@@ -150,64 +192,31 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 	}
 
 	results, _ := raw["results"].(map[string]any)
-	return edge.Result{
+	result := edge.Result{
 		"ok":      true,
 		"tool":    ToolDBExecuteWrite,
 		"results": results,
-	}, nil
+	}
+	if idemKey != "" {
+		e.idem.put(idemKey, idemHash, result)
+	}
+	return result, nil
 }
 
-// resolveTarget tries the per-call dynamic connection push (args["connection"], pushed by the
-// SaaS backend per docs/design/skybridge-dynamic-connection-catalog.md) before falling back to
-// the static Targets list. This restores support for connections that resolve dynamically from
-// the org's Data sources config instead of a CloudFormation-time SKYBRIDGE_STUDIO_TARGETS entry
-// -- previously "connection" was accepted by the SaaS side but silently discarded here, so any
-// connection without a static target entry failed with "no local target" even though the caller
-// supplied one, no rollout/fallback ever actually worked.
-func (e Executor) resolveTarget(args map[string]any, dbType, scope, database string) (dbquery.Target, bool) {
-	if target, ok := targetFromOverride(args, dbType); ok {
-		return target, true
-	}
-	return dbquery.Resolve(e.opts.Targets, dbType, scope, database)
-}
-
-// targetFromOverride builds a dbquery.Target from the pushed connection override shape:
-//
-//	{"host": "...", "port": 5432, "credential": {"mode": "static", "user": "...", "secret": "..."}}
-//
-// Mongo overrides may instead (or additionally) carry a full "dsn" -- replica-set members,
-// mongodb+srv:// DNS-seedlist scheme, and auth/topology query params don't survive a host/port/
-// user/pass decomposition, unlike Postgres/MySQL DSNs -- in which case Host/credential are
-// populated best-effort but DSN takes priority (see dbquery.executeMongo).
-//
-// Returns ok=false when no override was supplied or it carries neither a host nor a dsn, so
-// callers fall back to the static Targets list unconditionally -- never a hard error, matching
-// the rollout/compat posture the design doc calls for.
-func targetFromOverride(args map[string]any, dbType string) (dbquery.Target, bool) {
-	raw, ok := args["connection"]
-	if !ok || raw == nil {
-		return dbquery.Target{}, false
-	}
-	conn, ok := raw.(map[string]any)
-	if !ok {
-		return dbquery.Target{}, false
-	}
-	dsn := strArg(conn, "dsn")
-	host := strArg(conn, "host")
-	if host == "" && dsn == "" {
-		return dbquery.Target{}, false
-	}
-	if host != "" {
-		if port := intArg(conn, "port", 0); port > 0 {
-			host = fmt.Sprintf("%s:%d", host, port)
+// resolveTarget prefers a per-call "connection" override (see dbquery.TargetFromOverride) pushed
+// alongside the dispatch over the connector's static Targets list — this is what lets a database
+// the control plane resolved fresh (e.g. one added after the connector's last deploy, or one
+// identified by a Data-sources connection name rather than a static aws_account_id/database_name
+// pair) actually work, instead of always requiring a matching static-target entry. Falls back to
+// dbquery.Resolve when no valid override is present, so a connector relying purely on static
+// Targets/SKYBRIDGE_STUDIO_TARGETS config is unaffected.
+func resolveTarget(targets []dbquery.Target, dbType, scope, database string, args map[string]any) (dbquery.Target, bool) {
+	if conn, ok := args["connection"].(map[string]any); ok {
+		if t, ok := dbquery.TargetFromOverride(dbType, database, conn); ok {
+			return t, true
 		}
 	}
-	target := dbquery.Target{DBType: dbType, Host: host, DSN: dsn}
-	if cred, ok := conn["credential"].(map[string]any); ok {
-		target.User = strArg(cred, "user")
-		target.Password = strArg(cred, "secret")
-	}
-	return target, true
+	return dbquery.Resolve(targets, dbType, scope, database)
 }
 
 func toolName(dbType string) string {

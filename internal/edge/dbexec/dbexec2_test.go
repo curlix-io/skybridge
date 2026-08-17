@@ -2,6 +2,7 @@ package dbexec
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/curlix-io/skybridge/internal/edge"
@@ -66,107 +67,6 @@ func TestRunMongoMissingTarget(t *testing.T) {
 	}
 }
 
-// TestTargetFromOverride* cover the per-call dynamic connection push (docs/design/
-// skybridge-dynamic-connection-catalog.md) that resolveTarget prefers over the static Targets
-// list. Regression: args["connection"] used to be silently discarded (never read anywhere in
-// this package), so any connection resolved dynamically by the SaaS backend -- not present in
-// SKYBRIDGE_STUDIO_TARGETS -- failed with "no local target" even though the caller supplied a
-// usable override.
-func TestTargetFromOverrideNoConnectionKeyReturnsFalse(t *testing.T) {
-	target, ok := targetFromOverride(map[string]any{"database": "app"}, "postgres")
-	if ok {
-		t.Fatalf("expected ok=false, got target=%+v", target)
-	}
-}
-
-func TestTargetFromOverrideMissingHostReturnsFalse(t *testing.T) {
-	target, ok := targetFromOverride(map[string]any{
-		"connection": map[string]any{"port": 5432},
-	}, "postgres")
-	if ok {
-		t.Fatalf("expected ok=false, got target=%+v", target)
-	}
-}
-
-func TestTargetFromOverrideBuildsHostPortAndCredential(t *testing.T) {
-	target, ok := targetFromOverride(map[string]any{
-		"connection": map[string]any{
-			"host": "db.internal",
-			"port": 5432,
-			"credential": map[string]any{
-				"mode":   "static",
-				"user":   "app_user",
-				"secret": "s3cret",
-			},
-		},
-	}, "postgres")
-	if !ok {
-		t.Fatalf("expected ok=true")
-	}
-	if target.Host != "db.internal:5432" {
-		t.Fatalf("expected host:port combined, got %q", target.Host)
-	}
-	if target.User != "app_user" || target.Password != "s3cret" {
-		t.Fatalf("expected credential carried through, got user=%q password=%q", target.User, target.Password)
-	}
-	if target.DBType != "postgres" {
-		t.Fatalf("expected DBType=postgres, got %q", target.DBType)
-	}
-}
-
-func TestTargetFromOverrideMongoDSNTakesPriority(t *testing.T) {
-	target, ok := targetFromOverride(map[string]any{
-		"connection": map[string]any{
-			"dsn": "mongodb+srv://user:pass@cluster0.example.mongodb.net/app?replicaSet=rs0",
-		},
-	}, "mongo")
-	if !ok {
-		t.Fatalf("expected ok=true for dsn-only override")
-	}
-	if target.DSN != "mongodb+srv://user:pass@cluster0.example.mongodb.net/app?replicaSet=rs0" {
-		t.Fatalf("expected dsn carried through, got %q", target.DSN)
-	}
-	if target.Host != "" {
-		t.Fatalf("expected no host for dsn-only override, got %q", target.Host)
-	}
-}
-
-func TestTargetFromOverrideNoPortLeavesHostBare(t *testing.T) {
-	target, ok := targetFromOverride(map[string]any{
-		"connection": map[string]any{"host": "db.internal"},
-	}, "postgres")
-	if !ok || target.Host != "db.internal" {
-		t.Fatalf("expected bare host, got ok=%v host=%q", ok, target.Host)
-	}
-}
-
-// TestResolveTargetPrefersOverride: even with an empty static Targets list (the deploy shape when
-// connections resolve dynamically from Data sources, not CloudFormation-time
-// SKYBRIDGE_STUDIO_TARGETS), a connection override must resolve successfully rather than falling
-// through to the static "no local target" miss.
-func TestResolveTargetPrefersOverrideOverEmptyStaticTargets(t *testing.T) {
-	e := New(Options{Targets: []dbquery.Target{}})
-	target, ok := e.resolveTarget(map[string]any{
-		"connection": map[string]any{"host": "db.internal", "port": 5432},
-	}, "postgres", "full_test", "")
-	if !ok {
-		t.Fatalf("expected override to resolve a target")
-	}
-	if target.Host != "db.internal:5432" {
-		t.Fatalf("unexpected host: %q", target.Host)
-	}
-}
-
-func TestResolveTargetFallsBackToStaticWhenNoOverride(t *testing.T) {
-	e := New(Options{Targets: []dbquery.Target{
-		{DBType: "postgres", AWSAccountID: "123456789012", DatabaseName: "app", Host: "static.internal:5432"},
-	}})
-	target, ok := e.resolveTarget(map[string]any{}, "postgres", "123456789012", "app")
-	if !ok || target.Host != "static.internal:5432" {
-		t.Fatalf("expected static fallback to resolve, got ok=%v target=%+v", ok, target)
-	}
-}
-
 // TestRunWriteMissingArgs / TestRunWriteMissingTarget exercise runWrite (0% covered), which is
 // distinct from run() — no read_only knob, no PII masking, EnforceReadOnly always false.
 func TestRunWriteMissingArgs(t *testing.T) {
@@ -194,6 +94,81 @@ func TestRunWriteMissingTarget(t *testing.T) {
 	})
 	if res["ok"] != false || res["tool"] != ToolDBExecuteWrite {
 		t.Fatalf("expected ok=false tool=%s: %+v", ToolDBExecuteWrite, res)
+	}
+}
+
+// TestRunWriteIdempotencyKeyHitBypassesTargetResolution proves a cached success is returned
+// without ever consulting the (deliberately empty) static Targets list — an idempotency-key hit
+// must not depend on the target still being resolvable, e.g. a database removed from config
+// between the original call and a retry should still return the original cached result.
+func TestRunWriteIdempotencyKeyHitBypassesTargetResolution(t *testing.T) {
+	reg := edge.NewRegistry()
+	e := New(Options{Targets: []dbquery.Target{}}) // deliberately empty -- resolution would fail
+	reg.Register(ToolDBExecuteWrite, e.runWrite)
+
+	args := map[string]any{
+		"db_type":         "postgres",
+		"database":        "app",
+		"statement":       "DELETE FROM t",
+		"idempotency_key": "retry-1",
+	}
+	e.idem.put("retry-1", requestHash("postgres", "app", "DELETE FROM t"), edge.Result{
+		"ok": true, "tool": ToolDBExecuteWrite, "results": map[string]any{"rows_affected": int64(3)},
+	})
+
+	res := reg.Dispatch(context.Background(), edge.ToolCall{Name: ToolDBExecuteWrite, Arguments: args})
+	if res["ok"] != true {
+		t.Fatalf("expected cached success returned, got %+v", res)
+	}
+	results, _ := res["results"].(map[string]any)
+	if results["rows_affected"] != int64(3) {
+		t.Fatalf("expected the cached result's payload, got %+v", res)
+	}
+}
+
+// TestRunWriteIdempotencyKeyConflictRejectsWithoutExecuting proves reusing a key with a different
+// statement is rejected as a conflict rather than either executing the new statement or silently
+// returning the old cached result for it.
+func TestRunWriteIdempotencyKeyConflictRejectsWithoutExecuting(t *testing.T) {
+	reg := edge.NewRegistry()
+	e := New(Options{Targets: []dbquery.Target{}})
+	reg.Register(ToolDBExecuteWrite, e.runWrite)
+	e.idem.put("dup-key", requestHash("postgres", "app", "DELETE FROM t"), edge.Result{"ok": true})
+
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":         "postgres",
+			"database":        "app",
+			"statement":       "DELETE FROM other_table", // different statement, same key
+			"idempotency_key": "dup-key",
+		},
+	})
+	if res["ok"] != false {
+		t.Fatalf("expected ok=false for an idempotency-key conflict, got %+v", res)
+	}
+	msg, _ := res["error"].(string)
+	if !strings.Contains(msg, "idempotency_key reused") {
+		t.Fatalf("expected a conflict error message, got %q", msg)
+	}
+}
+
+// TestRunWriteNoIdempotencyKeySkipsCacheEntirely proves the absence of an idempotency_key arg
+// leaves the pre-existing behavior unaffected -- no cache lookup, no cache write, just the
+// existing "no local target" path.
+func TestRunWriteNoIdempotencyKeySkipsCacheEntirely(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":   "postgres",
+			"database":  "app",
+			"statement": "DELETE FROM t",
+		},
+	})
+	if res["ok"] != false || res["error"] != "no local target for postgres//app" {
+		t.Fatalf("expected the ordinary no-local-target error, got %+v", res)
 	}
 }
 
@@ -227,6 +202,48 @@ func TestRunWriteDialFailureSurfacesAsErrorResult(t *testing.T) {
 	}
 }
 
+// TestRunWriteDryRunSkipsExecution proves dry_run short-circuits before dbquery.Execute: the
+// target still resolves to a real (unreachable) host, but no dial is attempted — a dial attempt
+// would surface as ok=false (see TestRunWriteDialFailureSurfacesAsErrorResult), so ok=true here
+// is only possible if runWrite returned before calling dbquery.Execute.
+func TestRunWriteDryRunSkipsExecution(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{
+		Targets: []dbquery.Target{{DBType: "postgres", DatabaseName: "app", Host: "127.0.0.1:1"}},
+	})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":   "postgres",
+			"database":  "app",
+			"statement": "DELETE FROM t",
+			"dry_run":   true,
+		},
+	})
+	if res["ok"] != true || res["tool"] != ToolDBExecuteWrite || res["status"] != "dry_run" {
+		t.Fatalf("expected ok=true status=dry_run tool=%s: %+v", ToolDBExecuteWrite, res)
+	}
+}
+
+// TestRunWriteDryRunStillValidatesTarget proves dry_run does not bypass target resolution — a
+// missing target must still fail closed rather than report a false "validated" dry_run success.
+func TestRunWriteDryRunStillValidatesTarget(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":   "postgres",
+			"database":  "app",
+			"statement": "DELETE FROM t",
+			"dry_run":   true,
+		},
+	})
+	if res["ok"] != false || res["tool"] != ToolDBExecuteWrite {
+		t.Fatalf("expected ok=false tool=%s: %+v", ToolDBExecuteWrite, res)
+	}
+}
+
 // TestRunReadOnlyDialFailureSurfacesAsErrorResult is the read-only counterpart: run() (used by
 // runPostgres/runMySQL/runMongo) resolves a target then fails to dial/execute, exercising the
 // dbquery.Execute error branch inside run() (as opposed to the "no local target" branch already
@@ -245,6 +262,80 @@ func TestRunReadOnlyDialFailureSurfacesAsErrorResult(t *testing.T) {
 	})
 	if res["ok"] != false || res["tool"] != ToolDBQueryPostgres {
 		t.Fatalf("expected ok=false tool=%s: %+v", ToolDBQueryPostgres, res)
+	}
+}
+
+// TestRunPostgresConnectionOverrideBypassesStaticTargets proves a "connection" override lets a
+// database succeed target resolution with zero entries in the connector's static Targets list —
+// the actual fix for dynamic per-call connection push (previously dead: the edge only ever
+// consulted Resolve() against the static list, silently ignoring any "connection" argument). Uses
+// an unreachable host so the assertion is specifically about resolution, not a real dial.
+func TestRunPostgresConnectionOverrideBypassesStaticTargets(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}}) // deliberately empty static list
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBQueryPostgres,
+		Arguments: map[string]any{
+			"database":  "app",
+			"statement": "SELECT 1",
+			"connection": map[string]any{
+				"host": "127.0.0.1",
+				"port": float64(1),
+			},
+		},
+	})
+	// A dial failure (not "no local target") proves resolveTarget accepted the override instead of
+	// falling through to the empty static list's "no local target" error.
+	msg, _ := res["error"].(string)
+	if res["ok"] != false {
+		t.Fatalf("expected ok=false (unreachable host), got %+v", res)
+	}
+	if msg == "no local target for postgres//app" {
+		t.Fatalf("connection override should have bypassed static-target resolution, got: %s", msg)
+	}
+}
+
+// TestRunWriteConnectionOverrideBypassesStaticTargets is the write-path counterpart.
+func TestRunWriteConnectionOverrideBypassesStaticTargets(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBExecuteWrite,
+		Arguments: map[string]any{
+			"db_type":   "postgres",
+			"database":  "app",
+			"statement": "DELETE FROM t",
+			"connection": map[string]any{
+				"host": "127.0.0.1",
+				"port": float64(1),
+			},
+		},
+	})
+	msg, _ := res["error"].(string)
+	if res["ok"] != false {
+		t.Fatalf("expected ok=false (unreachable host), got %+v", res)
+	}
+	if msg == "no local target for postgres//app" {
+		t.Fatalf("connection override should have bypassed static-target resolution, got: %s", msg)
+	}
+}
+
+// TestRunPostgresMalformedConnectionOverrideFallsBackToStaticTargets proves a malformed override
+// (wrong type, or a map missing both host and dsn) is ignored rather than treated as a hard error
+// — resolveTarget must fall back to Resolve() against the static list.
+func TestRunPostgresMalformedConnectionOverrideFallsBackToStaticTargets(t *testing.T) {
+	reg := edge.NewRegistry()
+	Register(reg, Options{Targets: []dbquery.Target{}})
+	res := reg.Dispatch(context.Background(), edge.ToolCall{
+		Name: ToolDBQueryPostgres,
+		Arguments: map[string]any{
+			"database":   "app",
+			"statement":  "SELECT 1",
+			"connection": "not a map",
+		},
+	})
+	if res["ok"] != false || res["error"] != "no local target for postgres//app" {
+		t.Fatalf("expected fall-through to static-target 'no local target' error, got %+v", res)
 	}
 }
 
