@@ -92,18 +92,21 @@ func executeMongo(ctx context.Context, target Target, database, stmt string, opt
 	if err != nil {
 		return nil, err
 	}
-	user, pass := creds(target, opts.FallbackUser, opts.FallbackPassword)
-	host := strings.TrimSpace(target.Host)
-	if host == "" {
-		return nil, fmt.Errorf("mongo target missing host")
-	}
 	dbName := strings.TrimSpace(database)
 	if dbName == "" {
 		dbName = strings.TrimSpace(target.DatabaseName)
 	}
-	uri := fmt.Sprintf("mongodb://%s:%s@%s/%s", urlEscape(user), urlEscape(pass), host, dbName)
-	if user == "" && pass == "" {
-		uri = fmt.Sprintf("mongodb://%s/%s", host, dbName)
+	uri := strings.TrimSpace(target.DSN)
+	if uri == "" {
+		user, pass := creds(target, opts.FallbackUser, opts.FallbackPassword)
+		host := strings.TrimSpace(target.Host)
+		if host == "" {
+			return nil, fmt.Errorf("mongo target missing host")
+		}
+		uri = fmt.Sprintf("mongodb://%s:%s@%s/%s", urlEscape(user), urlEscape(pass), host, dbName)
+		if user == "" && pass == "" {
+			uri = fmt.Sprintf("mongodb://%s/%s", host, dbName)
+		}
 	}
 	clientOpts := options.Client().ApplyURI(uri).SetConnectTimeout(15 * time.Second)
 	client, err := mongo.Connect(ctx, clientOpts)

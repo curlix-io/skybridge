@@ -91,7 +91,7 @@ func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (
 	readOnly := boolArg(args, "read_only", true)
 	maxRows := intArg(args, "max_rows", e.opts.MaxRows)
 
-	target, ok := dbquery.Resolve(e.opts.Targets, dbType, scope, database)
+	target, ok := e.resolveTarget(args, dbType, scope, database)
 	if !ok {
 		return edge.ErrorResult(toolName(dbType), fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
 	}
@@ -133,7 +133,7 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 		return edge.ErrorResult(ToolDBExecuteWrite, "db_type, database and statement are required"), nil
 	}
 
-	target, ok := dbquery.Resolve(e.opts.Targets, dbType, scope, database)
+	target, ok := e.resolveTarget(args, dbType, scope, database)
 	if !ok {
 		return edge.ErrorResult(ToolDBExecuteWrite, fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
 	}
@@ -155,6 +155,59 @@ func (e Executor) runWrite(ctx context.Context, args map[string]any) (edge.Resul
 		"tool":    ToolDBExecuteWrite,
 		"results": results,
 	}, nil
+}
+
+// resolveTarget tries the per-call dynamic connection push (args["connection"], pushed by the
+// SaaS backend per docs/design/skybridge-dynamic-connection-catalog.md) before falling back to
+// the static Targets list. This restores support for connections that resolve dynamically from
+// the org's Data sources config instead of a CloudFormation-time SKYBRIDGE_STUDIO_TARGETS entry
+// -- previously "connection" was accepted by the SaaS side but silently discarded here, so any
+// connection without a static target entry failed with "no local target" even though the caller
+// supplied one, no rollout/fallback ever actually worked.
+func (e Executor) resolveTarget(args map[string]any, dbType, scope, database string) (dbquery.Target, bool) {
+	if target, ok := targetFromOverride(args, dbType); ok {
+		return target, true
+	}
+	return dbquery.Resolve(e.opts.Targets, dbType, scope, database)
+}
+
+// targetFromOverride builds a dbquery.Target from the pushed connection override shape:
+//
+//	{"host": "...", "port": 5432, "credential": {"mode": "static", "user": "...", "secret": "..."}}
+//
+// Mongo overrides may instead (or additionally) carry a full "dsn" -- replica-set members,
+// mongodb+srv:// DNS-seedlist scheme, and auth/topology query params don't survive a host/port/
+// user/pass decomposition, unlike Postgres/MySQL DSNs -- in which case Host/credential are
+// populated best-effort but DSN takes priority (see dbquery.executeMongo).
+//
+// Returns ok=false when no override was supplied or it carries neither a host nor a dsn, so
+// callers fall back to the static Targets list unconditionally -- never a hard error, matching
+// the rollout/compat posture the design doc calls for.
+func targetFromOverride(args map[string]any, dbType string) (dbquery.Target, bool) {
+	raw, ok := args["connection"]
+	if !ok || raw == nil {
+		return dbquery.Target{}, false
+	}
+	conn, ok := raw.(map[string]any)
+	if !ok {
+		return dbquery.Target{}, false
+	}
+	dsn := strArg(conn, "dsn")
+	host := strArg(conn, "host")
+	if host == "" && dsn == "" {
+		return dbquery.Target{}, false
+	}
+	if host != "" {
+		if port := intArg(conn, "port", 0); port > 0 {
+			host = fmt.Sprintf("%s:%d", host, port)
+		}
+	}
+	target := dbquery.Target{DBType: dbType, Host: host, DSN: dsn}
+	if cred, ok := conn["credential"].(map[string]any); ok {
+		target.User = strArg(cred, "user")
+		target.Password = strArg(cred, "secret")
+	}
+	return target, true
 }
 
 func toolName(dbType string) string {

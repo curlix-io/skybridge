@@ -66,6 +66,107 @@ func TestRunMongoMissingTarget(t *testing.T) {
 	}
 }
 
+// TestTargetFromOverride* cover the per-call dynamic connection push (docs/design/
+// skybridge-dynamic-connection-catalog.md) that resolveTarget prefers over the static Targets
+// list. Regression: args["connection"] used to be silently discarded (never read anywhere in
+// this package), so any connection resolved dynamically by the SaaS backend -- not present in
+// SKYBRIDGE_STUDIO_TARGETS -- failed with "no local target" even though the caller supplied a
+// usable override.
+func TestTargetFromOverrideNoConnectionKeyReturnsFalse(t *testing.T) {
+	target, ok := targetFromOverride(map[string]any{"database": "app"}, "postgres")
+	if ok {
+		t.Fatalf("expected ok=false, got target=%+v", target)
+	}
+}
+
+func TestTargetFromOverrideMissingHostReturnsFalse(t *testing.T) {
+	target, ok := targetFromOverride(map[string]any{
+		"connection": map[string]any{"port": 5432},
+	}, "postgres")
+	if ok {
+		t.Fatalf("expected ok=false, got target=%+v", target)
+	}
+}
+
+func TestTargetFromOverrideBuildsHostPortAndCredential(t *testing.T) {
+	target, ok := targetFromOverride(map[string]any{
+		"connection": map[string]any{
+			"host": "db.internal",
+			"port": 5432,
+			"credential": map[string]any{
+				"mode":   "static",
+				"user":   "app_user",
+				"secret": "s3cret",
+			},
+		},
+	}, "postgres")
+	if !ok {
+		t.Fatalf("expected ok=true")
+	}
+	if target.Host != "db.internal:5432" {
+		t.Fatalf("expected host:port combined, got %q", target.Host)
+	}
+	if target.User != "app_user" || target.Password != "s3cret" {
+		t.Fatalf("expected credential carried through, got user=%q password=%q", target.User, target.Password)
+	}
+	if target.DBType != "postgres" {
+		t.Fatalf("expected DBType=postgres, got %q", target.DBType)
+	}
+}
+
+func TestTargetFromOverrideMongoDSNTakesPriority(t *testing.T) {
+	target, ok := targetFromOverride(map[string]any{
+		"connection": map[string]any{
+			"dsn": "mongodb+srv://user:pass@cluster0.example.mongodb.net/app?replicaSet=rs0",
+		},
+	}, "mongo")
+	if !ok {
+		t.Fatalf("expected ok=true for dsn-only override")
+	}
+	if target.DSN != "mongodb+srv://user:pass@cluster0.example.mongodb.net/app?replicaSet=rs0" {
+		t.Fatalf("expected dsn carried through, got %q", target.DSN)
+	}
+	if target.Host != "" {
+		t.Fatalf("expected no host for dsn-only override, got %q", target.Host)
+	}
+}
+
+func TestTargetFromOverrideNoPortLeavesHostBare(t *testing.T) {
+	target, ok := targetFromOverride(map[string]any{
+		"connection": map[string]any{"host": "db.internal"},
+	}, "postgres")
+	if !ok || target.Host != "db.internal" {
+		t.Fatalf("expected bare host, got ok=%v host=%q", ok, target.Host)
+	}
+}
+
+// TestResolveTargetPrefersOverride: even with an empty static Targets list (the deploy shape when
+// connections resolve dynamically from Data sources, not CloudFormation-time
+// SKYBRIDGE_STUDIO_TARGETS), a connection override must resolve successfully rather than falling
+// through to the static "no local target" miss.
+func TestResolveTargetPrefersOverrideOverEmptyStaticTargets(t *testing.T) {
+	e := New(Options{Targets: []dbquery.Target{}})
+	target, ok := e.resolveTarget(map[string]any{
+		"connection": map[string]any{"host": "db.internal", "port": 5432},
+	}, "postgres", "full_test", "")
+	if !ok {
+		t.Fatalf("expected override to resolve a target")
+	}
+	if target.Host != "db.internal:5432" {
+		t.Fatalf("unexpected host: %q", target.Host)
+	}
+}
+
+func TestResolveTargetFallsBackToStaticWhenNoOverride(t *testing.T) {
+	e := New(Options{Targets: []dbquery.Target{
+		{DBType: "postgres", AWSAccountID: "123456789012", DatabaseName: "app", Host: "static.internal:5432"},
+	}})
+	target, ok := e.resolveTarget(map[string]any{}, "postgres", "123456789012", "app")
+	if !ok || target.Host != "static.internal:5432" {
+		t.Fatalf("expected static fallback to resolve, got ok=%v target=%+v", ok, target)
+	}
+}
+
 // TestRunWriteMissingArgs / TestRunWriteMissingTarget exercise runWrite (0% covered), which is
 // distinct from run() — no read_only knob, no PII masking, EnforceReadOnly always false.
 func TestRunWriteMissingArgs(t *testing.T) {
