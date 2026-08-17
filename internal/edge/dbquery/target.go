@@ -22,7 +22,6 @@ type Target struct {
 	// unlike Postgres/MySQL DSNs). When set, executeMongo uses it directly instead of building a
 	// URI from Host/User/Password. See docs/design/skybridge-dynamic-connection-catalog.md
 	// (Curlix backend repo) for the per-call override this is populated from.
-	DSN string `json:"dsn,omitempty"`
 	SSLMode      string `json:"sslmode,omitempty"` // postgres
 	Name         string `json:"name,omitempty"`    // optional logical name (wire targets)
 	// Snowflake-only: Host carries the account locator (e.g. "xy12345.us-east-1"), not a
