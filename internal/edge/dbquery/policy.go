@@ -88,3 +88,28 @@ func enforceReadOnlyMongo(stmt string) error {
 	}
 	return nil
 }
+
+// cypherWriteKeywordRe matches Cypher clauses/procedures that mutate the graph or its schema, as
+// whole words: CREATE/MERGE/DELETE/DETACH/SET/REMOVE/DROP are write clauses, LOAD CSV writes when
+// paired with CREATE/MERGE (blocked outright here since a lexical check can't see the pairing),
+// and CALL apoc./CALL dbms. cover procedure calls whose body can write or change server state in a
+// way this lexical check can never observe directly — mirrors the write keyword set enforced
+// Cypher-side in Curlix's own backend (curlix-graph's readonly_cypher.py validate_readonly_cypher),
+// kept here as defense in depth since the edge should never blindly trust a Cypher statement just
+// because the control plane already validated it upstream.
+var cypherWriteKeywordRe = regexp.MustCompile(`(?i)\b(CREATE|MERGE|DELETE|DETACH|SET|REMOVE|DROP|LOAD\s+CSV)\b`)
+
+// cypherCallDbmsRe / cypherCallApocRe match `CALL dbms.…`/`CALL apoc.…` procedure invocations
+// specifically (rather than relying on the bare CALL keyword, which Cypher also uses for entirely
+// read-only procedures like `CALL db.labels()`) — narrower than the SQL CALL/EXEC block above
+// since blocking all CALL would break ordinary read-only Cypher.
+var cypherCallDbmsRe = regexp.MustCompile(`(?i)\bCALL\s+dbms\.`)
+var cypherCallApocRe = regexp.MustCompile(`(?i)\bCALL\s+apoc\.`)
+
+func enforceReadOnlyCypher(q string) error {
+	stripped := stripSQLNoise(q)
+	if cypherWriteKeywordRe.MatchString(stripped) || cypherCallDbmsRe.MatchString(stripped) || cypherCallApocRe.MatchString(stripped) {
+		return errors.New("cypher write operations blocked on execution agent")
+	}
+	return nil
+}
