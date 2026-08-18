@@ -143,6 +143,24 @@ func TestLoadEdgeDiscreteVarsOverrideSkybridgeKey(t *testing.T) {
 	}
 }
 
+// SKYBRIDGE_GATEWAY is also LoadAgent's own env var for the *wire proxy's* target. A deployment
+// with both SKYBRIDGE_KEY (this edge's call-home target) and a co-located wire proxy
+// (SKYBRIDGE_GATEWAY pointed at a distinct wire NLB) must not have the wire proxy's address
+// silently win here — the edge would dial the wrong host and fail TLS verification against the
+// connector CA. Regression for a real bug: before this fix, GatewayAddr's fallback chain checked
+// SKYBRIDGE_GATEWAY before the key-derived host, so this exact combination broke call-home.
+func TestLoadEdgeSkybridgeKeyWinsOverSharedWireProxyGatewayVar(t *testing.T) {
+	t.Setenv("SKYBRIDGE_KEY", "skybridge://org-1:tok-abc@gw.example.com")
+	t.Setenv("SKYBRIDGE_GATEWAY", "wire.example.com:8010")
+	e := LoadEdge()
+	if e.GatewayAddr != "gw.example.com:7100" {
+		t.Fatalf("expected key-derived GatewayAddr to win over shared SKYBRIDGE_GATEWAY, got %q", e.GatewayAddr)
+	}
+	if e.WireProxy.GatewayAddr != "wire.example.com:8010" {
+		t.Fatalf("expected wire proxy's own GatewayAddr from SKYBRIDGE_GATEWAY, got %q", e.WireProxy.GatewayAddr)
+	}
+}
+
 func TestLoadEdgeCABundleFromSkybridgeKey(t *testing.T) {
 	pem := "-----BEGIN CERTIFICATE-----\nMIIB\n-----END CERTIFICATE-----\n"
 	encoded := base64.StdEncoding.EncodeToString([]byte(pem))
