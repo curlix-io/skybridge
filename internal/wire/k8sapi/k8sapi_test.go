@@ -519,6 +519,11 @@ func TestProxyInjectBadGatewayOnUpstreamTLSFailure(t *testing.T) {
 	}
 }
 
+// TestProxyInjectRejectsInteractiveSubresource covers the default posture: a session whose
+// resolved credential does not explicitly set AllowInteractiveExec is rejected exactly as before
+// this field existed. Unlike the pre-§11.6 behavior, the resolver IS now called (the decision to
+// allow or block exec lives in the resolved credential, not in a path-only check) — see
+// TestProxyInjectAllowsInteractiveExecWhenGranted for the opt-in case.
 func TestProxyInjectRejectsInteractiveSubresource(t *testing.T) {
 	clientPlain, agentClientEnd := net.Pipe()
 	_, agentUpstreamEnd := net.Pipe()
@@ -526,8 +531,7 @@ func TestProxyInjectRejectsInteractiveSubresource(t *testing.T) {
 
 	serverTLS := selfSignedTLSConfig(t)
 	resolver := func(ctx context.Context, sessionToken string) (UpstreamCredential, error) {
-		t.Fatal("resolver should not be called for a blocked path")
-		return UpstreamCredential{}, nil
+		return UpstreamCredential{BearerToken: "real-cluster-token"}, nil // AllowInteractiveExec left false
 	}
 
 	engine := New(serverTLS)
@@ -551,4 +555,99 @@ func TestProxyInjectRejectsInteractiveSubresource(t *testing.T) {
 	}
 	_ = clientTLSConn.Close()
 	<-done
+}
+
+// TestProxyInjectAllowsInteractiveExecWhenGranted covers the opt-in path (§11.6): when the resolved
+// credential sets AllowInteractiveExec, an exec request is forwarded upstream, its 101 upgrade
+// response is relayed verbatim, and the connection becomes a raw bidirectional byte relay
+// afterward.
+func TestProxyInjectAllowsInteractiveExecWhenGranted(t *testing.T) {
+	clientPlain, agentClientEnd := net.Pipe()
+	agentUpstreamEnd, upstreamPlain := net.Pipe()
+	defer clientPlain.Close()
+
+	serverTLS := selfSignedTLSConfig(t)
+	upstreamDone := make(chan struct{})
+	var upstreamGotAuth string
+	var echoed []byte
+	go func() {
+		defer close(upstreamDone)
+		tconn := tls.Server(upstreamPlain, serverTLS)
+		if err := tconn.Handshake(); err != nil {
+			return
+		}
+		defer tconn.Close()
+		r := bufio.NewReader(tconn)
+		req, err := http.ReadRequest(r)
+		if err != nil {
+			return
+		}
+		upstreamGotAuth = req.Header.Get("Authorization")
+		_, _ = io.Copy(io.Discard, req.Body)
+		_, _ = tconn.Write([]byte("HTTP/1.1 101 Switching Protocols\r\nUpgrade: SPDY/3.1\r\nConnection: Upgrade\r\n\r\n"))
+		buf := make([]byte, 5)
+		n, _ := io.ReadFull(r, buf)
+		echoed = append(echoed, buf[:n]...)
+		_, _ = tconn.Write([]byte("output"))
+	}()
+
+	resolver := func(ctx context.Context, sessionToken string) (UpstreamCredential, error) {
+		return UpstreamCredential{BearerToken: "real-cluster-token", InsecureSkipVerify: true, AllowInteractiveExec: true}, nil
+	}
+
+	engine := New(serverTLS)
+	done := make(chan error, 1)
+	go func() {
+		done <- engine.ProxyInject(context.Background(), agentClientEnd, agentUpstreamEnd, resolver, wire.NoopRecorder{})
+	}()
+
+	clientTLSConn := tls.Client(clientPlain, &tls.Config{InsecureSkipVerify: true}) //nolint:gosec // test
+	req, _ := http.NewRequest(http.MethodPost, "https://cluster/api/v1/namespaces/default/pods/my-pod/exec?command=sh&stdin=true&stdout=true&tty=true", nil)
+	req.Header.Set("Authorization", "Bearer session-token")
+	req.Header.Set("Upgrade", "SPDY/3.1")
+	req.Header.Set("Connection", "Upgrade")
+	if err := req.Write(clientTLSConn); err != nil {
+		t.Fatalf("write request: %v", err)
+	}
+
+	clientReader := bufio.NewReader(clientTLSConn)
+	statusLine, err := clientReader.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read status line: %v", err)
+	}
+	if !strings.Contains(statusLine, "101") {
+		t.Fatalf("expected 101 status line, got %q", statusLine)
+	}
+	// Drain headers up to the blank line.
+	for {
+		line, err := clientReader.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read header line: %v", err)
+		}
+		if strings.TrimRight(line, "\r\n") == "" {
+			break
+		}
+	}
+
+	if _, err := clientTLSConn.Write([]byte("stdin!")); err != nil {
+		t.Fatalf("write stdin: %v", err)
+	}
+	outBuf := make([]byte, 6)
+	if _, err := io.ReadFull(clientReader, outBuf); err != nil {
+		t.Fatalf("read exec output: %v", err)
+	}
+	if string(outBuf) != "output" {
+		t.Fatalf("expected relayed output %q, got %q", "output", outBuf)
+	}
+
+	_ = clientTLSConn.Close()
+	<-upstreamDone
+	<-done
+
+	if upstreamGotAuth != "Bearer real-cluster-token" {
+		t.Fatalf("expected upstream to see real cluster token, got %q", upstreamGotAuth)
+	}
+	if string(echoed) != "stdin" {
+		t.Fatalf("expected upstream to receive relayed stdin, got %q", echoed)
+	}
 }
