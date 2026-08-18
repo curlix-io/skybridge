@@ -44,6 +44,8 @@ type Gateway struct {
 	connLimiter      ConnRateLimiter
 	orgConnLimiter   OrgConnLimiter
 	agentConnLimiter ConnRateLimiter
+	sniOrgResolution bool
+	sniPeekTimeout   time.Duration
 
 	mu        sync.RWMutex
 	agents    map[string]*agentConn // agent id -> connection
@@ -72,7 +74,19 @@ func New(logger *slog.Logger) *Gateway {
 		agentConnLimiter: NoopConnRateLimiter{},
 		agents:           make(map[string]*agentConn),
 		orgAgents:        make(map[string]*agentConn),
+		sniPeekTimeout:   3 * time.Second,
 	}
+}
+
+// SetSNIOrgResolution enables per-connection org resolution from the TLS ClientHello's SNI
+// hostname's leading DNS label (docs/design/kubernetes-access-broker.md §11.5): a client
+// connecting to `<org-id>.wire.curlix.io` gets routed to that org's agent, instead of every client
+// on a given listener port always going to one statically configured org
+// (`ListenClients`/`ServeClient`'s `orgID` parameter). Off by default — existing deployments that
+// don't set per-org SNI hostnames are completely unaffected; the static `orgID` parameter remains
+// authoritative whenever SNI is absent, unparseable, or this is disabled.
+func (g *Gateway) SetSNIOrgResolution(enabled bool) {
+	g.sniOrgResolution = enabled
 }
 
 // SetStore installs a session-recording store (defaults to NoopStore).
@@ -349,10 +363,51 @@ func (g *Gateway) ListenClients(ctx context.Context, ln net.Listener, orgID, tar
 	}
 }
 
+// resolveOrgFromSNI peeks the client's TLS ClientHello (see PeekClientHelloSNI) and, if it carries
+// an SNI hostname, treats that hostname's leading DNS label as an org id candidate. Always returns
+// whatever replay conn the peek produced (even on failure/absence) so the caller relays the exact
+// same bytes a client that was never peeked would have sent — only `ok` decides whether the caller
+// should use the returned orgID instead of its static one.
+func (g *Gateway) resolveOrgFromSNI(client net.Conn, target string) (orgID string, peeked net.Conn, ok bool) {
+	sni, replay, err := PeekClientHelloSNI(client, g.sniPeekTimeout)
+	if replay != nil {
+		peeked = replay
+	}
+	if err != nil {
+		g.log.Warn(fmt.Sprintf("SNI peek failed for target=%q: %v", target, err))
+		return "", peeked, false
+	}
+	if sni == "" {
+		return "", peeked, false
+	}
+	label := sni
+	if i := strings.IndexByte(sni, '.'); i > 0 {
+		label = sni[:i]
+	}
+	label = strings.TrimSpace(label)
+	if label == "" {
+		return "", peeked, false
+	}
+	return label, peeked, true
+}
+
 // ServeClient relays a single native-client connection to orgID's agent tunnel, resolving the
 // target's addr/db_type live for this connection and recording the session lifecycle (best-effort)
-// via the configured Store.
+// via the configured Store. orgID is the listener's statically configured org (from
+// SKYBRIDGE_GW_CLIENTS) — when SNI org resolution is enabled (SetSNIOrgResolution) and the client's
+// TLS ClientHello carries a resolvable per-org SNI hostname, that overrides orgID for this
+// connection (docs/design/kubernetes-access-broker.md §11.5): the same shared listener port then
+// serves every org that connects with its own `<org-id>.<host>` SNI, instead of exactly one
+// statically pinned org.
 func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
+	if g.sniOrgResolution {
+		if resolved, peeked, ok := g.resolveOrgFromSNI(client, target); ok {
+			orgID = resolved
+			client = peeked
+		} else if peeked != nil {
+			client = peeked
+		}
+	}
 	defer client.Close()
 
 	clientAddr := client.RemoteAddr().String()
