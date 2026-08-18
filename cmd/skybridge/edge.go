@@ -168,6 +168,7 @@ func registerQueryStudio(ctx context.Context, cfg config.Edge, execTargets []dbq
 		FallbackPassword: cfg.StudioDBPassword,
 		Masker:           masker,
 		OrgID:            cfg.TenantID,
+		Neo4jStaticURI:   cfg.AssetInventoryNeo4jURI,
 	})
 	dbexec.RegisterMigration(reg, dbexec.MigrationOptions{
 		Targets:          execTargets,

@@ -465,6 +465,14 @@ type Edge struct {
 	// SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN.
 	StudioIdentitySecretARN string
 
+	// AssetInventoryNeo4jURI (SKYBRIDGE_ASSET_INVENTORY_NEO4J_URI) is a static "bolt://host:port"
+	// fallback for db_query_neo4j when no per-call dynamic "connection" override and no matching
+	// static Targets/SKYBRIDGE_STUDIO_TARGETS entry resolves a target — see
+	// dbexec.resolveNeo4jStaticTarget. Describes the co-located Asset Inventory Neo4j ECS task this
+	// connector is deployed alongside (CreateAssetInventory in curlix-skybridge.yaml), so a fresh
+	// deploy doesn't need a static Targets entry hand-added for it.
+	AssetInventoryNeo4jURI string
+
 	// Optional co-located wire proxy. When non-empty the edge also runs the DB proxy (see Agent).
 	WireProxy Agent
 }
@@ -516,6 +524,7 @@ func LoadEdge() Edge {
 		StudioTLSDir:            env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
 		StudioTrustDomain:       env("SKYBRIDGE_TRUST_DOMAIN", ""),
 		StudioIdentitySecretARN: env("SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN", ""),
+		AssetInventoryNeo4jURI:  env("SKYBRIDGE_ASSET_INVENTORY_NEO4J_URI", ""),
 		WireProxy:               LoadAgent(),
 	}
 }

@@ -20,6 +20,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/sts v1.45.4
 	github.com/go-sql-driver/mysql v1.10.0
 	github.com/jackc/pgx/v5 v5.10.0
+	github.com/neo4j/neo4j-go-driver/v5 v5.28.4
 	github.com/snowflakedb/gosnowflake v1.19.1
 	go.mongodb.org/mongo-driver v1.17.9
 	google.golang.org/grpc v1.83.0
