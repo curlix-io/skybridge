@@ -185,6 +185,51 @@ type Agent struct {
 	K8sClientTLSCertPEM []byte // SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM / _FILE
 	K8sClientTLSKeyPEM  []byte // SKYBRIDGE_K8S_CLIENT_TLS_KEY_PEM / _FILE
 
+	// Standalone in-cluster K8s API proxy listener — the governed-access-parity path
+	// (docs/design/kubernetes-access-broker.md §11.1): when the agent runs *inside* the cluster it
+	// is granting access to (the Helm in-cluster deployment shape), it can serve kubectl directly
+	// off this listener instead of tunneling out to a shared gateway and back in. Distinct from
+	// ModeTunnel/ModeListener above, which are for the native DB wire proxy only — this is
+	// Kubernetes-specific and independent of WireProxy.Mode; set K8sAPIListenAddr to enable it, in
+	// addition to (not instead of) the WireProxy tunnel/listener modes if both are needed.
+	K8sAPIListenAddr string // SKYBRIDGE_K8S_API_LISTEN_ADDR, e.g. ":8443" — empty disables this listener
+	// K8sAPIUpstreamAddr is the real cluster API server this listener forwards to after credential
+	// exchange. Defaults to the standard in-cluster Kubernetes API server address, correct for the
+	// overwhelmingly common case (agent granting access to its own cluster); override only for an
+	// unusual topology (e.g. testing against a cluster this agent isn't running inside).
+	K8sAPIUpstreamAddr string // SKYBRIDGE_K8S_API_UPSTREAM_ADDR (default "kubernetes.default.svc:443")
+	// K8sClientTLSSelfSigned/K8sClientTLSSecretARN cover the CloudFormation/ECS deployment shape,
+	// which has no Helm-style install-time templating to generate+persist a self-signed cert into a
+	// Secret before the container starts (docs/design/kubernetes-access-broker.md §11.7). When no
+	// K8sClientTLSCertPEM/_KeyPEM is provided and K8sClientTLSSelfSigned is set, the agent itself
+	// generates one at startup; K8sClientTLSSecretARN (when also set) persists it via the certstore
+	// package (Secrets Manager, layered over local disk) so a replaced ECS task recovers the same
+	// cert an admin may have already pinned via wire_listener_ca_pem, instead of minting a new one
+	// (and silently invalidating pinning) on every redeploy.
+	K8sClientTLSSelfSigned bool   // SKYBRIDGE_K8S_CLIENT_TLS_SELF_SIGNED
+	K8sClientTLSSecretARN  string // SKYBRIDGE_K8S_CLIENT_TLS_SECRET_ARN
+	// ClientTLSSecretARN is the same persistence for the DB wire-listener's self-signed cert
+	// (ClientTLSSelfSigned above) — same rationale, different identity (this is the client-facing
+	// listener cert, not WireMtlsIdentitySecretARN's tunnel-enrollment identity).
+	ClientTLSSecretARN string // SKYBRIDGE_CLIENT_TLS_SECRET_ARN
+
+	// ListenerCertReportURL, when set, makes the agent report its own client-facing listener cert
+	// (wire DB listener or K8s API listener, whichever is active) back to the control plane once at
+	// startup — closing the "cert registration has no auto-discovery path" gap
+	// (docs/design/kubernetes-access-broker.md §11.5/§11.7): an admin no longer has to manually copy
+	// the PEM out of a Secret and paste it into the Connectivity panel. Best-effort: a failed report
+	// only logs a warning and never blocks serving traffic — an admin can still paste the cert
+	// manually as a fallback.
+	ListenerCertReportURL string // SKYBRIDGE_LISTENER_CERT_REPORT_URL
+
+	// SessionTranscriptReportURL is the listener-mode (RunListener, RunK8sAPIListener) counterpart to
+	// the tunnel-mode transcript flush (flushTranscript, over the gateway control channel): those two
+	// modes have no gateway-assigned control-plane session id or open tunnel.Session to flush over
+	// (see SessionReplayEnabled's doc above), so a listener-mode connection instead mints its own
+	// local session id and flushes its transcript via one authenticated HTTP POST to this URL — same
+	// bearer (CredentialExchangeToken) and org attribution (OrgID) as ListenerCertReportURL.
+	SessionTranscriptReportURL string // SKYBRIDGE_SESSION_TRANSCRIPT_REPORT_URL
+
 	// Client-side TLS termination (Postgres). When a cert+key is provided (or a self-signed cert is
 	// requested) the agent accepts the native client's SSLRequest and completes a TLS handshake, so
 	// the startup handshake and the injected-credential session token travel encrypted instead of in
@@ -324,10 +369,18 @@ func LoadAgent() Agent {
 		K8sCredentialExchangeURL: env("SKYBRIDGE_K8S_CREDENTIAL_EXCHANGE_URL", ""),
 		K8sClientTLSCertPEM:      pemFromEnv("SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM", "SKYBRIDGE_K8S_CLIENT_TLS_CERT_FILE"),
 		K8sClientTLSKeyPEM:       pemFromEnv("SKYBRIDGE_K8S_CLIENT_TLS_KEY_PEM", "SKYBRIDGE_K8S_CLIENT_TLS_KEY_FILE"),
+		K8sAPIListenAddr:         env("SKYBRIDGE_K8S_API_LISTEN_ADDR", ""),
+		K8sAPIUpstreamAddr:       env("SKYBRIDGE_K8S_API_UPSTREAM_ADDR", "kubernetes.default.svc:443"),
+		K8sClientTLSSelfSigned:   truthy(env("SKYBRIDGE_K8S_CLIENT_TLS_SELF_SIGNED", "")),
+		K8sClientTLSSecretARN:    env("SKYBRIDGE_K8S_CLIENT_TLS_SECRET_ARN", ""),
 
 		ClientTLSCertPEM:    pemFromEnv("SKYBRIDGE_CLIENT_TLS_CERT_PEM", "SKYBRIDGE_CLIENT_TLS_CERT_FILE"),
 		ClientTLSKeyPEM:     pemFromEnv("SKYBRIDGE_CLIENT_TLS_KEY_PEM", "SKYBRIDGE_CLIENT_TLS_KEY_FILE"),
 		ClientTLSSelfSigned: truthy(env("SKYBRIDGE_CLIENT_TLS_SELF_SIGNED", "")),
+		ClientTLSSecretARN:  env("SKYBRIDGE_CLIENT_TLS_SECRET_ARN", ""),
+
+		ListenerCertReportURL:      env("SKYBRIDGE_LISTENER_CERT_REPORT_URL", ""),
+		SessionTranscriptReportURL: env("SKYBRIDGE_SESSION_TRANSCRIPT_REPORT_URL", ""),
 
 		UpstreamTLSMode:       strings.ToLower(env("SKYBRIDGE_UPSTREAM_TLS", "")),
 		UpstreamTLSCAPEM:      pemFromEnv("SKYBRIDGE_UPSTREAM_TLS_CA_PEM", "SKYBRIDGE_UPSTREAM_TLS_CA_FILE"),
@@ -465,6 +518,14 @@ type Edge struct {
 	// SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN.
 	StudioIdentitySecretARN string
 
+	// AssetInventoryNeo4jURI (SKYBRIDGE_ASSET_INVENTORY_NEO4J_URI) is a static "bolt://host:port"
+	// fallback for db_query_neo4j when no per-call dynamic "connection" override and no matching
+	// static Targets/SKYBRIDGE_STUDIO_TARGETS entry resolves a target — see
+	// dbexec.resolveNeo4jStaticTarget. Describes the co-located Asset Inventory Neo4j ECS task this
+	// connector is deployed alongside (CreateAssetInventory in curlix-skybridge.yaml), so a fresh
+	// deploy doesn't need a static Targets entry hand-added for it.
+	AssetInventoryNeo4jURI string
+
 	// Optional co-located wire proxy. When non-empty the edge also runs the DB proxy (see Agent).
 	WireProxy Agent
 }
@@ -516,6 +577,7 @@ func LoadEdge() Edge {
 		StudioTLSDir:            env("SKYBRIDGE_STUDIO_TLS_DIR", ""),
 		StudioTrustDomain:       env("SKYBRIDGE_TRUST_DOMAIN", ""),
 		StudioIdentitySecretARN: env("SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN", ""),
+		AssetInventoryNeo4jURI:  env("SKYBRIDGE_ASSET_INVENTORY_NEO4J_URI", ""),
 		WireProxy:               LoadAgent(),
 	}
 }
@@ -580,6 +642,13 @@ type Gateway struct {
 	WireMtlsCABundlePEM []byte // SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM / _FILE (required)
 	WireMtlsServerCert  []byte // SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM / _FILE (self-signed generated if empty)
 	WireMtlsServerKey   []byte // SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM / _FILE
+
+	// SNIOrgResolution enables per-connection org resolution from the client's TLS ClientHello SNI
+	// hostname's leading DNS label (docs/design/kubernetes-access-broker.md §11.5) — lets one shared
+	// listener serve every org that connects with its own `<org-id>.<host>` SNI, instead of exactly
+	// one org statically pinned via each ClientListener's OrgID. Off by default: existing
+	// deployments relying on the static org_id are unaffected unless this is explicitly turned on.
+	SNIOrgResolution bool // SKYBRIDGE_GW_SNI_ORG_RESOLUTION (truthy)
 }
 
 // WireMtlsConfigured reports whether the gateway's mTLS CA bundle is set — the agent listener
@@ -636,6 +705,7 @@ func LoadGateway() Gateway {
 		WireMtlsCABundlePEM:     pemFromEnv("SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_GW_MTLS_CA_BUNDLE_FILE"),
 		WireMtlsServerCert:      pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM", "SKYBRIDGE_GW_MTLS_SERVER_CERT_FILE"),
 		WireMtlsServerKey:       pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM", "SKYBRIDGE_GW_MTLS_SERVER_KEY_FILE"),
+		SNIOrgResolution:        truthy(env("SKYBRIDGE_GW_SNI_ORG_RESOLUTION", "")),
 	}
 }
 

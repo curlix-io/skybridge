@@ -16,6 +16,12 @@ const (
 	ToolDBQueryMySQL     = "db_query_mysql"
 	ToolDBQueryMongo     = "db_query_mongo"
 	ToolDBQuerySnowflake = "db_query_snowflake"
+	// ToolDBQueryNeo4j runs a read-only Cypher statement against the customer-hosted Asset
+	// Inventory graph (an EFS-backed ECS Fargate Neo4j task provisioned by CreateAssetInventory in
+	// the sibling curlix repo's curlix-skybridge.yaml, co-located with this connector). Same
+	// request/response shape as the other db_query_* tools below — see run()'s "neo4j" branch and
+	// resolveNeo4jTarget's env-var fallback for how its connection target is resolved.
+	ToolDBQueryNeo4j = "db_query_neo4j"
 
 	// ToolDBExecuteWrite is a distinct write-capable tool, separate from the always-read-only
 	// db_query_* tools above (whose EnforceReadOnly:true in run() never changes). Whether a given
@@ -41,6 +47,13 @@ type Options struct {
 	// defaultIdempotencyMaxEntries in newIdempotencyCache.
 	IdempotencyTTL        time.Duration
 	IdempotencyMaxEntries int
+	// Neo4jStaticURI is the last-resort fallback for resolving where the co-located Asset Inventory
+	// Neo4j task lives (SKYBRIDGE_ASSET_INVENTORY_NEO4J_URI, e.g. "bolt://localhost:7687") — used by
+	// runNeo4j only when neither a per-call "connection" override nor a matching entry in Targets
+	// resolves a target, since that graph is provisioned alongside this connector rather than
+	// requiring a customer-configured static Targets/SKYBRIDGE_STUDIO_TARGETS entry per deploy. See
+	// resolveNeo4jTarget.
+	Neo4jStaticURI string
 }
 
 // Executor runs one-shot DB statements for POST /studio/exec (Design B).
@@ -63,14 +76,15 @@ func New(opts Options) Executor {
 	}
 }
 
-// Register wires db_query_{postgres,mysql,mongo,snowflake} and db_execute_write into the edge
-// registry.
+// Register wires db_query_{postgres,mysql,mongo,snowflake,neo4j} and db_execute_write into the
+// edge registry.
 func Register(reg *edge.Registry, opts Options) {
 	e := New(opts)
 	reg.Register(ToolDBQueryPostgres, e.runPostgres)
 	reg.Register(ToolDBQueryMySQL, e.runMySQL)
 	reg.Register(ToolDBQueryMongo, e.runMongo)
 	reg.Register(ToolDBQuerySnowflake, e.runSnowflake)
+	reg.Register(ToolDBQueryNeo4j, e.runNeo4j)
 	reg.Register(ToolDBExecuteWrite, e.runWrite)
 }
 
@@ -90,6 +104,10 @@ func (e Executor) runSnowflake(ctx context.Context, args map[string]any) (edge.R
 	return e.run(ctx, "snowflake", args)
 }
 
+func (e Executor) runNeo4j(ctx context.Context, args map[string]any) (edge.Result, error) {
+	return e.run(ctx, "neo4j", args)
+}
+
 func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (edge.Result, error) {
 	database := strArg(args, "database")
 	scope := strArg(args, "connection_scope")
@@ -101,6 +119,9 @@ func (e Executor) run(ctx context.Context, dbType string, args map[string]any) (
 	maxRows := intArg(args, "max_rows", e.opts.MaxRows)
 
 	target, ok := resolveTarget(e.opts.Targets, dbType, scope, database, args)
+	if !ok && dbType == "neo4j" {
+		target, ok = resolveNeo4jStaticTarget(e.opts.Neo4jStaticURI, database)
+	}
 	if !ok {
 		return edge.ErrorResult(toolName(dbType), fmt.Sprintf("no local target for %s/%s/%s", dbType, scope, database)), nil
 	}
@@ -217,6 +238,21 @@ func resolveTarget(targets []dbquery.Target, dbType, scope, database string, arg
 		}
 	}
 	return dbquery.Resolve(targets, dbType, scope, database)
+}
+
+// resolveNeo4jStaticTarget is the last-resort fallback used by run() for dbType "neo4j" once
+// resolveTarget (dynamic "connection" override, then the static Targets list) has already come up
+// empty. staticURI is Options.Neo4jStaticURI (SKYBRIDGE_ASSET_INVENTORY_NEO4J_URI), a plain
+// "bolt://host:port" (or "neo4j://..."/"bolt+s://...") value describing the connector's
+// co-located Asset Inventory task — carried through as dbquery.Target.DSN so executeNeo4j's
+// neo4jURI uses it verbatim rather than trying to decompose it into Host. Returns ok=false when
+// staticURI is empty, matching resolveTarget's own "fall through to no target" contract.
+func resolveNeo4jStaticTarget(staticURI, database string) (dbquery.Target, bool) {
+	staticURI = strings.TrimSpace(staticURI)
+	if staticURI == "" {
+		return dbquery.Target{}, false
+	}
+	return dbquery.Target{DBType: "neo4j", DatabaseName: database, DSN: staticURI}, true
 }
 
 func toolName(dbType string) string {

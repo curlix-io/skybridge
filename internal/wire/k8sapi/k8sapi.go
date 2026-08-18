@@ -11,6 +11,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/textproto"
 	"strings"
 
 	"github.com/curlix-io/skybridge/internal/wire"
@@ -32,6 +33,12 @@ type UpstreamCredential struct {
 	BearerToken        string
 	CACertPEM          []byte
 	InsecureSkipVerify bool
+	// AllowInteractiveExec, when true, permits this session to open exec/attach/port-forward
+	// subresources (docs/design/kubernetes-access-broker.md §11.6) — the control plane decides this
+	// per session at credential-resolve time (same RBAC decision that already gates every other
+	// request), not this engine. Defaults to false (zero value): every existing session that never
+	// asked for this stays exactly as blocked as before this field existed.
+	AllowInteractiveExec bool
 }
 
 // CredentialResolver exchanges a client-presented session token (sent as the request's
@@ -95,17 +102,15 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, res
 			return err
 		}
 
-		if k8sIsUpgrade(req.Header) {
-			_ = writeErrorResponse(tlsClient, req, http.StatusForbidden, "interactive subresource not brokered (exec/attach/port-forward)")
-			drainAndClose(req.Body)
-			continue
-		}
+		execRequested := isUpgradeSubresource(req.URL.Path) || k8sIsUpgrade(req.Header)
 
-		decision := Classify(req.Method, req.URL.Path)
-		if decision.Blocked {
-			_ = writeErrorResponse(tlsClient, req, http.StatusForbidden, "command blocked by policy: "+decision.Reason)
-			drainAndClose(req.Body)
-			continue
+		if !execRequested {
+			decision := Classify(req.Method, req.URL.Path)
+			if decision.Blocked {
+				_ = writeErrorResponse(tlsClient, req, http.StatusForbidden, "command blocked by policy: "+decision.Reason)
+				drainAndClose(req.Body)
+				continue
+			}
 		}
 
 		sessionToken := bearerToken(req.Header.Get("Authorization"))
@@ -121,12 +126,26 @@ func (e *Engine) ProxyInject(ctx context.Context, client, upstream net.Conn, res
 			continue
 		}
 
+		if execRequested && !cred.AllowInteractiveExec {
+			_ = writeErrorResponse(tlsClient, req, http.StatusForbidden, "interactive subresource not brokered for this session (exec/attach/port-forward)")
+			drainAndClose(req.Body)
+			continue
+		}
+
 		if upstreamTLS == nil {
 			upstreamTLS, err = negotiateUpstreamTLS(upstream, cred)
 			if err != nil {
 				_ = writeErrorResponse(tlsClient, req, http.StatusBadGateway, "could not reach cluster API server")
 				return err
 			}
+		}
+
+		if execRequested {
+			// The exec/attach/port-forward handshake response upgrades this TCP connection into a
+			// raw bidirectional multiplexed byte stream (SPDY or the newer WebSocket sub-protocol) —
+			// there is no further HTTP request/response to read after this, so relayInteractiveExec
+			// owns the connection until either side closes it.
+			return relayInteractiveExec(ctx, upstreamTLS, tlsClient, reader, req, cred, recorder)
 		}
 
 		if err := forwardRequest(upstreamTLS, tlsClient, req, cred, recorder); err != nil {
@@ -194,6 +213,126 @@ func forwardRequest(upstream *tls.Conn, client io.Writer, req *http.Request, cre
 	recorder.RecordOutput(string(masked))
 
 	return resp.Write(client)
+}
+
+// relayInteractiveExec handles an exec/attach/port-forward request once the session's resolved
+// credential has explicitly permitted it (docs/design/kubernetes-access-broker.md §11.6). Unlike
+// forwardRequest, there is no structured response to mask: the moment the upstream answers with a
+// successful upgrade, both ends stop speaking HTTP and start exchanging a multiplexed SPDY or
+// WebSocket byte stream (stdin/stdout/stderr/resize frames). This function forwards the initiating
+// request, relays the upstream's upgrade response line+headers verbatim (deliberately NOT via
+// http.Response.Write — that method assumes a body-bearing response and mishandles 101/undefined
+// status semantics), then pumps raw bytes bidirectionally until either side closes.
+//
+// Recording here is intentionally coarse: every byte crossing the wire in each direction is handed
+// to recorder as an opaque chunk, labeled by direction only. There is no per-field secret masking
+// (there is no field structure once the stream is raw terminal I/O) — this is the same limitation
+// RDP session brokering has left open, not a gap specific to this path. Callers that need masked
+// transcripts must keep exec disabled for sessions where that matters (AllowInteractiveExec stays
+// false by default for exactly this reason).
+func relayInteractiveExec(ctx context.Context, upstream *tls.Conn, client io.Writer, clientReader *bufio.Reader, req *http.Request, cred UpstreamCredential, recorder wire.Recorder) error {
+	req.Header.Set("Authorization", "Bearer "+cred.BearerToken)
+	req.RequestURI = ""
+	if req.URL.Scheme == "" {
+		req.URL.Scheme = "https"
+	}
+	if req.URL.Host == "" {
+		req.URL.Host = req.Host
+	}
+	if err := req.Write(upstream); err != nil {
+		return fmt.Errorf("kubernetes: forwarding exec request upstream: %w", err)
+	}
+
+	upstreamReader := bufio.NewReaderSize(upstream, 1<<16)
+	statusLine, headers, err := readRawHTTPHeader(upstreamReader)
+	if err != nil {
+		return fmt.Errorf("kubernetes: reading exec upgrade response: %w", err)
+	}
+	if err := writeRawHTTPHeader(client, statusLine, headers); err != nil {
+		return fmt.Errorf("kubernetes: writing exec upgrade response: %w", err)
+	}
+	if !strings.HasPrefix(statusLine, "HTTP/1.1 101") && !strings.HasPrefix(statusLine, "HTTP/1.0 101") {
+		// Upstream declined the upgrade (e.g. RBAC denied at the cluster, pod not found) — it already
+		// answered with a normal status; nothing further to relay.
+		return nil
+	}
+
+	errCh := make(chan error, 2)
+	go func() {
+		_, err := io.Copy(&recordingWriter{w: upstream, record: recorder.RecordInput}, clientReader)
+		errCh <- err
+	}()
+	go func() {
+		_, err := io.Copy(&recordingWriter{w: client, recordOut: recorder.RecordOutput}, upstreamReader)
+		errCh <- err
+	}()
+
+	select {
+	case err := <-errCh:
+		if err != nil && !errors.Is(err, io.EOF) {
+			return fmt.Errorf("kubernetes: exec stream relay: %w", err)
+		}
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
+// recordingWriter wraps an io.Writer, feeding every chunk written through it to a recorder callback
+// before (record, RecordInput-shaped) or after (recordOut, RecordOutput-shaped) forwarding — exactly
+// one of the two fields is set per instance.
+type recordingWriter struct {
+	w         io.Writer
+	record    func([]byte)
+	recordOut func(string)
+}
+
+func (r *recordingWriter) Write(p []byte) (int, error) {
+	n, err := r.w.Write(p)
+	if n > 0 {
+		if r.record != nil {
+			r.record(p[:n])
+		}
+		if r.recordOut != nil {
+			r.recordOut(string(p[:n]))
+		}
+	}
+	return n, err
+}
+
+// readRawHTTPHeader reads a status line + header block (terminated by a blank line) without
+// touching the body/remaining stream — safe for informational/upgrade responses that
+// http.ReadResponse does not model cleanly.
+func readRawHTTPHeader(r *bufio.Reader) (statusLine string, headerLines []string, err error) {
+	tp := textproto.NewReader(r)
+	statusLine, err = tp.ReadLine()
+	if err != nil {
+		return "", nil, err
+	}
+	for {
+		line, err := tp.ReadLine()
+		if err != nil {
+			return "", nil, err
+		}
+		if line == "" {
+			break
+		}
+		headerLines = append(headerLines, line)
+	}
+	return statusLine, headerLines, nil
+}
+
+func writeRawHTTPHeader(w io.Writer, statusLine string, headerLines []string) error {
+	var buf bytes.Buffer
+	buf.WriteString(statusLine)
+	buf.WriteString("\r\n")
+	for _, line := range headerLines {
+		buf.WriteString(line)
+		buf.WriteString("\r\n")
+	}
+	buf.WriteString("\r\n")
+	_, err := w.Write(buf.Bytes())
+	return err
 }
 
 func recordRequestBody(recorder wire.Recorder, req *http.Request) error {

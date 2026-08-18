@@ -91,12 +91,19 @@ func Execute(ctx context.Context, target Target, dbType, database, statement str
 		return nil, fmt.Errorf("dbquery: EnforceReadOnly and Write are mutually exclusive")
 	}
 	if opts.EnforceReadOnly {
-		if normalizeDBType(dbType) == "mongo" {
+		switch normalizeDBType(dbType) {
+		case "mongo":
 			if err := enforceReadOnlyMongo(statement); err != nil {
 				return nil, err
 			}
-		} else if err := enforceReadOnlySQL(statement); err != nil {
-			return nil, err
+		case "neo4j":
+			if err := enforceReadOnlyCypher(statement); err != nil {
+				return nil, err
+			}
+		default:
+			if err := enforceReadOnlySQL(statement); err != nil {
+				return nil, err
+			}
 		}
 	}
 	runCtx, cancel := context.WithTimeout(ctx, opts.Timeout)
@@ -129,6 +136,8 @@ func Execute(ctx context.Context, target Target, dbType, database, statement str
 		return executeMongo(runCtx, target, database, statement, opts, masker)
 	case "snowflake":
 		return executeSnowflake(runCtx, target, database, statement, opts, masker)
+	case "neo4j":
+		return executeNeo4j(runCtx, target, database, statement, opts, masker)
 	default:
 		return nil, fmt.Errorf("unsupported db_type %q", dbType)
 	}

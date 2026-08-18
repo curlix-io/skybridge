@@ -89,3 +89,35 @@ func TestEnforceReadOnlySQLAllowsLiteralsContainingKeywords(t *testing.T) {
 		}
 	}
 }
+
+func TestEnforceReadOnlyCypherAllowsReads(t *testing.T) {
+	for _, q := range []string{
+		"MATCH (n:Host) RETURN n LIMIT 10",
+		"MATCH (n)-[r]->(m) WHERE n.name = 'db1' RETURN n, r, m",
+		"CALL db.labels()",
+		"MATCH (n) RETURN count(n)",
+	} {
+		if err := enforceReadOnlyCypher(q); err != nil {
+			t.Errorf("expected %q to be allowed, got %v", q, err)
+		}
+	}
+}
+
+func TestEnforceReadOnlyCypherBlocksWrites(t *testing.T) {
+	for _, q := range []string{
+		"CREATE (n:Host {name: 'x'})",
+		"MATCH (n) MERGE (n)-[:LINKS_TO]->(m)",
+		"MATCH (n) DELETE n",
+		"MATCH (n) DETACH DELETE n",
+		"MATCH (n) SET n.x = 1",
+		"MATCH (n) REMOVE n.x",
+		"DROP INDEX ON :Host(name)",
+		"LOAD CSV FROM 'file:///x.csv' AS row CREATE (n:Host {name: row[0]})",
+		"CALL apoc.periodic.iterate('MATCH (n) RETURN n', 'DELETE n', {})",
+		"CALL dbms.setConfigValue('x', 'y')",
+	} {
+		if err := enforceReadOnlyCypher(q); err == nil {
+			t.Errorf("expected %q to be blocked", q)
+		}
+	}
+}

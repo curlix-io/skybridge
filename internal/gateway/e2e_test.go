@@ -58,6 +58,21 @@ func (upperEngine) Proxy(_ context.Context, client, upstream net.Conn, _ mask.Ma
 
 func silent() *slog.Logger { return slog.New(slog.NewTextHandler(io.Discard, nil)) }
 
+// taggedEngine discards whatever the client sends and always replies with a fixed tag — used to
+// unambiguously tell which of two agents actually served a given client connection (unlike
+// upperEngine, whose output would be identical regardless of which org handled the request).
+type taggedEngine struct{ tag string }
+
+func (e taggedEngine) Name() string { return "tagged" }
+
+func (e taggedEngine) Proxy(_ context.Context, client, upstream net.Conn, _ mask.Masker, _ wire.Recorder) error {
+	go io.Copy(io.Discard, client) //nolint:errcheck // client->upstream direction is irrelevant to this test double
+	_, err := client.Write([]byte(e.tag))
+	_ = upstream.Close()
+	_ = client.Close()
+	return err
+}
+
 // mtlsAgentPipe builds an in-memory (agent-side, gateway-side) connection pair, both wrapped in TLS
 // with a fresh self-signed CA issuing the agent's client cert for (tenant, agentID) — agent
 // registration requires a verified mTLS client certificate unconditionally (no bearer-token
@@ -514,4 +529,147 @@ func waitForOrgAgent(g *gateway.Gateway, orgID string, d time.Duration) bool {
 		time.Sleep(5 * time.Millisecond)
 	}
 	return false
+}
+
+// captureClientHelloBytes returns the raw bytes a real tls.Client handshake attempt writes for the
+// given SNI server name — a genuine ClientHello record, not hand-built. Used to drive
+// SetSNIOrgResolution tests without needing a live TLS responder: the handshake attempt is left to
+// fail/timeout (nothing ever replies), which is fine — only the bytes it already wrote matter.
+func captureClientHelloBytes(t *testing.T, serverName string) []byte {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	capturedCh := make(chan []byte, 1)
+	go func() {
+		raw, err := ln.Accept()
+		if err != nil {
+			capturedCh <- nil
+			return
+		}
+		defer raw.Close()
+		buf := make([]byte, 8192)
+		_ = raw.SetReadDeadline(time.Now().Add(3 * time.Second))
+		n, _ := raw.Read(buf)
+		capturedCh <- buf[:n]
+	}()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	go func() {
+		client := tls.Client(conn, &tls.Config{ServerName: serverName, InsecureSkipVerify: true}) //nolint:gosec // test, no live responder
+		_ = client.Handshake()                                                                     // expected to fail — nothing replies; only the write matters
+	}()
+
+	select {
+	case b := <-capturedCh:
+		if len(b) == 0 {
+			t.Fatal("captured empty ClientHello")
+		}
+		return b
+	case <-time.After(5 * time.Second):
+		t.Fatal("timed out capturing ClientHello")
+	}
+	return nil
+}
+
+// TestServeClientSNIOrgResolutionRoutesToTheRightOrg is the regression test for the
+// docs/design/kubernetes-access-broker.md §11.5 fix: one shared listener, statically configured
+// for org-1, must route a client presenting `org-2.wire.test` SNI to org-2's agent instead —
+// without SetSNIOrgResolution, the exact same client would go to the statically pinned org-1.
+func TestServeClientSNIOrgResolutionRoutesToTheRightOrg(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	g := gateway.New(silent())
+	g.SetSNIOrgResolution(true)
+	g.SetTargetResolver(stubTargetResolver{
+		"db": {Name: "db", Addr: "upstream:0", DBType: "upper", ResourceRoleID: "role-1", ActorEmail: "owner@example.com"},
+	})
+
+	tags := map[string]string{"org-1": "FROM-ORG-1", "org-2": "FROM-ORG-2"}
+	for _, org := range []string{"org-1", "org-2"} {
+		agentLocal, agentGW := mtlsAgentPipe(t, org, "agent-"+org)
+		go func() { _ = g.ServeAgent(agentGW) }()
+		cfg := config.Agent{Mode: config.ModeTunnel}
+		tag := tags[org]
+		deps := agent.Deps{
+			Dial:   echoDialer,
+			Engine: func(string) (wire.Engine, error) { return taggedEngine{tag: tag}, nil },
+			Masker: mask.Noop{},
+		}
+		go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
+		if !waitForOrgAgent(g, org, 2*time.Second) {
+			t.Fatalf("agent for %s did not register in time", org)
+		}
+	}
+
+	clientHello := captureClientHelloBytes(t, "org-2.wire.test")
+
+	clientGW, client := net.Pipe()
+	// Listener is statically configured for org-1 — proves the override, not just "org-2 happens
+	// to be the default."
+	go func() { _ = g.ServeClient(clientGW, "org-1", "db") }()
+
+	if _, err := client.Write(clientHello); err != nil {
+		t.Fatal(err)
+	}
+
+	buf := make([]byte, len(tags["org-2"]))
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := io.ReadFull(client, buf)
+	if err != nil {
+		t.Fatalf("read relayed bytes: %v", err)
+	}
+	if got := string(buf[:n]); got != tags["org-2"] {
+		t.Fatalf("got %q, want %q — client's org-2.wire.test SNI should route to org-2's agent, not the statically pinned org-1", got, tags["org-2"])
+	}
+}
+
+// TestServeClientSNIOrgResolutionFallsBackWithoutSNI confirms a client that never sends SNI at all
+// (e.g. connects with a bare IP, or SNI resolution is simply not in play) still gets the listener's
+// statically configured org — SetSNIOrgResolution must never make an SNI-less client second-class.
+func TestServeClientSNIOrgResolutionFallsBackWithoutSNI(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	g := gateway.New(silent())
+	g.SetSNIOrgResolution(true)
+	g.SetTargetResolver(stubTargetResolver{
+		"db": {Name: "db", Addr: "upstream:0", DBType: "upper", ResourceRoleID: "role-1", ActorEmail: "owner@example.com"},
+	})
+
+	agentLocal, agentGW := mtlsAgentPipe(t, "org-1", "agent-org-1")
+	go func() { _ = g.ServeAgent(agentGW) }()
+	cfg := config.Agent{Mode: config.ModeTunnel}
+	deps := agent.Deps{
+		Dial:   echoDialer,
+		Engine: func(string) (wire.Engine, error) { return upperEngine{}, nil },
+		Masker: mask.Noop{},
+	}
+	go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
+	if !waitForOrgAgent(g, "org-1", 2*time.Second) {
+		t.Fatal("agent did not register in time")
+	}
+
+	clientGW, client := net.Pipe()
+	go func() { _ = g.ServeClient(clientGW, "org-1", "db") }()
+
+	if _, err := client.Write([]byte("plaintext, no tls at all")); err != nil {
+		t.Fatal(err)
+	}
+	buf := make([]byte, 64)
+	_ = client.SetReadDeadline(time.Now().Add(3 * time.Second))
+	n, err := client.Read(buf)
+	if err != nil {
+		t.Fatalf("read relayed bytes: %v", err)
+	}
+	if !bytes.Equal(buf[:n], bytes.ToUpper([]byte("plaintext, no tls at all"))) {
+		t.Fatalf("got %q, want the org-1 agent's uppercased echo — SNI-less client must still reach the static org", buf[:n])
+	}
 }
