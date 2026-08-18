@@ -50,13 +50,24 @@ func buildClientTLSConfig(cfg config.Agent, logger *slog.Logger) (*tls.Config, e
 // generateSelfSignedCert mints a short-lived in-memory ECDSA P-256 self-signed certificate suitable
 // for local/dev TLS termination (clients use sslmode=require, which does not verify the chain).
 func generateSelfSignedCert() (tls.Certificate, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	certPEM, keyPEM, err := generateSelfSignedCertPEM()
 	if err != nil {
 		return tls.Certificate{}, err
 	}
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// generateSelfSignedCertPEM is generateSelfSignedCert's PEM-returning counterpart, needed wherever
+// the raw bytes must be persisted (certstore, see certpersist.go) or reported to the control plane
+// (see certreport.go) rather than only loaded into an in-memory tls.Certificate.
+func generateSelfSignedCertPEM() (certPEM, keyPEM []byte, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
@@ -70,15 +81,15 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return tls.X509KeyPair(certPEM, keyPEM)
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM, nil
 }
 
 // engineFactory returns an engine selector that builds the Postgres, MySQL and Mongo engines with
