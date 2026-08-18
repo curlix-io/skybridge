@@ -37,6 +37,12 @@ flags). Common ones:
                                    — a "no agent registered for target" warning at relay time means
                                    nothing has dialed in and registered for this addr's org_id+target
                                    yet (see "skybridge agent"/"skybridge edge --help"'s SKYBRIDGE_UPSTREAM)
+    SKYBRIDGE_GW_SNI_ORG_RESOLUTION   (truthy) resolve org_id per connection from the client's TLS
+                                       ClientHello SNI hostname's leading DNS label instead of each
+                                       listener's static org_id — lets one shared listener serve
+                                       every org connecting as <org-id>.<host>, not just the one
+                                       org_id configured in SKYBRIDGE_GW_CLIENTS above. Falls back
+                                       to that static org_id whenever SNI is absent/unparseable.
 
   Control plane (session recording, wire-IP admission, live target resolution)
     SKYBRIDGE_GW_CONTROL_PLANE_URL    base URL; unset fails closed for all client connections
@@ -78,6 +84,10 @@ func runGateway(args []string) {
 
 	gw := gateway.New(logger)
 	gw.SetRequireOrgID(cfg.RequireOrgID)
+	gw.SetSNIOrgResolution(cfg.SNIOrgResolution)
+	if cfg.SNIOrgResolution {
+		logger.Info("per-connection org resolution from client SNI hostname enabled")
+	}
 	if lim := gateway.NewConnRateLimiter(cfg.ClientConnPerMin, cfg.OrgConnPerMin); lim != nil {
 		gw.SetConnRateLimiter(lim)
 		logger.Info(fmt.Sprintf("client conn limits ip=%d/min org=%d/min", cfg.ClientConnPerMin, cfg.OrgConnPerMin))

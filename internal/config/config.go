@@ -605,6 +605,13 @@ type Gateway struct {
 	WireMtlsCABundlePEM []byte // SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM / _FILE (required)
 	WireMtlsServerCert  []byte // SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM / _FILE (self-signed generated if empty)
 	WireMtlsServerKey   []byte // SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM / _FILE
+
+	// SNIOrgResolution enables per-connection org resolution from the client's TLS ClientHello SNI
+	// hostname's leading DNS label (docs/design/kubernetes-access-broker.md §11.5) — lets one shared
+	// listener serve every org that connects with its own `<org-id>.<host>` SNI, instead of exactly
+	// one org statically pinned via each ClientListener's OrgID. Off by default: existing
+	// deployments relying on the static org_id are unaffected unless this is explicitly turned on.
+	SNIOrgResolution bool // SKYBRIDGE_GW_SNI_ORG_RESOLUTION (truthy)
 }
 
 // WireMtlsConfigured reports whether the gateway's mTLS CA bundle is set — the agent listener
@@ -661,6 +668,7 @@ func LoadGateway() Gateway {
 		WireMtlsCABundlePEM:     pemFromEnv("SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM", "SKYBRIDGE_GW_MTLS_CA_BUNDLE_FILE"),
 		WireMtlsServerCert:      pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM", "SKYBRIDGE_GW_MTLS_SERVER_CERT_FILE"),
 		WireMtlsServerKey:       pemFromEnv("SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM", "SKYBRIDGE_GW_MTLS_SERVER_KEY_FILE"),
+		SNIOrgResolution:        truthy(env("SKYBRIDGE_GW_SNI_ORG_RESOLUTION", "")),
 	}
 }
 
