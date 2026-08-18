@@ -185,6 +185,20 @@ type Agent struct {
 	K8sClientTLSCertPEM []byte // SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM / _FILE
 	K8sClientTLSKeyPEM  []byte // SKYBRIDGE_K8S_CLIENT_TLS_KEY_PEM / _FILE
 
+	// Standalone in-cluster K8s API proxy listener — the governed-access-parity path
+	// (docs/design/kubernetes-access-broker.md §11.1): when the agent runs *inside* the cluster it
+	// is granting access to (the Helm in-cluster deployment shape), it can serve kubectl directly
+	// off this listener instead of tunneling out to a shared gateway and back in. Distinct from
+	// ModeTunnel/ModeListener above, which are for the native DB wire proxy only — this is
+	// Kubernetes-specific and independent of WireProxy.Mode; set K8sAPIListenAddr to enable it, in
+	// addition to (not instead of) the WireProxy tunnel/listener modes if both are needed.
+	K8sAPIListenAddr string // SKYBRIDGE_K8S_API_LISTEN_ADDR, e.g. ":8443" — empty disables this listener
+	// K8sAPIUpstreamAddr is the real cluster API server this listener forwards to after credential
+	// exchange. Defaults to the standard in-cluster Kubernetes API server address, correct for the
+	// overwhelmingly common case (agent granting access to its own cluster); override only for an
+	// unusual topology (e.g. testing against a cluster this agent isn't running inside).
+	K8sAPIUpstreamAddr string // SKYBRIDGE_K8S_API_UPSTREAM_ADDR (default "kubernetes.default.svc:443")
+
 	// Client-side TLS termination (Postgres). When a cert+key is provided (or a self-signed cert is
 	// requested) the agent accepts the native client's SSLRequest and completes a TLS handshake, so
 	// the startup handshake and the injected-credential session token travel encrypted instead of in
@@ -324,6 +338,8 @@ func LoadAgent() Agent {
 		K8sCredentialExchangeURL: env("SKYBRIDGE_K8S_CREDENTIAL_EXCHANGE_URL", ""),
 		K8sClientTLSCertPEM:      pemFromEnv("SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM", "SKYBRIDGE_K8S_CLIENT_TLS_CERT_FILE"),
 		K8sClientTLSKeyPEM:       pemFromEnv("SKYBRIDGE_K8S_CLIENT_TLS_KEY_PEM", "SKYBRIDGE_K8S_CLIENT_TLS_KEY_FILE"),
+		K8sAPIListenAddr:         env("SKYBRIDGE_K8S_API_LISTEN_ADDR", ""),
+		K8sAPIUpstreamAddr:       env("SKYBRIDGE_K8S_API_UPSTREAM_ADDR", "kubernetes.default.svc:443"),
 
 		ClientTLSCertPEM:    pemFromEnv("SKYBRIDGE_CLIENT_TLS_CERT_PEM", "SKYBRIDGE_CLIENT_TLS_CERT_FILE"),
 		ClientTLSKeyPEM:     pemFromEnv("SKYBRIDGE_CLIENT_TLS_KEY_PEM", "SKYBRIDGE_CLIENT_TLS_KEY_FILE"),
