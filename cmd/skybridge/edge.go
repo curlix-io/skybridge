@@ -94,6 +94,17 @@ func runEdge(args []string) {
 		}()
 	}
 
+	// Standalone in-cluster K8s API proxy listener — independent of WireProxy.Mode above (can run
+	// alongside a DB wire tunnel, or on its own with no WireProxy config at all). See
+	// docs/design/kubernetes-access-broker.md §11.1.
+	if cfg.WireProxy.K8sAPIListenAddr != "" {
+		go func() {
+			if err := agent.RunK8sAPIListener(ctx, cfg.WireProxy, logger); err != nil && ctx.Err() == nil {
+				logger.Error("k8s API listener ended", "error", err)
+			}
+		}()
+	}
+
 	reg := edge.NewRegistry()
 	execTargets := dbquery.MergeWireTargets(dbquery.ParseTargets(cfg.StudioTargetsJSON), cfg.WireProxy.Targets)
 	registerQueryStudio(ctx, cfg, execTargets, reg, masker, logger)
