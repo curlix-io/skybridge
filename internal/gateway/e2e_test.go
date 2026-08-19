@@ -563,7 +563,7 @@ func captureClientHelloBytes(t *testing.T, serverName string) []byte {
 	}
 	go func() {
 		client := tls.Client(conn, &tls.Config{ServerName: serverName, InsecureSkipVerify: true}) //nolint:gosec // test, no live responder
-		_ = client.Handshake()                                                                     // expected to fail — nothing replies; only the write matters
+		_ = client.Handshake()                                                                    // expected to fail — nothing replies; only the write matters
 	}()
 
 	select {
