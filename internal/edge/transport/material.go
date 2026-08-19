@@ -35,6 +35,12 @@ const certRenewSkew = time.Hour
 // if necessary. Returns (nil, nil) when no CA is configured, meaning the caller should use bearer
 // mode.
 func (c *Client) ensureTLSMaterial(ctx context.Context) (*tlsMaterial, error) {
+	if c.cfg.ForceBearer {
+		// SKYBRIDGE_CONNECTOR_KEY configured: intentionally stateless bearer-only mode. Never touch
+		// certstore (no disk read/write, no Secrets Manager call) even if CABundlePEM/TLSDir are
+		// also set — the reusable key is presented fresh via Token on every call instead.
+		return nil, nil
+	}
 	ca := c.cfg.CABundlePEM
 	if len(ca) == 0 && c.cfg.TLSDir == "" {
 		return nil, nil // no mTLS configured at all -> bearer

@@ -118,6 +118,24 @@ func TestEnsureTLSMaterialReusesValidCachedCert(t *testing.T) {
 	}
 }
 
+func TestEnsureTLSMaterialForceBearerSkipsMTLSEvenWithCachedCert(t *testing.T) {
+	dir := t.TempDir()
+	certPEM, keyPEM := selfSignedMaterialForTest(t)
+	store := certstore.FromEnv(dir, "")
+	if err := store.Save(context.Background(), &certstore.Material{CABundlePEM: []byte("ca"), ClientCertPEM: certPEM, ClientKeyPEM: keyPEM}); err != nil {
+		t.Fatal(err)
+	}
+
+	c := &Client{cfg: Config{ForceBearer: true, TLSDir: dir, CABundlePEM: []byte("ca-bundle")}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}
+	m, err := c.ensureTLSMaterial(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m != nil {
+		t.Fatalf("expected (nil) bearer material when ForceBearer is set, regardless of a valid cached cert, got %v", m)
+	}
+}
+
 func TestEnsureTLSMaterialNoCacheNoCANoTokenReturnsNil(t *testing.T) {
 	dir := t.TempDir()
 	c := &Client{cfg: Config{TLSDir: dir}, logger: slog.New(slog.NewTextHandler(io.Discard, nil))}

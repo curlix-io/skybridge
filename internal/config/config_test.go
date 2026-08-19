@@ -461,6 +461,35 @@ func TestLoadEdgeIamAuthDefaultsOff(t *testing.T) {
 	}
 }
 
+func TestLoadEdgeConnectorKeyOverridesToken(t *testing.T) {
+	t.Setenv("SKYBRIDGE_TOKEN", "one-time-enrollment-token")
+	t.Setenv("SKYBRIDGE_CONNECTOR_KEY", "reusable-connector-key")
+	e := LoadEdge()
+	if e.ConnectorKey != "reusable-connector-key" {
+		t.Fatalf("expected ConnectorKey %q, got %q", "reusable-connector-key", e.ConnectorKey)
+	}
+	if e.Token != "reusable-connector-key" {
+		t.Fatalf("expected SKYBRIDGE_CONNECTOR_KEY to win over SKYBRIDGE_TOKEN, got %q", e.Token)
+	}
+	if !e.ReusableConnectorKeyConfigured() {
+		t.Fatal("expected ReusableConnectorKeyConfigured true when SKYBRIDGE_CONNECTOR_KEY is set")
+	}
+}
+
+func TestLoadEdgeConnectorKeyUnsetLeavesTokenAndDefaultsFalse(t *testing.T) {
+	t.Setenv("SKYBRIDGE_TOKEN", "one-time-enrollment-token")
+	e := LoadEdge()
+	if e.ConnectorKey != "" {
+		t.Fatalf("expected empty ConnectorKey by default, got %q", e.ConnectorKey)
+	}
+	if e.Token != "one-time-enrollment-token" {
+		t.Fatalf("expected Token unchanged when SKYBRIDGE_CONNECTOR_KEY is unset, got %q", e.Token)
+	}
+	if e.ReusableConnectorKeyConfigured() {
+		t.Fatal("expected ReusableConnectorKeyConfigured false by default")
+	}
+}
+
 // TestLoadEdgeTrustDomainSharedAcrossIdentities verifies SKYBRIDGE_TRUST_DOMAIN feeds
 // TrustDomain, StudioTrustDomain, and WireProxy.WireMtlsTrustDomain identically — the single knob
 // that replaced SKYBRIDGE_SPIFFE_TRUST_DOMAIN / SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN /
