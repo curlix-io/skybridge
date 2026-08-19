@@ -133,6 +133,18 @@ dials out, nothing dials in):
   wire proxy in the same process. One install for everything that must run inside your network. See
   [The `edge` role](#the-edge-role) below.
 
+### Roles at a glance
+
+`cmd/skybridge` is a single binary; the role is picked by the first CLI argument
+(`skybridge <role>`):
+
+| Role | Command | What it does | Use it when... |
+|---|---|---|---|
+| **agent** | `skybridge agent` | Sits directly in front of one database, masking PII in-line. Runs in *listener* mode (clients connect to it directly) or *tunnel* mode (dials out to a gateway). | You want the simplest single-database setup. |
+| **gateway** | `skybridge gateway` | Client-facing relay endpoint that one or more agents dial out to (tunnel mode). Optionally records session metadata to a control plane. | You're centralizing several agents' tunnels behind one public endpoint. |
+| **edge** | `skybridge edge` | Dials out to a Connector Gateway for read-only AWS/k8s tool dispatch, and can co-host the wire proxy in the same process. | This is the role most customers run — one install covering everything. See [The `edge` role](#the-edge-role). |
+| **labeller** | `skybridge labeller` | Periodic job that AI-classifies database columns/paths for PII and proposes labels for a human to confirm. | You want path-scoped label coverage without waiting on live query traffic (needs an LLM endpoint + control-plane URL). |
+
 ### Quick start
 
 Put the agent in front of your database and point a native client at it.
@@ -266,10 +278,8 @@ docker compose down
 > For a deeper dive — including a live demo GIF, the anonymizer-strategy config, and exactly what's
 > live vs. groundwork in the path-scoped labels layer — see [REDACTION.md](./REDACTION.md).
 
-Every result row/document passes through a **chain of maskers**, each implementing the same
-interface (`mask.Masker.MaskRow`, in `internal/mask/mask.go`). A miss at any layer is not fatal —
-the value falls through to the next layer, and an unmasked value is *never* corrupted, only ever
-left as-is. The chain runs in this order:
+**TL;DR:** every row passes through a chain of maskers (`mask.Masker.MaskRow`). A miss at one layer
+falls through to the next — an unmasked value is never corrupted, only ever left as-is. Order:
 
 ```mermaid
 %%{init: {"theme": "base", "themeVariables": {"primaryColor": "#0f766e", "primaryTextColor": "#f8fafc", "primaryBorderColor": "#134e4a", "lineColor": "#64748b", "fontSize": "15px"}}}%%
@@ -302,61 +312,34 @@ flowchart TD
     style overlay fill:#f0fdfa,stroke:#0f766e,color:#0f172a
 ```
 
-**Layer 1 — `Remote` (content-shape detection, structured *and* unstructured alike).** This is the
-only layer that inspects the *value itself* rather than the field's name/path, which is what makes
-it work uniformly on structured columns (a `VARCHAR` that happens to contain an email) and on
-unstructured/free-text fields (a notes blob, a JSON string column) alike — it has no notion of
-schema, only "is this string PII-shaped." It's a thin HTTP client for any service that implements
-[Presidio](https://github.com/data-privacy-stack/presidio)'s two-call shape:
+**Layer 1 — `Remote`.** The only layer that inspects the *value itself*, not the field's name — so
+it works the same on a typed column and on free text. A thin client for any
+[Presidio](https://github.com/data-privacy-stack/presidio)-compatible `analyze`/`anonymize` pair
+(`SKYBRIDGE_MASK_ANALYZE_URL`/`_ANONYMIZE_URL`, see [Configure](#configure)). Best-effort: a
+transport error, non-200, or zero detected spans all fall through untouched.
 
-1. `POST {analyzeURL}` with `{text, language}` → a list of detected entity spans (`entity_type`,
-   `start`, `end`, `score`).
-2. `POST {anonymizeURL}` with `{text, analyzer_results, anonymizers}` → the redacted text (this repo
-   always requests the `replace` anonymizer with `new_value: "[redacted]"`).
-
-Configured via `SKYBRIDGE_MASK_ANALYZE_URL` / `SKYBRIDGE_MASK_ANONYMIZE_URL` (both required
-together — see [Configure](#configure)); values shorter than `MinLen` (default 4 bytes) skip the
-call entirely, since numbers/short codes are rarely worth a round trip. Best-effort throughout: a
-transport error, non-200, or zero detected spans all fall through with the value untouched — see
-`internal/mask/remote.go`.
-
-**Layer 2 — `Overlay` (flat column-name map).** A case-insensitive `column name → replacement
-token` map (`SKYBRIDGE_PII_OVERLAY`, or fetched dynamically from the control plane via
-`SKYBRIDGE_PII_OVERLAY_URL` — see
-[Dynamic PII overlay](#dynamic-pii-overlay-fetched-from-your-control-plane)). No path awareness: `total`
-under `order` and `total` under `user` share one rule.
+**Layer 2 — `Overlay`.** A case-insensitive `column name → replacement token` map
+(`SKYBRIDGE_PII_OVERLAY`, static or dynamically fetched — see
+[Dynamic PII overlay](#dynamic-pii-overlay-fetched-from-your-control-plane)). No path awareness:
+`total` under `order` and `total` under `user` share one rule.
 
 #### Path-scoped labels (`internal/pathlabel`, `mask.PathOverlay`)
 
-`mask.PathOverlay` (`internal/mask/pathoverlay.go`) is wired into the live chain in
-`buildMaskerWithOverlay` (`internal/agent/agent.go`) whenever `SKYBRIDGE_PATH_LABEL_URL` is set,
-backed by `internal/pathlabel/remotestore.Store` — a control-plane-fetched `label.Store` (pull
-confirmed labels, push detector-proposed ones), not the in-memory reference implementation. It
-looks up a label keyed on `(ObjectID, FieldPath)` — something a bare column-name rule can never
-express, e.g. distinguishing `order.total` from `user.total`.
+**TL;DR:** an optional third layer, enabled by setting `SKYBRIDGE_PATH_LABEL_URL`. It labels by
+`(table/collection, field path)` instead of bare column name, so `order.total` and `user.total` can
+carry independent rules. Needs real per-row table identity to work, which each engine resolves
+differently:
 
-Its effectiveness depends on the wire engine resolving real per-row table/collection identity:
-`internal/edge/dbquery`'s one-shot exec path (`internal/edge/dbquery/mask.go`) resolves it for
-every query regardless of database — `"{org}:{driver}:{database}:{table}"`, with Mongo documents
-walked *nested* rather than flattened first (`internal/pathlabel/docpath`), so a
-`profile.contact.email` leaf is addressable independently of a top-level `email` column. All three
-wire-proxy engines resolve it too: MySQL parses real per-column table identity off the wire (schema
-+ `org_table` from the column-definition packet); Mongo (`internal/wire/mongo`) correlates each
-`find`/`aggregate`/`getMore` request's collection with its reply via the wire protocol's
-`requestID`/`responseTo` fields, including nested document paths; and Postgres
-(`internal/wire/postgres`) — which only has a numeric table OID on the wire, never a name — resolves
-it via a dedicated `pg_class`/`pg_namespace` lookup connection the agent opens for itself, configured
-with `SKYBRIDGE_POSTGRES_CATALOG_DSN` (see [Postgres table-identity resolution](./REDACTION.md#postgres-table-identity-resolution)
-for why this one needs its own credential rather than reusing the client's). Unconfigured, Postgres
-connections pass an empty `ObjectID`, which `PathOverlay` treats as "no label available" and falls
-through safely, same as if it weren't configured at all.
+| Engine | How it identifies the table |
+|---|---|
+| `dbquery` one-shot exec (all DBs) | `"{org}:{driver}:{database}:{table}"`; Mongo walked nested, so `profile.contact.email` is addressable on its own |
+| MySQL wire proxy | Parses schema + table straight off the column-definition packet |
+| Mongo wire proxy | Correlates each request's collection with its reply via `requestID`/`responseTo` |
+| Postgres wire proxy | Only a numeric table OID is on the wire — needs `SKYBRIDGE_POSTGRES_CATALOG_DSN` for a `pg_class` lookup; unset, falls through safely with no label |
 
-**Structured vs. unstructured, in one sentence:** layer 1 (`Remote`) is what actually gives you
-unstructured-text coverage (it doesn't care what the field is called or where it sits in a
-document); layer 2 (`Overlay`) is a structured-schema shortcut — a cheap, exact-match lookup by
-column name — that skips the network round trip for fields a human has already labelled. Both
-layers run on **every** row/document by default; there's no separate "structured mode" vs.
-"unstructured mode" to configure.
+Layer 1 (`Remote`) is what gives unstructured-text coverage; layer 2 (`Overlay`) and this layer are
+structured-schema shortcuts that skip the network round trip once a field is labelled. All layers
+run on every row by default — there's no separate structured/unstructured mode to pick.
 
 #### Redaction in action: SQL rows, JSON, BSON, and free text
 
@@ -404,83 +387,72 @@ through every layer untouched, exactly as the fallthrough-on-miss contract guara
 
 #### Roadmap: AI-based path labelling (proposed)
 
-Today, a `PathOverlay` label only exists if a human sets it, or if Presidio's content detector
-happens to fire on a sampled leaf value during live query traffic (`internal/edge/dbquery/mask.go`'s
-`proposeLeaf`). A proposed AI classifier (see
-[`docs/AI_PATH_LABELLING_DESIGN.md`](./docs/AI_PATH_LABELLING_DESIGN.md)) would run as a separate,
-periodic scan — independent of query traffic — that proposes labels using both column *name* and
-sampled *values*, so coverage no longer depends on someone having queried a table first:
-
-```
- ┌───────────────────────────────────────────────────────────────────────┐
- │                    Periodic classification scan (offline)             │
- │                                                                        │
- │   read-only catalog          ┌──────────────┐                        │
- │   credential (per DB) ─────► │  sample rows │                        │
- │                               │ per ObjectID │                        │
- │                               └──────┬───────┘                        │
- │                                      │ column name + N sampled values │
- │                                      ▼                                │
- │                          ┌───────────────────────┐                   │
- │                          │  Classifier interface  │                   │
- │                          │ ┌───────────────────┐ │                   │
- │                          │ │ A) LLM API-backed  │ │  pluggable,       │
- │                          │ │    (name+samples   │ │  same output      │
- │                          │ │    → category)     │ │  either way        │
- │                          │ ├───────────────────┤ │                   │
- │                          │ │ B) self-hosted NER │ │                   │
- │                          │ │ (fine-tuned NER)   │ │                   │
- │                          │ └───────────────────┘ │                   │
- │                          └───────────┬───────────┘                   │
- │                                      │ {category, profile, confidence}│
- └──────────────────────────────────────┼────────────────────────────────┘
-                                        ▼
-                     label.Store.Put(..., Source: SourceProposed)
-                                        │
-                                        ▼
-                     ┌──────────────────────────────────────┐
-                     │   remotestore.Store (control plane)   │
-                     │   pii-path-labels/propose             │
-                     └───────────────────┬────────────────────┘
-                                         │ steward reviews & confirms
-                                         ▼
-                     Source flips: proposed ──► manual/platform
-                                         │
-                                         ▼            (only confirmed labels redact live)
- ┌───────────────────────────────────────────────────────────────────────┐
- │                     Live wire-proxy masking chain                     │
- │        Remote → PathOverlay (confirmed labels only) → Overlay         │
- └───────────────────────────────────────────────────────────────────────┘
-```
-
-Key properties carried over from the existing design, unchanged by this addition:
-
-- The classifier only ever writes `Source: SourceProposed` — nothing it proposes redacts live until
-  a steward confirms it, exactly like today's Presidio-driven `proposeLeaf` proposals.
-- It runs **offline**, never on the query hot path — an LLM/NER call is too slow/costly to sit in
-  front of a live database session.
-- Backend (LLM API vs. a self-hosted fine-tuned NER model) is a deployment choice behind one
-  interface, not a fork in the masking chain.
-
-See the design doc for the full rationale, vendor/OSS landscape survey, and how this also lays the
-groundwork for a streaming/CDC masking extension (a schema-registry-keyed `ObjectID` instead of a
-live wire-protocol one).
+**TL;DR:** today a `PathOverlay` label only exists if a human sets it, or Presidio happens to fire
+on a sampled value during live traffic. The proposed AI classifier
+([`docs/AI_PATH_LABELLING_DESIGN.md`](./docs/AI_PATH_LABELLING_DESIGN.md)) runs as a separate,
+periodic, **offline** scan — independent of query traffic — that proposes labels from column name +
+sampled values via a pluggable backend (LLM API or a self-hosted NER model). Same
+`SourceProposed`-only contract as today: nothing it proposes redacts live until a steward confirms
+it.
 
 ### Configure
 
-Set these as environment variables (full list in `internal/config/config.go`):
+Set these as environment variables. The full authoritative list (including every default) lives
+in doc comments in `internal/config/config.go` — the tables below group the same variables by what
+they control, which is easier to scan than one flat list.
+
+**Jump to:** [Core](#core-agent-role) · [PII overlay — static](#pii-overlay--static) ·
+[PII overlay — dynamic](#pii-overlay--dynamic-fetched-from-your-control-plane) ·
+[Content-detection masking](#content-detection-masking-presidio-compatible) ·
+[Custom recognizers](#custom-pii-recognizers) · [Masking metrics](#masking-outcome-metrics) ·
+[Path-scoped labels](#path-scoped-labels--ai-classification) ·
+[Credential handoff](#credential-handoff-the-client-never-holds-a-database-password) ·
+[Client TLS](#client-tls-encrypt-native-client-connections) ·
+[Upstream TLS](#upstream-tls-encrypt-the-agent--database-hop) ·
+[Wire-agent mTLS](#wire-agent-mtls-agent--gateway-tunnel-mode)
+
+#### Core (`agent` role)
 
 | Variable | Default | What it does |
 |---|---|---|
-| `SKYBRIDGE_UPSTREAM` | — | upstream database `host:port` (**required**) |
+| `SKYBRIDGE_UPSTREAM` | — | upstream database `host:port` (**required** in listener mode) |
 | `SKYBRIDGE_DB_TYPE` | `postgres` | `postgres`, `mysql`, or `mongodb` |
-| `SKYBRIDGE_LISTEN` | `:15432` / `:13306` / `:27018` | local address clients connect to |
-| `SKYBRIDGE_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` — set to `debug` for extra per-connection troubleshooting detail; every log line is tagged with a `component` (e.g. `skybridge-agent` for the `agent` role) rather than a hardcoded backend name, so it reads the same whether or not a control-plane integration is configured |
+| `SKYBRIDGE_LISTEN` | `:15432` / `:13306` / `:27018` | local address native clients connect to (listener mode) |
+| `SKYBRIDGE_MODE` | `listener` | `listener` (clients connect straight to this agent) or `tunnel` (agent dials out to a gateway) |
+| `SKYBRIDGE_GATEWAY` | — | gateway agent-endpoint `host:port` the agent dials **out** to in tunnel mode |
+| `SKYBRIDGE_AGENT_ID` | — | stable agent identity (an org's token/key may be shared by many agent processes) |
+| `SKYBRIDGE_ORG_ID` | — | tenant this agent belongs to; a gateway routes client connections to this agent by org id |
+| `SKYBRIDGE_TOKEN` | — | shared bearer token used as the default for every other `*_TOKEN` var below unless overridden |
+| `SKYBRIDGE_TARGETS` | — | JSON array of `{name,addr,db_type}` static targets, listener mode only — tunnel mode resolves targets live per connection instead |
+| `SKYBRIDGE_CONNECTION_ROLE` | — | tags this agent's masking-outcome metrics and connection-scoped recognizer lookups (e.g. `primary`, `readonly-replica`) |
+| `SKYBRIDGE_LOG_LEVEL` | `info` | `debug` \| `info` \| `warn` \| `error` — set to `debug` for extra per-connection troubleshooting detail; every log line is tagged with a `component` (e.g. `skybridge-agent`) rather than a hardcoded backend name, so it reads the same whether or not a control-plane integration is configured |
+
+Switch databases by changing `SKYBRIDGE_DB_TYPE`; everything else below is identical regardless of
+which database you point the agent at.
+
+#### PII overlay — static
+
+| Variable | Default | What it does |
+|---|---|---|
 | `SKYBRIDGE_PII_OVERLAY` | — | JSON `{ "column": "[redacted]" }` map you define (static) |
-| `SKYBRIDGE_PII_OVERLAY_FILE` | — | path to a YAML or JSON file with the same column->token map (see [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml)) — easier to author/diff/commit than inline JSON; takes priority over `SKYBRIDGE_PII_OVERLAY` when both are set, falling back to it if the file is missing/invalid. Also the only form that accepts a `partial_mask: true` rule per column (keep the last 4 characters, mask the rest) instead of a plain replacement token — `SKYBRIDGE_PII_OVERLAY` stays token-only |
+| `SKYBRIDGE_PII_OVERLAY_FILE` | — | path to a YAML or JSON file with the same column→token map (see [`examples/pii-overlay.yaml`](./examples/pii-overlay.yaml)) — easier to author/diff/commit than inline JSON; takes priority over `SKYBRIDGE_PII_OVERLAY` when both are set, falling back to it if the file is missing/invalid. Also the only form that accepts a `partial_mask: true` rule per column (keep the last few characters, mask the rest) instead of a plain replacement token — `SKYBRIDGE_PII_OVERLAY` stays token-only |
+
+#### PII overlay — dynamic (fetched from your control plane)
+
+| Variable | Default | What it does |
+|---|---|---|
 | `SKYBRIDGE_PII_OVERLAY_URL` | — | control-plane endpoint to fetch the org's projected overlay (`GET /your-control-plane/pii-overlay`); enables dynamic, hot-swapped masking |
 | `SKYBRIDGE_PII_OVERLAY_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token for the overlay fetch |
 | `SKYBRIDGE_PII_OVERLAY_POLL_SECONDS` | `60` | overlay refresh interval (min 15s; `-1` = fetch once at startup) |
+| `SKYBRIDGE_PII_OVERLAY_ORG_HEADER` | `X-Organization-Id` | override the request header carrying the org id on the fetch |
+
+See [Dynamic PII overlay](#dynamic-pii-overlay-fetched-from-your-control-plane) below for the full
+request/response contract.
+
+#### Content-detection masking (Presidio-compatible)
+
+| Variable | Default | What it does |
+|---|---|---|
 | `SKYBRIDGE_MASK_ANALYZE_URL` | — (`http://presidio-analyzer:3000/analyze` under `deploy/docker-compose.yml`) | enable content masking: any `POST /analyze` service — Microsoft Presidio by default |
 | `SKYBRIDGE_MASK_ANONYMIZE_URL` | — (`http://presidio-anonymizer:3000/anonymize` under compose) | …paired `POST /anonymize` service |
 | `SKYBRIDGE_MASK_LANGUAGE` | `en` | language passed to the analyzer |
@@ -489,18 +461,43 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_MASK_ALLOW_LIST` | — | comma-separated literal values or regex patterns (per `SKYBRIDGE_MASK_ALLOW_LIST_MATCH`) to never report as PII — suppress a known-safe recurring false positive without disabling an entity type or writing a custom recognizer |
 | `SKYBRIDGE_MASK_ALLOW_LIST_MATCH` | `exact` | `exact` or `regex` — how `SKYBRIDGE_MASK_ALLOW_LIST` entries are interpreted; meaningless when the allow list is empty |
 | `SKYBRIDGE_MASK_MODE` | `best-effort` | `best-effort` forwards a value unmasked if the remote masker errors/is unreachable (a masker outage never blocks a query); `strict` aborts the row/connection instead so unmasked content never reaches the client |
-| `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present an opaque session token, not a DB password) |
-| `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /your-control-plane/proxy-exchange`) |
-| `SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN` | `SKYBRIDGE_TOKEN` | bearer for the exchange call |
-| `SKYBRIDGE_CREDENTIAL_EXCHANGE_PER_MIN` | unset (no limit) | caps exchange attempts per native-client IP per minute — without this, a client could try many guessed session tokens as the password with no local throttling |
-| `SKYBRIDGE_CLIENT_TLS_CERT_FILE` / `_PEM` | — | server cert (Postgres) — enables terminating client TLS so the token isn't sent in cleartext |
-| `SKYBRIDGE_CLIENT_TLS_KEY_FILE` / `_PEM` | — | matching private key |
-| `SKYBRIDGE_CLIENT_TLS_SELF_SIGNED` | `false` | dev: generate an ephemeral self-signed cert at startup (clients use `sslmode=require`) |
-| `SKYBRIDGE_UPSTREAM_TLS` | `disable` | agent→database TLS (Postgres / MySQL / Mongo): `disable` \| `prefer` \| `require` \| `verify-ca` \| `verify-full` |
-| `SKYBRIDGE_UPSTREAM_TLS_CA_FILE` / `_PEM` | system roots | trust roots used by `verify-ca` / `verify-full` (e.g. the RDS CA bundle) |
-| `SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME` | dial host | override the verified hostname / SNI sent to the upstream |
-| `SKYBRIDGE_POSTGRES_CATALOG_DSN` | — | dedicated, read-only Postgres credential (`postgres://user:pass@host:port`) the agent uses on a separate connection it owns for `pg_class`/`pg_namespace` lookups, resolving `PathOverlay`'s table identity for Postgres wire-proxy connections (see [Path-scoped labels](./REDACTION.md#path-scoped-labels-mask-pathoverlay)); unset leaves Postgres's `ObjectID` unresolved, same as before this existed |
-| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT` | — | enables a traffic-fed AI path-label classifier that samples free-text values straight out of live wire-proxy/`dbquery` traffic already flowing through this agent — no second, dedicated read-only DSN required (see `docs/AI_PATH_LABELLING_DESIGN.md` §5.2). Also requires `SKYBRIDGE_PATH_LABEL_URL` (proposals are pushed through the same store `PathOverlay` already syncs against); unset (or no `SKYBRIDGE_PATH_LABEL_URL`) disables it entirely |
+
+#### Custom PII recognizers
+
+Presidio's built-in recognizer set can be extended with your own — either baked in statically, or
+pushed dynamically from your control plane, mirroring the same static/dynamic split as the PII
+overlay above.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SKYBRIDGE_MASK_RECOGNIZERS_YAML` | — | inline YAML/JSON list of custom Presidio recognizers, passed through verbatim as `ad_hoc_recognizers` |
+| `SKYBRIDGE_MASK_RECOGNIZERS_FILE` | — | path to a file with the same shape (takes priority if both are set) |
+| `SKYBRIDGE_PII_RECOGNIZERS_URL` | — | control-plane endpoint to fetch org/driver/connection-role-scoped recognizers dynamically; hot-swaps `SKYBRIDGE_MASK_RECOGNIZERS_YAML`/`_FILE` in place |
+| `SKYBRIDGE_PII_RECOGNIZERS_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token for the fetch |
+| `SKYBRIDGE_PII_RECOGNIZERS_POLL_SECONDS` | `60` | refresh interval |
+
+#### Masking-outcome metrics
+
+Pure-metadata counts (entity type, source layer, connection — **never** masked or raw values),
+pushed to your control plane so a dashboard can show "how much PII did we mask, of what type."
+Off by default.
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SKYBRIDGE_MASKING_METRICS_URL` | — (disabled) | `POST` endpoint metrics are pushed to |
+| `SKYBRIDGE_MASKING_METRICS_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token for the push |
+| `SKYBRIDGE_MASKING_METRICS_PUSH_SECONDS` | `60` (floored) | push interval |
+
+#### Path-scoped labels & AI classification
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SKYBRIDGE_PATH_LABEL_URL` | — (disabled) | control-plane pull/push base URL for confirmed + proposed path-scoped labels; unset leaves `PathOverlay` entirely out of the masking chain |
+| `SKYBRIDGE_PATH_LABEL_TOKEN` | `SKYBRIDGE_TOKEN` | bearer token |
+| `SKYBRIDGE_PATH_LABEL_POLL_SECONDS` | `60` (floored) | confirmed-label pull interval |
+| `SKYBRIDGE_PATH_LABEL_PUSH_SECONDS` | `15` (floored) | proposed-label push interval |
+| `SKYBRIDGE_POSTGRES_CATALOG_DSN` | — | dedicated, read-only Postgres credential (`postgres://user:pass@host:port`) the agent uses on a separate connection it owns for `pg_class`/`pg_namespace` lookups, resolving `PathOverlay`'s table identity for Postgres wire-proxy connections (see [Path-scoped labels](./REDACTION.md#path-scoped-labels-mask-pathoverlay)); unset leaves Postgres's `ObjectID` unresolved |
+| `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_ENDPOINT` | — (disabled) | enables a traffic-fed AI path-label classifier that samples free-text values straight out of live wire-proxy/`dbquery` traffic already flowing through this agent — no second, dedicated read-only DSN required (see `docs/AI_PATH_LABELLING_DESIGN.md` §5.2). Also requires `SKYBRIDGE_PATH_LABEL_URL` |
 | `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_API_KEY` | — | bearer/API key for the LLM endpoint above |
 | `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_CATEGORIES` | — | comma-separated PII category taxonomy the classifier is constrained to return |
 | `SKYBRIDGE_TRAFFIC_SAMPLER_LLM_MIN_CONFIDENCE` | `0.5` | minimum confidence to accept a classifier proposal |
@@ -508,71 +505,50 @@ Set these as environment variables (full list in `internal/config/config.go`):
 | `SKYBRIDGE_TRAFFIC_SAMPLER_MAX_SAMPLES_PER_FIELD` | `20` | max sample values retained per field |
 | `SKYBRIDGE_TRAFFIC_SAMPLER_SCAN_INTERVAL_SECONDS` | `300` | how often buffered fields are classified and proposed |
 
-Switch databases by changing `SKYBRIDGE_DB_TYPE`; everything else is identical.
+For scanning without live query traffic instead, see [The `labeller` role](#the-labeller-role) below.
+
+#### Client TLS (encrypt native-client connections)
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SKYBRIDGE_CLIENT_TLS_CERT_FILE` / `_PEM` | — | server cert (Postgres) — enables terminating client TLS so a session token isn't sent in cleartext |
+| `SKYBRIDGE_CLIENT_TLS_KEY_FILE` / `_PEM` | — | matching private key |
+| `SKYBRIDGE_CLIENT_TLS_SELF_SIGNED` | `false` | dev: generate an ephemeral self-signed cert at startup (clients use `sslmode=require`) |
+
+See ["Encrypt the client link"](#credential-handoff-the-client-never-holds-a-database-password) just below for why this matters most with credential injection enabled.
 
 #### Credential handoff (the client never holds a database password)
 
-By default the agent forwards the client's authentication to the database verbatim, so the native
-client presents a real database credential. With **credential injection** enabled, the client instead
-presents an **opaque session token as its password**; the agent terminates that login locally,
-exchanges the token with your control plane for a freshly-minted, short-lived upstream credential,
-and **originates its own upstream authentication** with it (Postgres: trust / cleartext / md5 /
-SCRAM-SHA-256; MySQL: mysql_native_password / caching_sha2_password). The client therefore never holds
-a credential the database would accept directly, and result rows are still masked inline.
+| Variable | Default | What it does |
+|---|---|---|
+| `SKYBRIDGE_INJECT_CREDENTIALS` | `false` | enable credential handoff (clients present an opaque session token, not a DB password) |
+| `SKYBRIDGE_CREDENTIAL_EXCHANGE_URL` | — | control-plane endpoint that swaps a session token for an upstream credential (`POST /your-control-plane/proxy-exchange`) |
+| `SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN` | `SKYBRIDGE_TOKEN` | bearer for the exchange call |
+| `SKYBRIDGE_CREDENTIAL_EXCHANGE_PER_MIN` | unset (no limit) | caps exchange attempts per native-client IP per minute — without this, a client could try many guessed session tokens as the password with no local throttling |
+
+**TL;DR:** instead of a real DB password, the client presents an **opaque session token** as its
+password. The agent swaps that token with your control plane for a freshly-minted upstream
+credential and logs in itself — the client never holds anything the database would accept directly.
+Covers Postgres, MySQL, and Mongo. See `CredentialExchangeURL`'s shape in `CONTRACT.md` §3 to
+implement the control-plane side.
 
 ```sh
-SKYBRIDGE_DB_TYPE=postgres \
-SKYBRIDGE_UPSTREAM=db.internal:5432 \
-SKYBRIDGE_INJECT_CREDENTIALS=true \
-SKYBRIDGE_TOKEN=<agent-service-bearer> \
-SKYBRIDGE_CREDENTIAL_EXCHANGE_URL=https://app.example.com/your-control-plane/proxy-exchange \
-go run ./cmd/skybridge agent
-```
-
-Your control plane mints the session token however it likes (e.g. a `proxy-session` endpoint that
-returns a short-lived token for a given role/connection); the user then, in pgAdmin/psql/DBeaver/
-mongosh, points the client at the **Skybridge listener** (not the database), uses any username, and
-pastes the session token **as the password**. Injection covers **Postgres**, **MySQL**, and
-**Mongo**. See `CredentialExchangeURL`'s request/response shape in `CONTRACT.md` §3 to implement
-the control-plane side.
-
-**MySQL specifics.** MySQL's default auth is challenge-response, so the token cannot be recovered from
-it. The agent therefore terminates client TLS and switches the client to the **`mysql_clear_password`**
-plugin to receive the token in cleartext over the encrypted link — so MySQL injection **requires client
-TLS** and the client must enable the cleartext plugin (e.g. `mysql --enable-cleartext-plugin ...`, or
-the equivalent checkbox in GUI tools). Upstream, the agent answers `mysql_native_password` or
-`caching_sha2_password`; the latter's first-connection "full authentication" sends the password over
-the wire, so it **requires upstream TLS** (`SKYBRIDGE_UPSTREAM_TLS`) — RSA-key full auth is not
-supported.
-
-**Mongo specifics.** Unlike Postgres/MySQL, a MongoDB driver will not auto-discover an
-agent-forced mechanism — real MongoDB servers never advertise `PLAIN` via `hello`'s
-`saslSupportedMechs`, so **the client must be explicitly configured with `authMechanism=PLAIN`**
-(e.g. `mongodb://user:<token>@host:port/?authMechanism=PLAIN`) to present the session token; there
-is no server-side trick to force this the way MySQL's `AuthSwitchRequest` does. The agent
-terminates client TLS (Mongo has no in-band STARTTLS, so the TLS handshake happens immediately on
-connect, before `hello`) and answers the client's `saslStart(PLAIN)` directly — no `saslContinue`
-round trip, unlike SCRAM. Upstream, the agent originates a fresh SCRAM-SHA-256 conversation,
-falling back to SCRAM-SHA-1 only if the upstream reports `MechanismUnavailable` for this user
-(MongoDB <4.0, or a user provisioned with SHA-1-only credentials).
-
-**Encrypt the client link (so the token isn't sent in cleartext).** The session token rides in the
-client's password, so terminate client TLS at the agent: provide a cert/key (or, for dev, a
-self-signed one) and connect the client with `sslmode=require`.
-
-```sh
-# dev: ephemeral self-signed cert; clients use sslmode=require (no chain verification)
 SKYBRIDGE_DB_TYPE=postgres SKYBRIDGE_UPSTREAM=db.internal:5432 \
-SKYBRIDGE_INJECT_CREDENTIALS=true SKYBRIDGE_TOKEN=… \
+SKYBRIDGE_INJECT_CREDENTIALS=true SKYBRIDGE_TOKEN=<agent-service-bearer> \
 SKYBRIDGE_CREDENTIAL_EXCHANGE_URL=https://app.example.com/your-control-plane/proxy-exchange \
-SKYBRIDGE_CLIENT_TLS_SELF_SIGNED=true \
 go run ./cmd/skybridge agent
-# then: psql "host=localhost port=15432 user=me sslmode=require"  (password = the session token)
+# client connects to the Skybridge listener (not the DB), any username, session token as password
 ```
 
-For production provide a real cert via `SKYBRIDGE_CLIENT_TLS_CERT_FILE` / `SKYBRIDGE_CLIENT_TLS_KEY_FILE`
-so clients can `sslmode=verify-full`. With client TLS off the agent logs a warning that the token is
-sent in the client's cleartext password — keep that link on a trusted hop.
+| Protocol | What's different |
+|---|---|
+| **MySQL** | Needs client TLS + the client's cleartext-password plugin enabled (`mysql --enable-cleartext-plugin`) — MySQL's default auth is challenge-response, so the token can't be recovered otherwise. Needs upstream TLS too if the upstream negotiates `caching_sha2_password` full auth. |
+| **Mongo** | Client must set `authMechanism=PLAIN` explicitly (`mongodb://user:<token>@host:port/?authMechanism=PLAIN`) — a driver won't auto-discover this the way MySQL's `AuthSwitchRequest` forces it. |
+
+**Encrypt the client link:** the token rides in the password, so terminate client TLS
+(`SKYBRIDGE_CLIENT_TLS_SELF_SIGNED=true` for a quick dev self-signed cert and `sslmode=require`; a
+real `SKYBRIDGE_CLIENT_TLS_CERT_FILE`/`_KEY_FILE` for production and `sslmode=verify-full`). With
+client TLS off, the agent logs a warning that the token travels in cleartext.
 
 #### Upstream TLS (encrypt the agent → database hop)
 
@@ -587,6 +563,12 @@ mirroring libpq's `sslmode`:
 | `require` | TLS mandatory; **no** certificate verification (encrypt only) |
 | `verify-ca` | TLS mandatory; verify the certificate **chain** against the trust roots (skips hostname) |
 | `verify-full` | TLS mandatory; verify chain **and** hostname |
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SKYBRIDGE_UPSTREAM_TLS` | `disable` | one of the modes above |
+| `SKYBRIDGE_UPSTREAM_TLS_CA_FILE` / `_PEM` | system roots | trust roots used by `verify-ca` / `verify-full` (e.g. the RDS CA bundle) |
+| `SKYBRIDGE_UPSTREAM_TLS_SERVER_NAME` | dial host | override the verified hostname / SNI sent to the upstream |
 
 This is also what unblocks **`rds_iam` credential injection** — the RDS IAM auth token is only
 accepted over a TLS connection. For RDS/Aurora, point the trust roots at the AWS RDS CA bundle:
@@ -613,6 +595,26 @@ differently:
   must advertise `CLIENT_SSL`; with `require`/`verify-*` a server that does not is a hard failure,
   while `prefer` falls back to a plaintext upstream. If the *client* itself speaks TLS to the agent,
   that connection drops to transparent passthrough (no masking, no upstream-TLS interception).
+
+#### Wire-agent mTLS (agent ↔ gateway, tunnel mode)
+
+In tunnel mode, the agent normally dials the gateway using the plaintext `SKYBRIDGE_TOKEN` shared
+secret. These variables switch it to mTLS instead — the agent enrolls once for a signed client
+cert (or loads a pre-issued one) and presents that on every reconnect:
+
+| Variable | Default | What it does |
+|---|---|---|
+| `SKYBRIDGE_WIRE_MTLS_ENROLL_URL` | — | control-plane origin used to bootstrap the first cert (e.g. `https://app.example.com`) |
+| `SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN` | — | one-time token for that first enroll call |
+| `SKYBRIDGE_WIRE_MTLS_TLS_DIR` | — | directory that persists `ca.pem`/`client.crt`/`client.key` across restarts |
+| `SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_FILE` / `_PEM` | — | pins the enroll call's server TLS |
+| `SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_FILE` / `_PEM` | — | pre-issued client cert, skipping the enroll call entirely (e.g. injected from Secrets Manager) |
+| `SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_FILE` / `_PEM` | — | matching private key |
+| `SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN` | — | mirrors the issued cert to this AWS Secrets Manager secret so a replaced task recovers its identity without a fresh enroll token — same mechanism as [Keeping mTLS identity alive across redeploys](#keeping-mtls-identity-alive-across-redeploys) below, applied to the wire tunnel identity |
+| `SKYBRIDGE_WIRE_MTLS_IAM_AUTH` | `false` | presign `sts:GetCallerIdentity` with ambient AWS credentials instead of a static enrollment token — see [Fix 2](#keeping-mtls-identity-alive-across-redeploys) below; paired with `SKYBRIDGE_WIRE_MTLS_ENROLL_URL` |
+| `SKYBRIDGE_TRUST_DOMAIN` | identity-specific default | cosmetic identity label placed in the CSR SAN; shared across this and the edge's connector/Studio identities |
+
+Falls back to the plaintext bearer-token tunnel automatically when none of these are set.
 
 #### Dynamic PII overlay (fetched from your control plane)
 
@@ -714,11 +716,9 @@ wire engine (`internal/wire`) vs. exec-only support (`dbquery`/`dbexec`).
 
 ### The `edge` role
 
-`skybridge edge` is the single thing a customer installs. It dials **out** (egress-only) to the SaaS
-Connector Gateway and serves dispatched **single read-only tool calls** locally — chiefly live AWS
-reads against the customer account (`aws_readonly_cli`, `cloudwatch_logs_insights`,
-`cloudwatch_metrics`) — and, when DB targets are configured, also runs the co-located wire proxy. The
-LLM agent loop and platform-coupled tools stay on the SaaS side.
+**TL;DR:** `skybridge edge` is the one thing a customer installs. It dials **out** (egress-only) to
+the SaaS Connector Gateway, runs dispatched **read-only** AWS/k8s calls locally, and can co-host the
+wire proxy in the same process. The LLM agent loop stays on the SaaS side.
 
 ```sh
 SKYBRIDGE_EDGE_GATEWAY=gateway.example.com:8020 \
@@ -752,77 +752,26 @@ until it's actually close to expiry.
 
 #### Keeping mTLS identity alive across redeploys
 
-⚠️ **On any platform that gives you ephemeral local disk — ECS/Fargate, EKS/Kubernetes pods, or
-similar — a plain `SKYBRIDGE_TLS_DIR` cache does not survive a redeploy.** Any replacement (a new
-ECS task from a new image/task definition or a CPU/memory bump, or a Kubernetes pod rescheduled by a
-rollout, node drain, or eviction — anything that spins up a fresh instance) wipes that disk. Since
-`SKYBRIDGE_ENROLLMENT_TOKEN` is **single-use**, the replacement can't just re-enroll: the token was
-already consumed by the instance it replaced, and the deploy fails.
+**TL;DR:** on ephemeral compute (ECS/Fargate, EKS pods), a redeploy wipes `SKYBRIDGE_TLS_DIR` and
+the enrollment token was already single-use — so a naive redeploy fails to re-enroll. Two fixes,
+either works, and they compose:
 
-**Fix 1 (cache the cert):** point the edge at an AWS Secrets Manager secret and it will keep its
-identity there too, so a replacement task/pod picks up right where the old one left off — no new
-token required. This works the same way on EKS as on ECS/Fargate, as long as the pod's IAM role
-(e.g. via IRSA/Pod Identity) can reach Secrets Manager — `SKYBRIDGE_TLS_DIR` itself can stay
-ephemeral (`emptyDir` or container-local disk) either way.
+| Fix | How | Set |
+|---|---|---|
+| **1. Cache the cert in Secrets Manager** | Edge mirrors its issued cert to a secret; a replacement task loads it instead of re-enrolling. | One of `SKYBRIDGE_IDENTITY_SECRET_ARN` (connector), `SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN` (Studio), `SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN` (wire tunnel) — needs `GetSecretValue`/`PutSecretValue` on the task's IAM role |
+| **2. Skip the static token (AWS IAM auth)** | Edge presigns `sts:GetCallerIdentity` with its ambient AWS role and exchanges that for a fresh enroll token on every restart — nothing to consume, nothing to run out. Same pattern as Teleport's `iam` join / Vault's `aws` auth. | `SKYBRIDGE_IAM_AUTH=true` + `SKYBRIDGE_IAM_ENROLL_URL` (covers connector + Studio; the wire tunnel's equivalent is `SKYBRIDGE_WIRE_MTLS_IAM_AUTH` + `SKYBRIDGE_WIRE_MTLS_ENROLL_URL`) |
 
-| Identity | Env var |
-|---|---|
-| Connector (edge → Connector Gateway) | `SKYBRIDGE_IDENTITY_SECRET_ARN` |
-| Query Studio (edge → Studio Gateway) | `SKYBRIDGE_STUDIO_IDENTITY_SECRET_ARN` |
-| Wire-mTLS (agent → relay gateway tunnel) | `SKYBRIDGE_WIRE_MTLS_IDENTITY_SECRET_ARN` |
+Fix 2 still checks Fix 1's cache first — a still-valid cached cert is always reused before minting a
+new one. Requires server-side STS-replay verification on your control plane; see `internal/edgeiam`
+for the request shape.
 
-Point one of these at a secret ARN the task's IAM role can `GetSecretValue`/`PutSecretValue` on
-(`internal/certstore`), and the edge mirrors its cert there on first enrollment, then loads from it
-on every subsequent start.
+#### Reconnect resilience
 
-**Fix 2 (skip the static token entirely — AWS IAM auth, 2026-08-12).** This is the stronger fix:
-instead of a human-minted, single-use `SKYBRIDGE_ENROLLMENT_TOKEN`, the edge presigns its own
-`sts:GetCallerIdentity` call with whatever ambient AWS credentials it already has — an ECS task
-role, or an EKS pod's IRSA/Pod Identity role — and exchanges that for a fresh enroll token from your
-control plane. Nothing is consumed by minting it, so it's safe to call on *every* restart — a
-redeployed task or rescheduled pod with a wiped disk just mints a new one instead of hitting the
-"token already used by the instance I'm replacing" failure.
-This is the same pattern behind Teleport's `iam` join method, HashiCorp Vault's `aws` auth method,
-and HashiCorp Boundary's KMS-registered workers: re-prove identity from a platform-native source on
-every boot rather than persisting a bootstrap secret.
-
-```sh
-SKYBRIDGE_IAM_AUTH=true \
-SKYBRIDGE_IAM_ENROLL_URL=https://api.example.com \
-go run ./cmd/skybridge edge
-```
-
-Covers both the connector (edge → Connector Gateway) and Studio (edge → Studio Gateway) identities
-in one flag; `internal/wiremtls` (agent → relay gateway tunnel) has its own equivalent,
-`SKYBRIDGE_WIRE_MTLS_IAM_AUTH` (paired with `SKYBRIDGE_WIRE_MTLS_ENROLL_URL`). The control plane
-must implement the corresponding server-side STS-replay verification — see `internal/edgeiam` for
-the exact request shape presigned and posted. Fix 1's Secrets Manager cache still applies on top of
-this: a cached, still-valid cert is always reused first, so Fix 2 only triggers a mint on an actual
-cache miss (first enrollment, or every identity provider's own cert TTL expiring).
-
-#### Reconnect resilience (2026-08-12)
-
-Both call-home clients (`internal/edge/transport` for the Connector Gateway, and
-`internal/edge/studiotransport` for the Studio Gateway) share the same reconnect design, matched
-to the same fixes on the Curlix-SaaS side (`docs/design/skybridge-masking-architecture.md` §10.5
-in the `curlix` repo):
-
-- **Jittered exponential backoff** (`jitteredBackoff`, `[d/2, d)`) on every reconnect, starting at
-  1s and doubling up to `Config.MaxBackoff` (default 30s) — avoids a thundering herd of edges
-  reconnecting to the same gateway in lockstep.
-- **Backoff only resets to baseline after a stable connection** (`backoffResetAfter`, 60s) — a
-  connection that connects and drops again immediately (bad keepalive, a flapping listener) keeps
-  the backoff ladder escalating instead of retrying at a 0-delay pace forever.
-- **Auth failures get a distinct, higher floor** (`authFailureBackoffFloor`, 120s) — an
-  `Unauthenticated` `Connect` error (expired/revoked credential) is a config problem, not a
-  transient blip; retrying at the ordinary backoff cadence would otherwise hammer the gateway
-  every few seconds until a human fixes the credential.
-- **`PreConnect` pre-flight** — before opening the full `Connect` stream, the client makes one
-  cheap unary `PreConnect` call. A gateway that's draining (redeploying) or has revoked this
-  identity answers `{ok: false, retry_after_seconds, reason}`, and the client sleeps that long
-  (jittered) before trying again — no failed stream handshake needed to find out. This is
-  advisory: a gateway that predates this RPC (or any transient error calling it) is treated as "go
-  ahead," so it never blocks a connection on its own.
+Both call-home clients (`internal/edge/transport`, `internal/edge/studiotransport`) share one
+reconnect design: jittered exponential backoff (1s doubling to 30s) that only resets after 60s of
+stable connection, a higher backoff floor (120s) specifically for auth failures so a bad credential
+doesn't get hammered every few seconds, and a cheap `PreConnect` pre-flight that lets a draining
+gateway say "retry in N seconds" before a full stream handshake is attempted.
 
 ### Docs
 

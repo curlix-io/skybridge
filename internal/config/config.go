@@ -544,9 +544,19 @@ func LoadEdge() Edge {
 	if len(caBundle) == 0 {
 		caBundle = key.CABundlePEM
 	}
+	// SKYBRIDGE_GATEWAY is also LoadAgent's own env var for the *wire proxy's* target (see line
+	// ~277) — a deployment that sets SKYBRIDGE_KEY (this edge's call-home target) alongside
+	// WireProxy.GatewayAddr (a distinct host, e.g. the wire NLB) must not have the wire proxy's
+	// address silently win here. Prefer the key-derived host over that ambiguous shared var; only
+	// fall back to SKYBRIDGE_GATEWAY for legacy deployments with no SKYBRIDGE_KEY at all.
+	gatewayAddr := hostPort(key.GatewayHost, "7100")
+	if gatewayAddr == "" {
+		gatewayAddr = env("SKYBRIDGE_GATEWAY", "")
+	}
+	gatewayAddr = env("SKYBRIDGE_EDGE_GATEWAY", gatewayAddr)
 	return Edge{
 		LogLevel:                env("SKYBRIDGE_LOG_LEVEL", ""),
-		GatewayAddr:             env("SKYBRIDGE_EDGE_GATEWAY", env("SKYBRIDGE_GATEWAY", hostPort(key.GatewayHost, "7100"))),
+		GatewayAddr:             gatewayAddr,
 		TenantID:                env("SKYBRIDGE_ORG_ID", key.OrgID),
 		EdgeID:                  env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", key.EdgeID)),
 		Token:                   env("SKYBRIDGE_TOKEN", key.EnrollmentToken),
