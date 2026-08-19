@@ -578,6 +578,71 @@ func captureClientHelloBytes(t *testing.T, serverName string) []byte {
 	return nil
 }
 
+// TestListenClientsLogsSNIResolvedOrgOnRejection is the regression test for the log-consistency fix
+// found debugging a real "target not found" rejection live: logRejectedClient's "rejected" line
+// already logged the SNI-resolved org, but ListenClients' own "ended" line logged the listener's
+// stale static org instead (it never learned the per-connection override), so the two log lines for
+// the very same rejected connection disagreed — confusing during exactly the kind of cross-log
+// debugging this was found by. ListenClients must now log the same effective (SNI-resolved) org in
+// both.
+func TestListenClientsLogsSNIResolvedOrgOnRejection(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	var logBuf bytes.Buffer
+	logger := slog.New(slog.NewTextHandler(&logBuf, nil))
+
+	g := gateway.New(logger)
+	g.SetSNIOrgResolution(true)
+	g.SetTargetResolver(stubTargetResolver{}) // resolves nothing -> ErrTargetNotFound, same as the live bug
+
+	// org-2 has a registered agent (so rejection happens at target-resolve, past the SNI override
+	// point) — org-1 is the listener's static config, standing in for the shared/pinned org a real
+	// client's SNI would be routed away from.
+	agentLocal, agentGW := mtlsAgentPipe(t, "org-2", "agent-org-2")
+	go func() { _ = g.ServeAgent(agentGW) }()
+	cfg := config.Agent{Mode: config.ModeTunnel}
+	deps := agent.Deps{Dial: echoDialer, Engine: func(string) (wire.Engine, error) { return taggedEngine{tag: "x"}, nil }, Masker: mask.Noop{}}
+	go func() { _ = agent.ServeTunnelConn(ctx, agentLocal, cfg, deps, silent()) }()
+	if !waitForOrgAgent(g, "org-2", 2*time.Second) {
+		t.Fatal("agent for org-2 did not register in time")
+	}
+
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+	go func() { _ = g.ListenClients(ctx, ln, "org-1", "db") }()
+
+	conn, err := net.Dial("tcp", ln.Addr().String())
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(captureClientHelloBytes(t, "org-2.wire.test")); err != nil {
+		t.Fatal(err)
+	}
+
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		if strings.Contains(logBuf.String(), "client relay for org=") {
+			break
+		}
+		time.Sleep(20 * time.Millisecond)
+	}
+
+	// slog's TextHandler Go-quotes the whole msg value (it contains literal '"' characters from the
+	// %q-formatted org/target), so the captured bytes contain escaped \" sequences, not bare "chars.
+	logged := logBuf.String()
+	if !strings.Contains(logged, `client relay for org=\"org-2\"`) {
+		t.Fatalf("expected the \"ended\" log line to use the SNI-resolved org-2, got: %s", logged)
+	}
+	if strings.Contains(logged, `client relay for org=\"org-1\"`) {
+		t.Fatalf("\"ended\" log line still uses the stale static org-1 instead of the SNI-resolved org: %s", logged)
+	}
+}
+
 // TestServeClientSNIOrgResolutionRoutesToTheRightOrg is the regression test for the
 // docs/design/kubernetes-access-broker.md §11.5 fix: one shared listener, statically configured
 // for org-1, must route a client presenting `org-2.wire.test` SNI to org-2's agent instead —

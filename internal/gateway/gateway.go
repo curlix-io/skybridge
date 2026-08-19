@@ -356,8 +356,14 @@ func (g *Gateway) ListenClients(ctx context.Context, ln net.Listener, orgID, tar
 			return err
 		}
 		go func() {
-			if err := g.ServeClient(conn, orgID, target); err != nil {
-				g.log.Warn(fmt.Sprintf("client relay for org=%q target=%q ended: %v", orgID, target, err))
+			effectiveOrgID, err := g.serveClientResolved(conn, orgID, target)
+			if err != nil {
+				// effectiveOrgID (not the listener's static orgID) so this log line matches
+				// logRejectedClient's SNI-resolved org — before this fix, a connection rejected
+				// under its SNI-resolved org (dynamic per-org routing overriding a shared
+				// listener's static org) logged "ended" under the stale static org instead,
+				// making the two paired log lines for the same connection disagree.
+				g.log.Warn(fmt.Sprintf("client relay for org=%q target=%q ended: %v", effectiveOrgID, target, err))
 			}
 		}()
 	}
@@ -399,7 +405,16 @@ func (g *Gateway) resolveOrgFromSNI(client net.Conn, target string) (orgID strin
 // connection (docs/design/kubernetes-access-broker.md §11.5): the same shared listener port then
 // serves every org that connects with its own `<org-id>.<host>` SNI, instead of exactly one
 // statically pinned org.
+//
+// Public signature kept single-return (error only) for existing callers/tests; serveClientResolved
+// below is the same logic exposing the SNI-resolved effective org id too, for ListenClients' own
+// "ended" log line to agree with logRejectedClient's.
 func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
+	_, err := g.serveClientResolved(client, orgID, target)
+	return err
+}
+
+func (g *Gateway) serveClientResolved(client net.Conn, orgID, target string) (effectiveOrgID string, err error) {
 	if g.sniOrgResolution {
 		if resolved, peeked, ok := g.resolveOrgFromSNI(client, target); ok {
 			orgID = resolved
@@ -408,41 +423,42 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 			client = peeked
 		}
 	}
+	effectiveOrgID = orgID
 	defer client.Close()
 
 	clientAddr := client.RemoteAddr().String()
 
 	if (g.requireOrgID || g.resolverIsLive()) && strings.TrimSpace(orgID) == "" {
 		g.logRejectedClient(target, clientAddr, orgID, ErrMissingOrgID)
-		return ErrMissingOrgID
+		return effectiveOrgID, ErrMissingOrgID
 	}
 	g.mu.RLock()
 	ac := g.orgAgents[orgID]
 	g.mu.RUnlock()
 	if ac == nil {
 		g.logRejectedClient(target, clientAddr, orgID, ErrNoAgent)
-		return ErrNoAgent
+		return effectiveOrgID, ErrNoAgent
 	}
 	if g.connLimiter != nil {
 		if err := g.connLimiter.Allow(clientAddr, orgID); err != nil {
 			g.logRejectedClient(target, clientAddr, orgID, err)
-			return err
+			return effectiveOrgID, err
 		}
 	}
 	if g.orgConnLimiter != nil {
 		if !g.orgConnLimiter.Acquire(orgID) {
 			g.logRejectedClient(target, clientAddr, orgID, ErrOrgConnLimitReached)
-			return ErrOrgConnLimitReached
+			return effectiveOrgID, ErrOrgConnLimitReached
 		}
 		defer g.orgConnLimiter.Release(orgID)
 	}
 	if g.admitter != nil {
 		actx, cancel := context.WithTimeout(context.Background(), storeTimeout)
-		err := g.admitter.Admit(actx, orgID, clientAddr, target)
+		aerr := g.admitter.Admit(actx, orgID, clientAddr, target)
 		cancel()
-		if err != nil {
-			g.logRejectedClient(target, clientAddr, orgID, err)
-			return err
+		if aerr != nil {
+			g.logRejectedClient(target, clientAddr, orgID, aerr)
+			return effectiveOrgID, aerr
 		}
 	}
 
@@ -451,7 +467,7 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 	rcancel()
 	if err != nil {
 		g.logRejectedClient(target, clientAddr, orgID, err)
-		return err
+		return effectiveOrgID, err
 	}
 
 	stream, err := ac.sess.Open(tunnel.OpenMeta{
@@ -463,7 +479,7 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 	}.Encode())
 	if err != nil {
 		g.logRejectedClient(target, clientAddr, orgID, err)
-		return err
+		return effectiveOrgID, err
 	}
 	defer stream.Close()
 
@@ -504,7 +520,7 @@ func (g *Gateway) ServeClient(client net.Conn, orgID, target string) error {
 	if serr := g.storeEnded(sessionID, res); serr != nil {
 		g.log.Warn(fmt.Sprintf("session recording (end) failed: %v", serr))
 	}
-	return rerr
+	return effectiveOrgID, rerr
 }
 
 // logRejectedClient records why a native-client connection was torn down before any bytes were
