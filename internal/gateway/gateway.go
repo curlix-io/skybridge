@@ -36,16 +36,17 @@ const storeTimeout = 5 * time.Second
 
 // Gateway holds the live agent registry and relays client connections over agent tunnels.
 type Gateway struct {
-	log              *slog.Logger
-	store            Store
-	admitter         WireAdmitter
-	resolver         TargetResolver
-	requireOrgID     bool
-	connLimiter      ConnRateLimiter
-	orgConnLimiter   OrgConnLimiter
-	agentConnLimiter ConnRateLimiter
-	sniOrgResolution bool
-	sniPeekTimeout   time.Duration
+	log               *slog.Logger
+	store             Store
+	admitter          WireAdmitter
+	resolver          TargetResolver
+	agentAuthVerifier AgentAuthVerifier
+	requireOrgID      bool
+	connLimiter       ConnRateLimiter
+	orgConnLimiter    OrgConnLimiter
+	agentConnLimiter  ConnRateLimiter
+	sniOrgResolution  bool
+	sniPeekTimeout    time.Duration
 
 	mu        sync.RWMutex
 	agents    map[string]*agentConn // agent id -> connection
@@ -58,23 +59,26 @@ type agentConn struct {
 	sess  *tunnel.Session
 }
 
-// New creates a Gateway. Agents must present a verified mTLS client certificate at registration —
-// there is no bearer-token fallback (see ServeAgent).
+// New creates a Gateway. Agents must present either a verified mTLS client certificate or (when
+// no cert is presented) a bearer token verified via AgentAuthVerifier — see ServeAgent. The
+// verifier defaults to NoopAgentAuthVerifier, which fails closed (no bearer fallback until one is
+// installed).
 func New(logger *slog.Logger) *Gateway {
 	if logger == nil {
 		logger = slog.Default()
 	}
 	return &Gateway{
-		log:              logger,
-		store:            NoopStore{},
-		admitter:         NoopWireAdmitter{},
-		resolver:         NoopTargetResolver{},
-		connLimiter:      NoopConnRateLimiter{},
-		orgConnLimiter:   NoopOrgConnLimiter{},
-		agentConnLimiter: NoopConnRateLimiter{},
-		agents:           make(map[string]*agentConn),
-		orgAgents:        make(map[string]*agentConn),
-		sniPeekTimeout:   3 * time.Second,
+		log:               logger,
+		store:             NoopStore{},
+		admitter:          NoopWireAdmitter{},
+		resolver:          NoopTargetResolver{},
+		agentAuthVerifier: NoopAgentAuthVerifier{},
+		connLimiter:       NoopConnRateLimiter{},
+		orgConnLimiter:    NoopOrgConnLimiter{},
+		agentConnLimiter:  NoopConnRateLimiter{},
+		agents:            make(map[string]*agentConn),
+		orgAgents:         make(map[string]*agentConn),
+		sniPeekTimeout:    3 * time.Second,
 	}
 }
 
@@ -103,6 +107,16 @@ func (g *Gateway) SetWireAdmitter(a WireAdmitter) {
 		a = NoopWireAdmitter{}
 	}
 	g.admitter = a
+}
+
+// SetAgentAuthVerifier installs the bearer-token verifier used as a registration fallback when an
+// agent connection has no verified mTLS client certificate (defaults to NoopAgentAuthVerifier,
+// which fails closed — no bearer fallback until a real verifier is installed).
+func (g *Gateway) SetAgentAuthVerifier(v AgentAuthVerifier) {
+	if v == nil {
+		v = NoopAgentAuthVerifier{}
+	}
+	g.agentAuthVerifier = v
 }
 
 // SetTargetResolver installs the per-connection target resolver (defaults to NoopTargetResolver,
@@ -171,10 +185,13 @@ func (g *Gateway) ListenAgents(ctx context.Context, ln net.Listener) error {
 }
 
 // ServeAgent handles one agent connection: register, then track liveness until it disconnects.
-// conn must be a *tls.Conn with a verified client cert (the gateway's agent listener wraps ln in a
-// wiremtls.ServerConfig-based tls.Config that requires one) — the cert's SPIFFE identity is the
-// only agent-registration credential. There is no bearer-token fallback: a connection without a
-// verified client cert is rejected outright, regardless of what it sends as reg.Token.
+// conn is typically a *tls.Conn (the gateway's agent listener wraps ln in a
+// wiremtls.ServerConfig-based tls.Config); when it presents a verified client cert, the cert's
+// SPIFFE identity is the registration credential. When it doesn't, reg.Token is verified via
+// AgentAuthVerifier as a bearer-credential fallback (SKYBRIDGE_CONNECTOR_KEY — see
+// internal/agent/agent.go's RunTunnel) — installed via SetAgentAuthVerifier; the default
+// NoopAgentAuthVerifier fails closed, so this fallback is a no-op until a real verifier is
+// configured.
 func (g *Gateway) ServeAgent(conn net.Conn) error {
 	sess := tunnel.Server(conn)
 	defer sess.Close()
@@ -212,8 +229,23 @@ func (g *Gateway) ServeAgent(conn net.Conn) error {
 		reg.OrgID = certTenant
 		reg.AgentID = certAgentID
 	} else {
-		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "unauthorized: mTLS client certificate required"})
-		return errors.New("gateway: agent connection has no verified mTLS client certificate")
+		bearerTenant, bearerAgentID, ok := g.agentAuthVerifier.Verify(context.Background(), reg.Token)
+		if !ok {
+			_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "unauthorized: mTLS client certificate or a valid bearer token is required"})
+			return errors.New("gateway: agent connection has no verified mTLS client certificate or valid bearer token")
+		}
+		if reg.OrgID != "" && reg.OrgID != bearerTenant {
+			_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "org_id does not match bearer token"})
+			return errors.New("gateway: agent org_id does not match bearer token")
+		}
+		if reg.AgentID != "" && bearerAgentID != "" && reg.AgentID != bearerAgentID {
+			_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "agent_id does not match bearer token"})
+			return errors.New("gateway: agent agent_id does not match bearer token")
+		}
+		reg.OrgID = bearerTenant
+		if bearerAgentID != "" {
+			reg.AgentID = bearerAgentID
+		}
 	}
 	if reg.AgentID == "" {
 		_ = sess.SendControl(tunnel.Control{Kind: tunnel.KindRegisterAck, OK: false, Error: "missing agent_id"})

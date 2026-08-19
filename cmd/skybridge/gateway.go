@@ -104,9 +104,11 @@ func runGateway(args []string) {
 		gw.SetStore(gateway.NewHTTPStore(cfg.ControlPlaneURL, cfg.SessionPath, cfg.ControlPlaneToken))
 		gw.SetWireAdmitter(gateway.NewHTTPWireAdmitter(cfg.ControlPlaneURL, cfg.WireAdmitPath, cfg.ControlPlaneToken))
 		gw.SetTargetResolver(gateway.NewHTTPTargetResolver(cfg.ControlPlaneURL, cfg.WireTargetPath, cfg.ControlPlaneToken))
+		gw.SetAgentAuthVerifier(gateway.NewHTTPAgentAuthVerifier(cfg.ControlPlaneURL, cfg.AgentAuthVerifyPath, cfg.ControlPlaneToken))
 		logger.Info(fmt.Sprintf("session recording -> %s%s", cfg.ControlPlaneURL, cfg.SessionPath))
 		logger.Info(fmt.Sprintf("wire IP admission -> %s%s", cfg.ControlPlaneURL, cfg.WireAdmitPath))
 		logger.Info(fmt.Sprintf("wire target resolution -> %s%s", cfg.ControlPlaneURL, cfg.WireTargetPath))
+		logger.Info(fmt.Sprintf("agent bearer-token verification -> %s%s", cfg.ControlPlaneURL, cfg.AgentAuthVerifyPath))
 	} else {
 		logger.Warn("no SKYBRIDGE_GW_CONTROL_PLANE_URL — target resolution will fail closed for all client connections")
 	}

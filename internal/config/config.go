@@ -44,6 +44,13 @@ type Agent struct {
 	// agent by org id (one agent process serves one org's databases).
 	Token string // shared registration token
 
+	// ConnectorKey (SKYBRIDGE_CONNECTOR_KEY) is the same long-lived, reusable bearer credential as
+	// Edge.ConnectorKey (see its doc comment) — set once, re-read fresh on every restart, no
+	// persistence needed. When set, RunTunnel skips the wire-mTLS enrollment/certstore path
+	// entirely and presents this as a bearer credential on the tunnel-registration Control message
+	// instead (see ReusableConnectorKeyConfigured and internal/gateway/gateway.go's ServeAgent).
+	ConnectorKey string
+
 	// Targets is the static {name,addr,db_type} list used by LISTENER mode only (SKYBRIDGE_TARGETS).
 	// Tunnel mode no longer consults this: the gateway resolves addr/db_type live per connection via
 	// a TargetResolver and pushes it on the stream-open payload (see
@@ -323,6 +330,7 @@ func LoadAgent() Agent {
 		AgentID:               env("SKYBRIDGE_AGENT_ID", ""),
 		OrgID:                 env("SKYBRIDGE_ORG_ID", ""),
 		Token:                 env("SKYBRIDGE_TOKEN", ""),
+		ConnectorKey:          env("SKYBRIDGE_CONNECTOR_KEY", ""),
 		Targets:               parseTargets(env("SKYBRIDGE_TARGETS", "")),
 		MaskAnalyzeURL:        env("SKYBRIDGE_MASK_ANALYZE_URL", ""),
 		MaskAnonymizeURL:      env("SKYBRIDGE_MASK_ANONYMIZE_URL", ""),
@@ -410,6 +418,14 @@ func LoadAgent() Agent {
 		a.MaskAdHocRecognizers = recognizers
 	}
 	return a
+}
+
+// ReusableConnectorKeyConfigured mirrors Edge.ReusableConnectorKeyConfigured: reports whether
+// SKYBRIDGE_CONNECTOR_KEY was set, forcing the wire-proxy tunnel registration to skip mTLS
+// entirely (regardless of any WireMtls* config also present) and present this as a bearer
+// credential instead. See RunTunnel and internal/gateway/gateway.go's ServeAgent.
+func (a Agent) ReusableConnectorKeyConfigured() bool {
+	return strings.TrimSpace(a.ConnectorKey) != ""
 }
 
 // WireMtlsConfigured reports whether the agent should attempt mTLS for the gateway tunnel instead
@@ -647,14 +663,15 @@ type Gateway struct {
 
 	// Session recording -> control plane (optional). When ControlPlaneURL is set the gateway reports
 	// native-session lifecycle to the configured path; otherwise sessions are not recorded.
-	ControlPlaneURL   string
-	ControlPlaneToken string
-	SessionPath       string // base path for session lifecycle reports (default gateway.DefaultSessionPath)
-	WireAdmitPath     string // base path for wire client IP admission (default gateway.DefaultWireAdmitPath)
-	WireTargetPath    string // base path for live target resolution (default gateway.DefaultWireTargetPath)
-	RequireOrgID      bool   // reject agent registration / client relay without organization_id
-	ClientConnPerMin  int    // max new native client connections per client IP per minute (0 = unlimited)
-	OrgConnPerMin     int    // max new native client connections per organization_id per minute (0 = unlimited)
+	ControlPlaneURL     string
+	ControlPlaneToken   string
+	SessionPath         string // base path for session lifecycle reports (default gateway.DefaultSessionPath)
+	WireAdmitPath       string // base path for wire client IP admission (default gateway.DefaultWireAdmitPath)
+	WireTargetPath      string // base path for live target resolution (default gateway.DefaultWireTargetPath)
+	AgentAuthVerifyPath string // base path for agent bearer-token verification (default gateway.DefaultAgentAuthVerifyPath)
+	RequireOrgID        bool   // reject agent registration / client relay without organization_id
+	ClientConnPerMin    int    // max new native client connections per client IP per minute (0 = unlimited)
+	OrgConnPerMin       int    // max new native client connections per organization_id per minute (0 = unlimited)
 	// OrgMaxConcurrentClients caps how many client connections one organization_id can have
 	// relayed *simultaneously* through this gateway (0 = unlimited). ClientConnPerMin/OrgConnPerMin
 	// above only throttle the *rate* of new connections — nothing stops one org from opening that
@@ -736,6 +753,7 @@ func LoadGateway() Gateway {
 		SessionPath:             env("SKYBRIDGE_GW_SESSION_PATH", gateway.DefaultSessionPath),
 		WireAdmitPath:           env("SKYBRIDGE_GW_WIRE_ADMIT_PATH", gateway.DefaultWireAdmitPath),
 		WireTargetPath:          env("SKYBRIDGE_GW_WIRE_TARGET_PATH", gateway.DefaultWireTargetPath),
+		AgentAuthVerifyPath:     env("SKYBRIDGE_GW_AGENT_AUTH_VERIFY_PATH", gateway.DefaultAgentAuthVerifyPath),
 		RequireOrgID:            requireOrgID,
 		ClientConnPerMin:        clientConnPerMin,
 		OrgConnPerMin:           orgConnPerMin,

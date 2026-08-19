@@ -490,6 +490,27 @@ func TestLoadEdgeConnectorKeyUnsetLeavesTokenAndDefaultsFalse(t *testing.T) {
 	}
 }
 
+func TestLoadAgentConnectorKeyConfigured(t *testing.T) {
+	t.Setenv("SKYBRIDGE_CONNECTOR_KEY", "reusable-connector-key")
+	a := LoadAgent()
+	if a.ConnectorKey != "reusable-connector-key" {
+		t.Fatalf("expected ConnectorKey %q, got %q", "reusable-connector-key", a.ConnectorKey)
+	}
+	if !a.ReusableConnectorKeyConfigured() {
+		t.Fatal("expected ReusableConnectorKeyConfigured true when SKYBRIDGE_CONNECTOR_KEY is set")
+	}
+}
+
+func TestLoadAgentConnectorKeyUnsetDefaultsFalse(t *testing.T) {
+	a := LoadAgent()
+	if a.ConnectorKey != "" {
+		t.Fatalf("expected empty ConnectorKey by default, got %q", a.ConnectorKey)
+	}
+	if a.ReusableConnectorKeyConfigured() {
+		t.Fatal("expected ReusableConnectorKeyConfigured false by default")
+	}
+}
+
 // TestLoadEdgeTrustDomainSharedAcrossIdentities verifies SKYBRIDGE_TRUST_DOMAIN feeds
 // TrustDomain, StudioTrustDomain, and WireProxy.WireMtlsTrustDomain identically — the single knob
 // that replaced SKYBRIDGE_SPIFFE_TRUST_DOMAIN / SKYBRIDGE_STUDIO_SPIFFE_TRUST_DOMAIN /
