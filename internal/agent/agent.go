@@ -527,25 +527,34 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 			logger.Warn("[tunnel] SKYBRIDGE_INJECT_CREDENTIALS set but no SKYBRIDGE_CREDENTIAL_EXCHANGE_URL; using verbatim auth passthrough.")
 		}
 	}
-	// The gateway's agent listener requires a verified mTLS client certificate unconditionally (no
-	// bearer-token fallback — see internal/gateway/gateway.go's ServeAgent) — fail fast here instead
-	// of dialing in a loop that can never succeed.
-	if !cfg.WireMtlsConfigured() {
+	// The gateway's agent listener requires either a verified mTLS client certificate or (when
+	// SKYBRIDGE_CONNECTOR_KEY is set) the reusable bearer credential — see
+	// internal/gateway/gateway.go's ServeAgent. Fail fast here instead of dialing in a loop that
+	// can never succeed.
+	if !cfg.WireMtlsConfigured() && !cfg.ReusableConnectorKeyConfigured() {
 		return fmt.Errorf(
-			"tunnel mode requires wire mTLS: set SKYBRIDGE_WIRE_MTLS_ENROLL_URL (+ SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN), " +
-				"SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM/_KEY_PEM, or SKYBRIDGE_WIRE_MTLS_IAM_AUTH",
+			"tunnel mode requires wire mTLS or SKYBRIDGE_CONNECTOR_KEY: set SKYBRIDGE_WIRE_MTLS_ENROLL_URL (+ SKYBRIDGE_WIRE_MTLS_ENROLLMENT_TOKEN), " +
+				"SKYBRIDGE_WIRE_MTLS_CLIENT_CERT_PEM/_KEY_PEM, SKYBRIDGE_WIRE_MTLS_IAM_AUTH, or SKYBRIDGE_CONNECTOR_KEY",
 		)
 	}
 	dialer := &net.Dialer{Timeout: dialTimeout}
 	var wireTLS *tls.Config
 	hasPresetCert := len(cfg.WireMtlsClientCertPEM) > 0 && len(cfg.WireMtlsClientKeyPEM) > 0
 	switch {
+	case cfg.ReusableConnectorKeyConfigured():
+		// Stateless bearer mode: plain TLS to the gateway (system roots, no client cert) — the
+		// reusable key is presented fresh as Control.Token on every registration instead. Skips
+		// mTLS/certstore entirely, same as Edge/Studio's ForceBearer (transport/material.go).
+		logger.Info("[tunnel] SKYBRIDGE_CONNECTOR_KEY configured — presenting a reusable bearer credential, no mTLS client cert.")
 	case cfg.WireMtlsIamAuthEnabled:
 		logger.Info(fmt.Sprintf("[tunnel] wire mTLS via AWS IAM auth configured (%s) — will present a client cert once enrolled.", cfg.WireMtlsEnrollURL))
 	case hasPresetCert:
 		logger.Info("[tunnel] wire mTLS configured with a pre-issued client cert — will present it.")
 	default:
 		logger.Info(fmt.Sprintf("[tunnel] wire mTLS enrollment configured (%s) — will present a client cert once enrolled.", cfg.WireMtlsEnrollURL))
+	}
+	if cfg.ReusableConnectorKeyConfigured() {
+		wireTLS = &tls.Config{} // system roots verify the gateway; no client cert presented
 	}
 
 	wireMtlsEnrollHintLogged := false
@@ -560,7 +569,9 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		return ok
 	}
 	for ctx.Err() == nil {
-		if cfg.WireMtlsIamAuthEnabled {
+		if cfg.ReusableConnectorKeyConfigured() {
+			// wireTLS is set once, before the loop — nothing to enroll/refresh per iteration.
+		} else if cfg.WireMtlsIamAuthEnabled {
 			material, merr := wiremtls.EnsureMaterialViaIAM(ctx,
 				wiremtls.IamEnrollConfig{BaseURL: cfg.WireMtlsEnrollURL, TenantID: cfg.OrgID, AgentID: cfg.AgentID},
 				wiremtls.EnrollConfig{
@@ -658,7 +669,10 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		// whatever it climbed to during the outage that just ended.
 		backoff = reconnectBaseBackoff
 		mode := "no client cert yet (registration will be rejected)"
-		if wireTLS != nil {
+		if cfg.ReusableConnectorKeyConfigured() {
+			conn = tls.Client(conn, wireTLS)
+			mode = "bearer"
+		} else if wireTLS != nil {
 			conn = tls.Client(conn, wireTLS)
 			mode = "mTLS"
 		}
@@ -687,6 +701,7 @@ func ServeTunnelConn(ctx context.Context, conn net.Conn, cfg config.Agent, deps 
 		Kind:    tunnel.KindRegister,
 		AgentID: cfg.AgentID,
 		OrgID:   cfg.OrgID,
+		Token:   cfg.ConnectorKey,
 	}); err != nil {
 		return err
 	}
