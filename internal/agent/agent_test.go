@@ -6,6 +6,7 @@ import (
 	"io"
 	"log/slog"
 	"net"
+	"strings"
 	"testing"
 	"time"
 
@@ -286,6 +287,29 @@ func TestRunTunnelRequiresGatewayAddr(t *testing.T) {
 	err := RunTunnel(context.Background(), config.Agent{}, Deps{}, nil)
 	if err == nil {
 		t.Fatal("expected an error when SKYBRIDGE_GATEWAY is unset")
+	}
+}
+
+func TestRunTunnelRequiresWireMtlsOrConnectorKey(t *testing.T) {
+	err := RunTunnel(context.Background(), config.Agent{GatewayAddr: "127.0.0.1:0"}, Deps{}, nil)
+	if err == nil {
+		t.Fatal("expected an error when neither wire mTLS nor SKYBRIDGE_CONNECTOR_KEY is configured")
+	}
+	if !strings.Contains(err.Error(), "SKYBRIDGE_CONNECTOR_KEY") {
+		t.Fatalf("expected the fail-fast error to mention SKYBRIDGE_CONNECTOR_KEY as an alternative, got: %v", err)
+	}
+}
+
+// TestRunTunnelConnectorKeyConfiguredBypassesMtlsRequirement confirms SKYBRIDGE_CONNECTOR_KEY
+// alone satisfies RunTunnel's fail-fast auth-configured check (previously wire mTLS was the only
+// option) — cancelling ctx before the dial loop starts means a nil return proves the fail-fast
+// branch was never hit, without needing a live gateway stub.
+func TestRunTunnelConnectorKeyConfiguredBypassesMtlsRequirement(t *testing.T) {
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	err := RunTunnel(ctx, config.Agent{GatewayAddr: "127.0.0.1:0", ConnectorKey: "reusable-key"}, Deps{}, nil)
+	if err != nil {
+		t.Fatalf("expected nil (ctx already cancelled before the dial loop) when ConnectorKey is set without wire mTLS, got: %v", err)
 	}
 }
 

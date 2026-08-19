@@ -27,6 +27,14 @@ func (f funcWireAdmitter) Admit(ctx context.Context, orgID, clientIP, target str
 	return f(ctx, orgID, clientIP, target)
 }
 
+// funcAgentAuthVerifier adapts a function to AgentAuthVerifier for tests that need a specific
+// canned response, without standing up an HTTP control plane.
+type funcAgentAuthVerifier func(ctx context.Context, token string) (tenantID, agentID string, ok bool)
+
+func (f funcAgentAuthVerifier) Verify(ctx context.Context, token string) (string, string, bool) {
+	return f(ctx, token)
+}
+
 func TestNew_DefaultsLoggerWhenNil(t *testing.T) {
 	g := New(nil)
 	if g.log == nil {
@@ -373,6 +381,118 @@ func TestServeAgent_RejectsMissingAgentID(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("ServeAgent did not return in time")
 	}
+}
+
+// TestServeAgent_NoMTLSNoVerifierInstalledRejectsBearerToken is a regression guard for the
+// default-fails-closed contract: without SetAgentAuthVerifier, a connection with no verified mTLS
+// client cert must still be rejected even if it presents a Token — NoopAgentAuthVerifier must
+// never accept anything.
+func TestServeAgent_NoMTLSNoVerifierInstalledRejectsBearerToken(t *testing.T) {
+	g := New(silentLogger())
+	gw, local := net.Pipe()
+	defer local.Close()
+
+	errc := make(chan error, 1)
+	go func() { errc <- g.ServeAgent(gw) }()
+
+	sess := tunnel.Client(local)
+	if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindRegister, AgentID: "a1", OrgID: "org1", Token: "some-token"}); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := sess.NextControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.OK {
+		t.Fatal("expected registration to be rejected with no mTLS cert and no verifier installed")
+	}
+	<-errc
+}
+
+// TestServeAgent_BearerFallbackAcceptsValidToken is the actual reusable-connector-key path: no
+// mTLS client cert, but a verifier that recognizes the presented Token.
+func TestServeAgent_BearerFallbackAcceptsValidToken(t *testing.T) {
+	g := New(silentLogger())
+	g.SetAgentAuthVerifier(funcAgentAuthVerifier(func(_ context.Context, token string) (string, string, bool) {
+		if token != "good-token" {
+			return "", "", false
+		}
+		return "org1", "a1", true
+	}))
+	gw, local := net.Pipe()
+	defer local.Close()
+
+	errc := make(chan error, 1)
+	go func() { errc <- g.ServeAgent(gw) }()
+
+	sess := tunnel.Client(local)
+	if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindRegister, AgentID: "a1", OrgID: "org1", Token: "good-token"}); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := sess.NextControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ack.OK {
+		t.Fatalf("expected registration to succeed via bearer fallback, got error: %s", ack.Error)
+	}
+	local.Close()
+	<-errc
+}
+
+// TestServeAgent_BearerFallbackRejectsInvalidToken confirms an unrecognized token is rejected the
+// same way a missing/invalid mTLS cert is — not silently treated as anonymous/unscoped.
+func TestServeAgent_BearerFallbackRejectsInvalidToken(t *testing.T) {
+	g := New(silentLogger())
+	g.SetAgentAuthVerifier(funcAgentAuthVerifier(func(context.Context, string) (string, string, bool) {
+		return "", "", false
+	}))
+	gw, local := net.Pipe()
+	defer local.Close()
+
+	errc := make(chan error, 1)
+	go func() { errc <- g.ServeAgent(gw) }()
+
+	sess := tunnel.Client(local)
+	if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindRegister, AgentID: "a1", OrgID: "org1", Token: "bad-token"}); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := sess.NextControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.OK {
+		t.Fatal("expected registration to be rejected for an unrecognized bearer token")
+	}
+	<-errc
+}
+
+// TestServeAgent_BearerFallbackOrgIDMismatchRejected mirrors the mTLS-cert org_id-mismatch check
+// (gateway.go's mtlsVerified branch) — a caller can't claim a different org_id than the token it
+// presents is actually bound to.
+func TestServeAgent_BearerFallbackOrgIDMismatchRejected(t *testing.T) {
+	g := New(silentLogger())
+	g.SetAgentAuthVerifier(funcAgentAuthVerifier(func(context.Context, string) (string, string, bool) {
+		return "org1", "a1", true
+	}))
+	gw, local := net.Pipe()
+	defer local.Close()
+
+	errc := make(chan error, 1)
+	go func() { errc <- g.ServeAgent(gw) }()
+
+	sess := tunnel.Client(local)
+	if err := sess.SendControl(tunnel.Control{Kind: tunnel.KindRegister, AgentID: "a1", OrgID: "org2", Token: "good-token"}); err != nil {
+		t.Fatal(err)
+	}
+	ack, err := sess.NextControl()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ack.OK {
+		t.Fatal("expected registration to be rejected when claimed org_id does not match the bearer token's bound org")
+	}
+	<-errc
 }
 
 func TestListenClients_AcceptErrorPropagatesWhenCtxNotCancelled(t *testing.T) {
