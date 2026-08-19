@@ -1,6 +1,7 @@
 package agent
 
 import (
+	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
 	"crypto/rand"
@@ -47,16 +48,56 @@ func buildClientTLSConfig(cfg config.Agent, logger *slog.Logger) (*tls.Config, e
 	return nil, nil
 }
 
+// listenerClientTLSConfig is RunListener's (agent-hosted, single-target mode) counterpart to
+// buildClientTLSConfig, adding persistence + control-plane self-reporting for the self-signed case
+// (docs/design/kubernetes-access-broker.md §11.7): unlike RunTunnel, RunListener's cert is what an
+// admin pins directly via wire_listener_ca_pem, so regenerating a fresh ephemeral one on every
+// restart (buildClientTLSConfig's existing behavior) would silently invalidate that pinning on every
+// redeploy. Delegates to buildClientTLSConfig unchanged for the operator-provided-cert and
+// TLS-not-configured cases; only the self-signed branch differs.
+func listenerClientTLSConfig(ctx context.Context, cfg config.Agent, logger *slog.Logger) (*tls.Config, error) {
+	if logger == nil {
+		logger = slog.Default()
+	}
+	if len(cfg.ClientTLSCertPEM) > 0 && len(cfg.ClientTLSKeyPEM) > 0 || !cfg.ClientTLSSelfSigned {
+		return buildClientTLSConfig(cfg, logger)
+	}
+	certPEM, keyPEM, err := ensureSelfSignedCert(ctx, "/var/lib/skybridge/wire-listener-tls", cfg.ClientTLSSecretARN)
+	if err != nil {
+		return nil, fmt.Errorf("client TLS: self-signed cert: %w", err)
+	}
+	cert, err := tlsCertificateFromPEM(certPEM, keyPEM)
+	if err != nil {
+		return nil, fmt.Errorf("client TLS: self-signed cert: %w", err)
+	}
+	logger.Warn("using a self-signed client TLS cert (SKYBRIDGE_CLIENT_TLS_SELF_SIGNED). " +
+		"Clients must connect with sslmode=require (no verify) unless an admin registers this cert " +
+		"(Administration -> Connectivity) for real verification.")
+	go reportListenerCert(ctx, cfg, cfg.DBType, certPEM, logger)
+	return &tls.Config{Certificates: []tls.Certificate{cert}, MinVersion: tls.VersionTLS12}, nil
+}
+
 // generateSelfSignedCert mints a short-lived in-memory ECDSA P-256 self-signed certificate suitable
 // for local/dev TLS termination (clients use sslmode=require, which does not verify the chain).
 func generateSelfSignedCert() (tls.Certificate, error) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	certPEM, keyPEM, err := generateSelfSignedCertPEM()
 	if err != nil {
 		return tls.Certificate{}, err
 	}
+	return tls.X509KeyPair(certPEM, keyPEM)
+}
+
+// generateSelfSignedCertPEM is generateSelfSignedCert's PEM-returning counterpart, needed wherever
+// the raw bytes must be persisted (certstore, see certpersist.go) or reported to the control plane
+// (see certreport.go) rather than only loaded into an in-memory tls.Certificate.
+func generateSelfSignedCertPEM() (certPEM, keyPEM []byte, err error) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		return nil, nil, err
+	}
 	serial, err := rand.Int(rand.Reader, new(big.Int).Lsh(big.NewInt(1), 128))
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 	tmpl := &x509.Certificate{
 		SerialNumber:          serial,
@@ -70,15 +111,15 @@ func generateSelfSignedCert() (tls.Certificate, error) {
 	}
 	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
 	keyDER, err := x509.MarshalECPrivateKey(key)
 	if err != nil {
-		return tls.Certificate{}, err
+		return nil, nil, err
 	}
-	certPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return tls.X509KeyPair(certPEM, keyPEM)
+	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
+	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
+	return certPEM, keyPEM, nil
 }
 
 // engineFactory returns an engine selector that builds the Postgres, MySQL and Mongo engines with

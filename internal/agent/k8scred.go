@@ -24,10 +24,11 @@ type k8sExchangeRequest struct {
 }
 
 type k8sExchangeResponse struct {
-	BearerToken        string `json:"bearer_token"`
-	CACertPEM          string `json:"ca_cert_pem,omitempty"`
-	InsecureSkipVerify bool   `json:"insecure_skip_verify,omitempty"`
-	Error              string `json:"detail,omitempty"`
+	BearerToken          string `json:"bearer_token"`
+	CACertPEM            string `json:"ca_cert_pem,omitempty"`
+	InsecureSkipVerify   bool   `json:"insecure_skip_verify,omitempty"`
+	AllowInteractiveExec bool   `json:"allow_interactive_exec,omitempty"`
+	Error                string `json:"detail,omitempty"`
 }
 
 // NewHTTPK8sCredentialResolver builds a k8sapi.CredentialResolver that exchanges a client-presented
@@ -82,8 +83,9 @@ func NewHTTPK8sCredentialResolver(cfg config.Agent) k8sapi.CredentialResolver {
 			return k8sapi.UpstreamCredential{}, fmt.Errorf("k8s credential exchange returned no bearer token")
 		}
 		cred := k8sapi.UpstreamCredential{
-			BearerToken:        out.BearerToken,
-			InsecureSkipVerify: out.InsecureSkipVerify,
+			BearerToken:          out.BearerToken,
+			InsecureSkipVerify:   out.InsecureSkipVerify,
+			AllowInteractiveExec: out.AllowInteractiveExec,
 		}
 		if out.CACertPEM != "" {
 			cred.CACertPEM = []byte(out.CACertPEM)

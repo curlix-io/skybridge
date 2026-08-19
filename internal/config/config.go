@@ -198,6 +198,37 @@ type Agent struct {
 	// overwhelmingly common case (agent granting access to its own cluster); override only for an
 	// unusual topology (e.g. testing against a cluster this agent isn't running inside).
 	K8sAPIUpstreamAddr string // SKYBRIDGE_K8S_API_UPSTREAM_ADDR (default "kubernetes.default.svc:443")
+	// K8sClientTLSSelfSigned/K8sClientTLSSecretARN cover the CloudFormation/ECS deployment shape,
+	// which has no Helm-style install-time templating to generate+persist a self-signed cert into a
+	// Secret before the container starts (docs/design/kubernetes-access-broker.md §11.7). When no
+	// K8sClientTLSCertPEM/_KeyPEM is provided and K8sClientTLSSelfSigned is set, the agent itself
+	// generates one at startup; K8sClientTLSSecretARN (when also set) persists it via the certstore
+	// package (Secrets Manager, layered over local disk) so a replaced ECS task recovers the same
+	// cert an admin may have already pinned via wire_listener_ca_pem, instead of minting a new one
+	// (and silently invalidating pinning) on every redeploy.
+	K8sClientTLSSelfSigned bool   // SKYBRIDGE_K8S_CLIENT_TLS_SELF_SIGNED
+	K8sClientTLSSecretARN  string // SKYBRIDGE_K8S_CLIENT_TLS_SECRET_ARN
+	// ClientTLSSecretARN is the same persistence for the DB wire-listener's self-signed cert
+	// (ClientTLSSelfSigned above) — same rationale, different identity (this is the client-facing
+	// listener cert, not WireMtlsIdentitySecretARN's tunnel-enrollment identity).
+	ClientTLSSecretARN string // SKYBRIDGE_CLIENT_TLS_SECRET_ARN
+
+	// ListenerCertReportURL, when set, makes the agent report its own client-facing listener cert
+	// (wire DB listener or K8s API listener, whichever is active) back to the control plane once at
+	// startup — closing the "cert registration has no auto-discovery path" gap
+	// (docs/design/kubernetes-access-broker.md §11.5/§11.7): an admin no longer has to manually copy
+	// the PEM out of a Secret and paste it into the Connectivity panel. Best-effort: a failed report
+	// only logs a warning and never blocks serving traffic — an admin can still paste the cert
+	// manually as a fallback.
+	ListenerCertReportURL string // SKYBRIDGE_LISTENER_CERT_REPORT_URL
+
+	// SessionTranscriptReportURL is the listener-mode (RunListener, RunK8sAPIListener) counterpart to
+	// the tunnel-mode transcript flush (flushTranscript, over the gateway control channel): those two
+	// modes have no gateway-assigned control-plane session id or open tunnel.Session to flush over
+	// (see SessionReplayEnabled's doc above), so a listener-mode connection instead mints its own
+	// local session id and flushes its transcript via one authenticated HTTP POST to this URL — same
+	// bearer (CredentialExchangeToken) and org attribution (OrgID) as ListenerCertReportURL.
+	SessionTranscriptReportURL string // SKYBRIDGE_SESSION_TRANSCRIPT_REPORT_URL
 
 	// Client-side TLS termination (Postgres). When a cert+key is provided (or a self-signed cert is
 	// requested) the agent accepts the native client's SSLRequest and completes a TLS handshake, so
@@ -340,10 +371,16 @@ func LoadAgent() Agent {
 		K8sClientTLSKeyPEM:       pemFromEnv("SKYBRIDGE_K8S_CLIENT_TLS_KEY_PEM", "SKYBRIDGE_K8S_CLIENT_TLS_KEY_FILE"),
 		K8sAPIListenAddr:         env("SKYBRIDGE_K8S_API_LISTEN_ADDR", ""),
 		K8sAPIUpstreamAddr:       env("SKYBRIDGE_K8S_API_UPSTREAM_ADDR", "kubernetes.default.svc:443"),
+		K8sClientTLSSelfSigned:   truthy(env("SKYBRIDGE_K8S_CLIENT_TLS_SELF_SIGNED", "")),
+		K8sClientTLSSecretARN:    env("SKYBRIDGE_K8S_CLIENT_TLS_SECRET_ARN", ""),
 
 		ClientTLSCertPEM:    pemFromEnv("SKYBRIDGE_CLIENT_TLS_CERT_PEM", "SKYBRIDGE_CLIENT_TLS_CERT_FILE"),
 		ClientTLSKeyPEM:     pemFromEnv("SKYBRIDGE_CLIENT_TLS_KEY_PEM", "SKYBRIDGE_CLIENT_TLS_KEY_FILE"),
 		ClientTLSSelfSigned: truthy(env("SKYBRIDGE_CLIENT_TLS_SELF_SIGNED", "")),
+		ClientTLSSecretARN:  env("SKYBRIDGE_CLIENT_TLS_SECRET_ARN", ""),
+
+		ListenerCertReportURL:      env("SKYBRIDGE_LISTENER_CERT_REPORT_URL", ""),
+		SessionTranscriptReportURL: env("SKYBRIDGE_SESSION_TRANSCRIPT_REPORT_URL", ""),
 
 		UpstreamTLSMode:       strings.ToLower(env("SKYBRIDGE_UPSTREAM_TLS", "")),
 		UpstreamTLSCAPEM:      pemFromEnv("SKYBRIDGE_UPSTREAM_TLS_CA_PEM", "SKYBRIDGE_UPSTREAM_TLS_CA_FILE"),

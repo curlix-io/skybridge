@@ -310,7 +310,7 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *slog.Logger) err
 	if cfg.UpstreamAddr == "" {
 		return fmt.Errorf("set SKYBRIDGE_UPSTREAM to the database address (host:port)")
 	}
-	clientTLS, err := buildClientTLSConfig(cfg, logger)
+	clientTLS, err := listenerClientTLSConfig(ctx, cfg, logger)
 	if err != nil {
 		return err
 	}
@@ -389,9 +389,15 @@ func RunListener(ctx context.Context, cfg config.Agent, logger *slog.Logger) err
 			}
 			defer upstream.Close()
 			sessCtx := ContextWithWireClientIP(ctx, client.RemoteAddr().String())
-			// Listener mode has no control-plane session id to tag a transcript with (it never
-			// goes through the gateway's SessionStarted call) — replay is tunnel-mode only for now.
-			if err := proxyConn(sessCtx, engine, client, upstream, masker, resolver, wire.NoopRecorder{}); err != nil {
+			// Listener mode has no gateway-assigned control-plane session id (it never goes through
+			// the gateway's SessionStarted call) — httpTranscriptRecorder mints its own local session
+			// id and flushes via HTTP instead of a tunnel control message (see httptranscript.go,
+			// docs/design/kubernetes-access-broker.md §11.7). NoopRecorder when SKYBRIDGE_SESSION_
+			// REPLAY_ENABLED/SKYBRIDGE_SESSION_TRANSCRIPT_REPORT_URL aren't both set, same opt-in
+			// posture as tunnel mode.
+			recorder := newHTTPTranscriptRecorder(cfg, cfg.DBType)
+			defer flushHTTPTranscript(ctx, recorder, logger)
+			if err := proxyConn(sessCtx, engine, client, upstream, masker, resolver, recorder); err != nil {
 				logger.Debug(fmt.Sprintf("session ended: %v", err))
 			}
 		}()
@@ -728,7 +734,7 @@ func serveStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session, c
 	}
 	logger.Debug(fmt.Sprintf("stream open: target %q db_type %q addr %q", meta.Target, meta.DBType, meta.Addr))
 	if meta.DBType == "kubernetes" {
-		serveK8sStream(ctx, st, meta, cfg, logger)
+		serveK8sStream(ctx, st, sess, meta, cfg, logger)
 		return
 	}
 	engine, err := deps.Engine(meta.DBType)
