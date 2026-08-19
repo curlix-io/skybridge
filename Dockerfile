@@ -15,6 +15,18 @@ RUN CGO_ENABLED=0 GOOS=linux go build -trimpath -ldflags="-s -w" -o /out/skybrid
 
 FROM python:3.13-slim
 RUN pip install --no-cache-dir awscli && rm -rf /root/.cache /tmp/*
+# kubectl: only the edge role's kubectl_exec/k8s_token_request tools (internal/edge/k8sexec,
+# internal/edge/k8stoken) shell out to a real `kubectl` binary, but per this file's own top
+# comment about awscli, every deployment carries this layer even when it never uses it — same
+# accepted trade-off of collapsing agent/gateway/edge/labeller into one image. python:3.13-slim
+# has no curl by default, so install it first (removed again in the same layer).
+RUN apt-get update && apt-get install -y --no-install-recommends curl ca-certificates && \
+    ARCH=$(dpkg --print-architecture) && \
+    curl -fsSL -o /usr/local/bin/kubectl \
+    "https://dl.k8s.io/release/$(curl -fsSL https://dl.k8s.io/release/stable.txt)/bin/linux/${ARCH}/kubectl" && \
+    chmod +x /usr/local/bin/kubectl && \
+    apt-get purge -y curl && apt-get autoremove -y && \
+    rm -rf /var/lib/apt/lists/*
 COPY --from=build /out/skybridge /usr/local/bin/skybridge
 EXPOSE 15432 13306 27018 8010
 ENV PYTHONUNBUFFERED=1
