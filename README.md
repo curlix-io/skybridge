@@ -746,9 +746,11 @@ existing deployments and scripts keep working unchanged. The connector-gateway (
 |---|---|---|
 | Bearer (default) | `SKYBRIDGE_TOKEN` | Simple shared secret over TLS. Fine for a quick start. |
 | mTLS (hardened) | `SKYBRIDGE_CA_BUNDLE_PEM`/`_FILE` + `SKYBRIDGE_ENROLLMENT_TOKEN` | The edge generates a keypair, calls `Enroll` once with the one-time token to get a signed client cert, then connects with mTLS. Preferred for production. |
+| Reusable connector key (stateless) | `SKYBRIDGE_CONNECTOR_KEY` | Pure bearer mode, forced even if `SKYBRIDGE_CA_BUNDLE_PEM`/`_FILE`/`SKYBRIDGE_TLS_DIR` are also set — the edge never calls `certstore` (no disk read/write, no Secrets Manager). Unlike `SKYBRIDGE_TOKEN`'s default (which falls back to the same value as `SKYBRIDGE_ENROLLMENT_TOKEN` when unset), this is meant to be a genuinely long-lived, reusable value presented fresh on every boot — same model as hoop.dev's `HOOP_KEY`/StrongDM's `SDM_RELAY_TOKEN`. Use this when you want to run the edge as a plain Kubernetes `Deployment` with no `PersistentVolumeClaim` at all, at the cost of a static shared secret instead of mTLS's per-boot-derived identity. |
 
 The issued cert is cached under `SKYBRIDGE_TLS_DIR` and reused on restart — no new token needed
-until it's actually close to expiry.
+until it's actually close to expiry. `SKYBRIDGE_CONNECTOR_KEY` skips this caching altogether by
+design (see above).
 
 #### Keeping mTLS identity alive across redeploys
 

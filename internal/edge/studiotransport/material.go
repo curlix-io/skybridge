@@ -24,6 +24,11 @@ const certRenewSkew = time.Hour
 const DefaultIamEnrollTokenPath = "/api/v1/skybridge/enrollments-iam"
 
 func (c *Client) ensureTLSMaterial(ctx context.Context) (*tlsMaterial, error) {
+	if c.cfg.ForceBearer {
+		// SKYBRIDGE_CONNECTOR_KEY configured: intentionally stateless bearer-only mode. Never touch
+		// certstore, even if CABundlePEM/TLSDir are also set — mirrors internal/edge/transport.
+		return nil, nil
+	}
 	ca := c.cfg.CABundlePEM
 	if len(ca) == 0 && c.cfg.TLSDir == "" {
 		return nil, nil

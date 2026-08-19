@@ -460,8 +460,22 @@ type Edge struct {
 	Token       string // bearer token (when not using mTLS)
 	Insecure    bool   // plaintext channel (dev only)
 
+	// ConnectorKey (SKYBRIDGE_CONNECTOR_KEY) is a long-lived, reusable bearer credential — unlike
+	// EnrollToken below (one-time, consumed by the first successful mTLS enrollment), this value is
+	// presented fresh on every boot and is never exchanged for anything or written to disk. Setting
+	// it forces pure bearer-over-TLS mode (see ReusableConnectorKeyConfigured) even when CABundle/
+	// TLSDir are also set, so an operator doesn't have to carefully avoid mTLS config to get a
+	// stateless identity — it's an explicit, named mode rather than an accidental side effect of
+	// what's left unset. This is what lets the edge run as a plain Kubernetes Deployment (no PVC):
+	// nothing is persisted, so a restarted pod just presents the same key again. Overrides Token
+	// when set (both the connector-gateway and Query Studio transports read the shared Token field).
+	// See docs/design/kubernetes-access-broker.md §12.1 in the curlix monorepo for the design
+	// rationale (comparison against hoop.dev's HOOP_KEY / StrongDM's SDM_RELAY_TOKEN).
+	ConnectorKey string
+
 	// mTLS (hardened call-home). When CABundle is set the edge uses mTLS (enrolling if needed);
-	// otherwise it falls back to bearer-token-over-TLS using Token.
+	// otherwise it falls back to bearer-token-over-TLS using Token. Ignored entirely when
+	// ConnectorKey is set (see above).
 	CABundle     []byte // CA bundle trusted for the gateway (enables mTLS)
 	TLSDir       string // directory holding/persisting ca.pem, client.crt, client.key
 	EnrollTarget string // Enroll endpoint host:port (defaults to GatewayAddr)
@@ -554,12 +568,21 @@ func LoadEdge() Edge {
 		gatewayAddr = env("SKYBRIDGE_GATEWAY", "")
 	}
 	gatewayAddr = env("SKYBRIDGE_EDGE_GATEWAY", gatewayAddr)
+	connectorKey := env("SKYBRIDGE_CONNECTOR_KEY", "")
+	token := env("SKYBRIDGE_TOKEN", key.EnrollmentToken)
+	if connectorKey != "" {
+		// Reusable bearer credential wins over whatever SKYBRIDGE_TOKEN/SKYBRIDGE_KEY resolved to —
+		// it's the one value both the connector-gateway and Query Studio transports present, and the
+		// only one that's safe to treat as non-single-use.
+		token = connectorKey
+	}
 	return Edge{
 		LogLevel:                env("SKYBRIDGE_LOG_LEVEL", ""),
 		GatewayAddr:             gatewayAddr,
 		TenantID:                env("SKYBRIDGE_ORG_ID", key.OrgID),
 		EdgeID:                  env("SKYBRIDGE_EDGE_ID", env("SKYBRIDGE_AGENT_ID", key.EdgeID)),
-		Token:                   env("SKYBRIDGE_TOKEN", key.EnrollmentToken),
+		ConnectorKey:            connectorKey,
+		Token:                   token,
 		Insecure:                truthy(env("SKYBRIDGE_EDGE_INSECURE", "")),
 		CABundle:                caBundle,
 		TLSDir:                  env("SKYBRIDGE_TLS_DIR", ""),
@@ -595,6 +618,13 @@ func LoadEdge() Edge {
 // StudioEnabled reports whether the edge should dial the Studio Gateway (:7200).
 func (e Edge) StudioEnabled() bool {
 	return strings.TrimSpace(e.StudioGateway) != ""
+}
+
+// ReusableConnectorKeyConfigured reports whether SKYBRIDGE_CONNECTOR_KEY was set, forcing pure
+// bearer-over-TLS mode on both the connector-gateway and Query Studio transports regardless of any
+// mTLS config (CABundle/TLSDir) also present — see ConnectorKey's doc comment.
+func (e Edge) ReusableConnectorKeyConfigured() bool {
+	return strings.TrimSpace(e.ConnectorKey) != ""
 }
 
 // WireProxyEnabled reports whether the edge should also run the co-located DB wire proxy. Tunnel

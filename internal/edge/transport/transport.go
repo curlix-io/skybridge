@@ -82,7 +82,14 @@ type Config struct {
 	KeepaliveTime    time.Duration // ping interval when the stream is idle (default 20s)
 	KeepaliveTimeout time.Duration // time to wait for a ping ack before declaring the peer dead (default 10s)
 
+	// ForceBearer, when true (SKYBRIDGE_CONNECTOR_KEY configured), skips mTLS/certstore entirely —
+	// including never calling certstore.FromEnv — even if CABundlePEM/TLSDir are also set. This is
+	// the stateless mode: Token is presented fresh on every boot, nothing is ever persisted to disk
+	// or Secrets Manager. See internal/config.Edge.ConnectorKey's doc comment.
+	ForceBearer bool
+
 	// mTLS (hardened path). When CABundlePEM is empty and TLSDir is unset, the client uses bearer.
+	// Ignored entirely when ForceBearer is true.
 	CABundlePEM []byte // CA bundle trusted for the gateway (enables mTLS)
 	TLSDir      string // directory holding/persisting ca.pem, client.crt, client.key
 	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a

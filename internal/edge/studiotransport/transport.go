@@ -70,6 +70,9 @@ type Config struct {
 	DBUser      string // fallback when target.user empty
 	DBPassword  string // fallback when target.password empty
 	Masker      mask.Masker
+	// ForceBearer mirrors internal/edge/transport.Config's equivalent field (SKYBRIDGE_CONNECTOR_KEY
+	// configured) — skips mTLS/certstore entirely, even if CABundlePEM/TLSDir are also set.
+	ForceBearer bool
 	CABundlePEM []byte
 	TLSDir      string
 	// IdentitySecretARN, when set, mirrors the issued cert to this AWS Secrets Manager secret so a
