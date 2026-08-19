@@ -176,6 +176,32 @@ func TestEnsureTLSMaterialFromDisk(t *testing.T) {
 	}
 }
 
+func TestEnsureTLSMaterialForceBearerSkipsMTLSEvenWithCAAndDiskCert(t *testing.T) {
+	ca := newTestCA(t)
+	keyPEM, csrPEM, _ := generateKeyAndCSR("", "org-1", "edge-1")
+	certPEM := ca.sign(t, csrPEM, "org-1", "edge-1", time.Now().Add(24*time.Hour))
+
+	dir := t.TempDir()
+	mustWrite(t, filepath.Join(dir, "ca.pem"), ca.certPEM)
+	mustWrite(t, filepath.Join(dir, "client.crt"), certPEM)
+	mustWrite(t, filepath.Join(dir, "client.key"), keyPEM)
+
+	c := newTestClient(Config{
+		TenantID:    "org-1",
+		ConnectorID: "edge-1",
+		ForceBearer: true,
+		CABundlePEM: ca.certPEM,
+		TLSDir:      dir,
+	})
+	m, err := c.ensureTLSMaterial(context.Background())
+	if err != nil {
+		t.Fatalf("err: %v", err)
+	}
+	if m != nil {
+		t.Fatal("expected bearer (nil material) when ForceBearer is set, regardless of CABundlePEM/TLSDir")
+	}
+}
+
 func TestEnsureTLSMaterialNoCertNoTokenErrors(t *testing.T) {
 	ca := newTestCA(t)
 	c := newTestClient(Config{
