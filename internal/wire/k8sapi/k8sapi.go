@@ -39,6 +39,9 @@ type UpstreamCredential struct {
 	// request), not this engine. Defaults to false (zero value): every existing session that never
 	// asked for this stays exactly as blocked as before this field existed.
 	AllowInteractiveExec bool
+	// ServerName is the cluster API server hostname for TLS certificate verification (e.g., "api.example.com").
+	// When provided, this is used as the SNI hostname instead of deriving it from the connection address.
+	ServerName string
 }
 
 // CredentialResolver exchanges a client-presented session token (sent as the request's
@@ -161,11 +164,12 @@ func negotiateUpstreamTLS(upstream net.Conn, cred UpstreamCredential) (*tls.Conn
 		if pool.AppendCertsFromPEM(cred.CACertPEM) {
 			tlsCfg.RootCAs = pool
 			tlsCfg.InsecureSkipVerify = false
-			// tls.Client requires either ServerName or InsecureSkipVerify; derive it from the
-			// already-dialed connection's remote address since the cluster API server's hostname/IP
-			// is not otherwise available here (CredentialResolver resolves per-request auth, not
-			// connection-time identity).
-			if host, _, err := net.SplitHostPort(upstream.RemoteAddr().String()); err == nil && host != "" {
+			// tls.Client requires either ServerName or InsecureSkipVerify for certificate verification.
+			// Use the explicitly provided ServerName (from CredentialResolver) if available,
+			// otherwise derive it from the already-dialed connection's remote address.
+			if cred.ServerName != "" {
+				tlsCfg.ServerName = cred.ServerName
+			} else if host, _, err := net.SplitHostPort(upstream.RemoteAddr().String()); err == nil && host != "" {
 				tlsCfg.ServerName = host
 			}
 		}
