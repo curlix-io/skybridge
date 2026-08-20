@@ -172,6 +172,10 @@ func (c *Client) renewalLoop(ctx context.Context) {
 		if err != nil || material == nil {
 			continue // bearer mode, or a transient load/enroll error -- try again next tick
 		}
+		// SVID-based material is renewed by SPIRE, not by us
+		if material.HasSVID() {
+			continue // SPIRE handles SVID renewal
+		}
 		if certValid(material.clientCertPEM, proactiveRenewalSkew) {
 			continue // not yet within the renewal window
 		}
@@ -196,8 +200,9 @@ func (c *Client) Run(ctx context.Context) error {
 		authFailure := false
 		if derr == nil {
 			client := connectorv1.NewConnectorGatewayClient(conn)
-			useBearer := material == nil
-			ok, retryAfter, reason := c.preConnect(ctx, client, useBearer)
+			// Use bearer mode if no material, or if material has SVID (not mTLS certs)
+			useBearer := material == nil || material.HasSVID()
+			ok, retryAfter, reason := c.preConnect(ctx, client, useBearer, material)
 			if !ok {
 				_ = conn.Close()
 				c.logger.Info(fmt.Sprintf("pre-connect: gateway says wait (%s), retrying in ~%s", reason, retryAfter))
@@ -213,7 +218,7 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 
 			started := time.Now()
-			serveErr := c.serve(ctx, client, useBearer)
+			serveErr := c.serve(ctx, client, useBearer, material)
 			_ = conn.Close()
 			authFailure = status.Code(serveErr) == codes.Unauthenticated
 			switch {
@@ -253,11 +258,18 @@ func (c *Client) Run(ctx context.Context) error {
 // full stream handshake first. Any error (older gateway that doesn't implement this RPC yet,
 // timeout) is treated as "proceed" -- this is advisory, never a hard gate. See
 // docs/design/skybridge-masking-architecture.md §10.3 in curlix/curlix.
-func (c *Client) preConnect(ctx context.Context, client connectorv1.ConnectorGatewayClient, useBearer bool) (ok bool, retryAfter time.Duration, reason string) {
+func (c *Client) preConnect(ctx context.Context, client connectorv1.ConnectorGatewayClient, useBearer bool, material *tlsMaterial) (ok bool, retryAfter time.Duration, reason string) {
 	callCtx, cancel := context.WithTimeout(ctx, preConnectTimeout)
 	defer cancel()
-	if useBearer && c.cfg.Token != "" {
-		callCtx = metadata.NewOutgoingContext(callCtx, metadata.Pairs("authorization", "Bearer "+c.cfg.Token))
+	if useBearer {
+		// Prefer SVID token if available, fall back to static token
+		token := c.cfg.Token
+		if material != nil && material.HasSVID() {
+			token = material.svid
+		}
+		if token != "" {
+			callCtx = metadata.NewOutgoingContext(callCtx, metadata.Pairs("authorization", "Bearer "+token))
+		}
 	}
 	resp, err := client.PreConnect(callCtx, &connectorv1.PreConnectRequest{
 		TenantId:    c.cfg.TenantID,
@@ -280,7 +292,11 @@ func (c *Client) preConnect(ctx context.Context, client connectorv1.ConnectorGat
 func (c *Client) dial(material *tlsMaterial) (*grpc.ClientConn, error) {
 	var creds credentials.TransportCredentials
 	switch {
-	case material != nil:
+	case material != nil && material.HasSVID():
+		// SVID-based identity: use bearer token (no client certs), trust system roots
+		creds = credentials.NewTLS(nil)
+	case material != nil && material.IsMTLS():
+		// mTLS-based identity: use client certs
 		tlsCfg, err := mtlsTLSConfig(material)
 		if err != nil {
 			return nil, err
@@ -302,10 +318,17 @@ func (c *Client) dial(material *tlsMaterial) (*grpc.ClientConn, error) {
 }
 
 // serve runs one Connect stream: register, then handle gateway messages until the stream ends. When
-// useBearer is true (no mTLS material) the bearer token is attached as call metadata.
-func (c *Client) serve(ctx context.Context, client connectorv1.ConnectorGatewayClient, useBearer bool) error {
-	if useBearer && c.cfg.Token != "" {
-		ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+c.cfg.Token))
+// useBearer is true (no mTLS material or SVID-based material) the bearer token is attached as call metadata.
+func (c *Client) serve(ctx context.Context, client connectorv1.ConnectorGatewayClient, useBearer bool, material *tlsMaterial) error {
+	if useBearer {
+		// Prefer SVID token if available, fall back to static token
+		token := c.cfg.Token
+		if material != nil && material.HasSVID() {
+			token = material.svid
+		}
+		if token != "" {
+			ctx = metadata.NewOutgoingContext(ctx, metadata.Pairs("authorization", "Bearer "+token))
+		}
 	}
 	stream, err := client.Connect(ctx)
 	if err != nil {
