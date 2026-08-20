@@ -161,6 +161,7 @@ func runEdge(args []string) {
 		Targets:           execTargets,
 		IamAuthEnabled:    cfg.IamAuthEnabled,
 		IamEnrollURL:      cfg.IamEnrollURL,
+		SpireSocketPath:   cfg.WireProxy.SpireSocketPath,
 	}, reg, logger)
 
 	if err := client.Run(ctx); err != nil && ctx.Err() == nil {
