@@ -286,6 +286,14 @@ type Agent struct {
 	// on every renewal/restart. Takes priority over WireMtlsClientCertPEM/WireMtlsEnrollToken when set.
 	WireMtlsIamAuthEnabled bool // SKYBRIDGE_WIRE_MTLS_IAM_AUTH (truthy)
 
+	// SPIFFE/SPIRE JWT-SVID enrollment: when SpireSocketPath is set and the file exists, the agent
+	// reads a fresh JWT-SVID from that path and uses it as a bearer credential for mTLS tunnel
+	// registration (or as a bearer token directly if no mTLS config is present). Falls back to the
+	// existing enrollment flow (WireMtlsEnrollToken, WireMtlsIamAuthEnabled, etc.) if the SVID file
+	// is unavailable or unreadable. Empty disables SPIRE support entirely (default, backward-compatible).
+	// See docs/design/kubernetes-access-broker.md §12 (SPIFFE-based identity).
+	SpireSocketPath string // SKYBRIDGE_SPIRE_SOCKET_PATH (e.g., /run/spiffe/agent.jwt)
+
 	// Session replay (see the session replay design doc). When enabled AND the gateway put a
 	// SessionID on OpenMeta (control-plane session recording is on there too), the agent's wire
 	// engines capture a transcript of already-masked input/output and flush it back over the
@@ -405,6 +413,8 @@ func LoadAgent() Agent {
 		WireMtlsClientKeyPEM:  pemFromEnv("SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_PEM", "SKYBRIDGE_WIRE_MTLS_CLIENT_KEY_FILE"),
 
 		WireMtlsIamAuthEnabled: truthy(env("SKYBRIDGE_WIRE_MTLS_IAM_AUTH", "")),
+
+		SpireSocketPath: env("SKYBRIDGE_SPIRE_SOCKET_PATH", ""),
 
 		SessionReplayEnabled:  truthy(env("SKYBRIDGE_SESSION_REPLAY_ENABLED", "")),
 		SessionReplayMaxBytes: atoiDefault(env("SKYBRIDGE_SESSION_REPLAY_MAX_BYTES", ""), 5<<20),

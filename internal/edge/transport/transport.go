@@ -112,6 +112,12 @@ type Config struct {
 	// origin that verifies the presigned request (see SKYBRIDGE_IAM_AUTH / SKYBRIDGE_IAM_ENROLL_URL).
 	IamAuthEnabled bool
 	IamEnrollURL   string
+
+	// SpireSocketPath, when set, loads a fresh JWT-SVID from SPIRE at each connect attempt,
+	// using it as a bearer token instead of mTLS certs. Falls back to mTLS enrollment if the
+	// socket is unavailable or the SVID is expired. See internal/spire and docs/design/
+	// kubernetes-access-broker.md §12.
+	SpireSocketPath string
 }
 
 // Client maintains the call-home connection and serves dispatched tool work.

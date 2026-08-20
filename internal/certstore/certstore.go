@@ -13,10 +13,16 @@ import (
 )
 
 // Material is the cached identity bundle for one enrolled endpoint (edge, studio, or wire-mtls).
+// Supports both traditional mTLS (cert/key) and SPIFFE JWT-SVID bearer tokens.
 type Material struct {
 	CABundlePEM   []byte `json:"ca_bundle_pem,omitempty"`
-	ClientCertPEM []byte `json:"client_cert_pem"`
-	ClientKeyPEM  []byte `json:"client_key_pem"`
+	ClientCertPEM []byte `json:"client_cert_pem,omitempty"`
+	ClientKeyPEM  []byte `json:"client_key_pem,omitempty"`
+
+	// SPIFFE/SPIRE JWT-SVID (optional alternative to mTLS certs).
+	// When SVID is set, it's used as a bearer token instead of presenting ClientCertPEM.
+	SVID      string `json:"svid,omitempty"`
+	ExpiresAt int64  `json:"expires_at,omitempty"` // Unix timestamp when SVID expires
 }
 
 // Store loads and saves Material for a single logical identity.
