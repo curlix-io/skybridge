@@ -36,6 +36,16 @@ type tlsMaterial struct {
 	expiresAt int64 // Unix timestamp when SVID expires
 }
 
+// HasSVID returns true if this material holds a valid SVID bearer token.
+func (m *tlsMaterial) HasSVID() bool {
+	return m != nil && m.svid != ""
+}
+
+// IsMTLS returns true if this material holds mTLS cert/key pair.
+func (m *tlsMaterial) IsMTLS() bool {
+	return m != nil && len(m.clientCertPEM) > 0 && len(m.clientKeyPEM) > 0
+}
+
 // certRenewSkew is how far ahead of expiry a cert is considered too stale to reuse (re-enroll).
 const certRenewSkew = time.Hour
 

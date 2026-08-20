@@ -13,12 +13,12 @@ import (
 // SVIDStore loads JWT-SVIDs from SPIRE and uses them as bearer tokens.
 // Falls back to a chained Store (e.g., diskStore or secretsStore) when SVID is unavailable.
 type SVIDStore struct {
-	svidLoader *spire.SVIDLoader
+	svidLoader spire.SVIDLoaderInterface
 	fallback   Store // Fallback store (e.g., disk or secrets manager) for when SVID is unavailable
 }
 
 // NewSVIDStore creates a new SVIDStore with an optional fallback.
-func NewSVIDStore(loader *spire.SVIDLoader, fallback Store) *SVIDStore {
+func NewSVIDStore(loader spire.SVIDLoaderInterface, fallback Store) *SVIDStore {
 	return &SVIDStore{
 		svidLoader: loader,
 		fallback:   fallback,

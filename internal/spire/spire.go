@@ -17,6 +17,13 @@ import (
 	"time"
 )
 
+// SVIDLoaderInterface is the interface for loading JWT-SVIDs from SPIRE.
+// Allows mocking and dependency injection.
+type SVIDLoaderInterface interface {
+	IsAvailable() bool
+	LoadSVID(ctx context.Context) (string, error)
+}
+
 // SVIDLoader reads JWT-SVIDs from a SPIRE workload API socket.
 type SVIDLoader struct {
 	socketPath string // e.g., /run/spiffe/agent.jwt (file path, not socket)
