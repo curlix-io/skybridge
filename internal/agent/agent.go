@@ -61,6 +61,20 @@ func caCertPool(caBundlePEM []byte) (*x509.CertPool, bool) {
 	return pool, true
 }
 
+// wireBearerCABundle picks the CA bundle used to verify the wire gateway's TLS cert in bearer
+// mode (ReusableConnectorKeyConfigured). The wire gateway's cert is typically issued by a CA
+// distinct from the connector-gateway/enroll CA (cfg.CABundle, SKYBRIDGE_CA_BUNDLE_PEM/_FILE) —
+// prefer the dedicated wire-mTLS CA (cfg.WireMtlsCABundlePEM, SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM/
+// _FILE; the same var the mTLS enrollment path already uses to pin the gateway's server TLS),
+// falling back to cfg.CABundle for deployments that reuse one CA for both gateways and only set
+// the generic var. Returns the chosen bundle and the env var name, for logging.
+func wireBearerCABundle(cfg config.Agent) ([]byte, string) {
+	if len(cfg.WireMtlsCABundlePEM) > 0 {
+		return cfg.WireMtlsCABundlePEM, "SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM/_FILE"
+	}
+	return cfg.CABundle, "SKYBRIDGE_CA_BUNDLE_PEM/_FILE"
+}
+
 func jitteredBackoff(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -576,14 +590,16 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 			serverName = host
 		}
 		wireTLS = &tls.Config{ServerName: serverName} // system roots verify the gateway; no client cert presented
-		// Bearer mode never presents a client cert, but the gateway's own cert may still be
-		// issued by a private CA (e.g. the one embedded in a SKYBRIDGE_KEY's ca= param) rather
-		// than a public one — trust it explicitly instead of leaving the default system roots,
-		// which fail every dial with "x509: certificate signed by unknown authority".
-		if pool, ok := caCertPool(cfg.CABundle); ok {
+		// Bearer mode never presents a client cert, but the wire gateway's own cert is typically
+		// issued by a private CA distinct from the connector-gateway/enroll CA — trust the
+		// dedicated wire-mTLS CA instead of leaving the default system roots, which fail every
+		// dial with "x509: certificate signed by unknown authority". See
+		// wireBearerCABundle's doc comment for the selection order.
+		caBundle, caBundleVarName := wireBearerCABundle(cfg)
+		if pool, ok := caCertPool(caBundle); ok {
 			wireTLS.RootCAs = pool
-		} else if len(cfg.CABundle) > 0 {
-			logger.Warn("SKYBRIDGE_CA_BUNDLE_PEM/_FILE did not contain a valid PEM certificate; falling back to system roots")
+		} else if len(caBundle) > 0 {
+			logger.Warn(fmt.Sprintf("%s did not contain a valid PEM certificate; falling back to system roots", caBundleVarName))
 		}
 	}
 

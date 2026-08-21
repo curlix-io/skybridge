@@ -508,3 +508,22 @@ func TestCaCertPool(t *testing.T) {
 		t.Fatal("expected a valid pool for a well-formed PEM certificate")
 	}
 }
+
+// TestWireBearerCABundle is the regression test for a bug where bearer mode trusted
+// cfg.CABundle (the connector-gateway/enroll CA) when verifying the wire gateway's TLS cert —
+// but the wire gateway is commonly signed by a distinct CA, so the dedicated
+// cfg.WireMtlsCABundlePEM must be preferred, falling back to cfg.CABundle only when unset.
+func TestWireBearerCABundle(t *testing.T) {
+	wireCA := []byte("wire-ca-pem")
+	genericCA := []byte("generic-ca-pem")
+
+	if bundle, name := wireBearerCABundle(config.Agent{WireMtlsCABundlePEM: wireCA, CABundle: genericCA}); string(bundle) != string(wireCA) || name != "SKYBRIDGE_WIRE_MTLS_CA_BUNDLE_PEM/_FILE" {
+		t.Fatalf("expected the dedicated wire-mTLS CA to win when both are set, got (%q, %q)", bundle, name)
+	}
+	if bundle, name := wireBearerCABundle(config.Agent{CABundle: genericCA}); string(bundle) != string(genericCA) || name != "SKYBRIDGE_CA_BUNDLE_PEM/_FILE" {
+		t.Fatalf("expected fallback to the generic CA when the wire-mTLS one is unset, got (%q, %q)", bundle, name)
+	}
+	if bundle, _ := wireBearerCABundle(config.Agent{}); len(bundle) != 0 {
+		t.Fatalf("expected an empty bundle when neither is set, got %q", bundle)
+	}
+}
