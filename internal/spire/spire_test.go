@@ -138,8 +138,8 @@ func TestBase64URLDecode(t *testing.T) {
 // TestSplitJWT tests JWT splitting into parts.
 func TestSplitJWT(t *testing.T) {
 	tests := []struct {
-		name   string
-		input  string
+		name    string
+		input   string
 		wantLen int
 	}{
 		{
