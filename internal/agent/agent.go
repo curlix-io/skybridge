@@ -554,7 +554,14 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 		logger.Info(fmt.Sprintf("[tunnel] wire mTLS enrollment configured (%s) — will present a client cert once enrolled.", cfg.WireMtlsEnrollURL))
 	}
 	if cfg.ReusableConnectorKeyConfigured() {
-		wireTLS = &tls.Config{} // system roots verify the gateway; no client cert presented
+		// tls.Client (unlike tls.Dial/DialWithDialer) never infers ServerName from the dialed
+		// address, so an empty Config here fails every handshake with "tls: either ServerName or
+		// InsecureSkipVerify must be specified" before a single byte is exchanged.
+		serverName := cfg.GatewayAddr
+		if host, _, err := net.SplitHostPort(cfg.GatewayAddr); err == nil {
+			serverName = host
+		}
+		wireTLS = &tls.Config{ServerName: serverName} // system roots verify the gateway; no client cert presented
 	}
 
 	wireMtlsEnrollHintLogged := false
