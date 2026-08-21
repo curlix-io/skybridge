@@ -712,8 +712,10 @@ type Gateway struct {
 	ClientProxyProtocol bool
 
 	// Wire-agent mTLS server side (docs/design/identity-aware-network-access.md). The agent listener
-	// always requires and verifies agent client certs via this CA bundle — the verified cert's
-	// SPIFFE identity is the only agent-registration credential; there is no bearer-token fallback.
+	// verifies any agent client cert presented against this CA bundle (wiremtls.ServerConfig's
+	// ClientAuth is VerifyClientCertIfGiven, not required) — an agent presenting no cert at all
+	// instead falls back to bearer-token verification via AgentAuthVerifier
+	// (SKYBRIDGE_CONNECTOR_KEY, see gateway.ServeAgent).
 	WireMtlsCABundlePEM []byte // SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM / _FILE (required)
 	WireMtlsServerCert  []byte // SKYBRIDGE_GW_MTLS_SERVER_CERT_PEM / _FILE (self-signed generated if empty)
 	WireMtlsServerKey   []byte // SKYBRIDGE_GW_MTLS_SERVER_KEY_PEM / _FILE

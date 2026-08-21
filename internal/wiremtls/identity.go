@@ -1,6 +1,6 @@
 // Package wiremtls implements mTLS identity for the Skybridge wire gateway↔agent tunnel. Agent
-// registration is authenticated exclusively by a per-agent client certificate carrying a SPIFFE
-// URI SAN — there is no bearer-token fallback:
+// registration is normally authenticated by a per-agent client certificate carrying a SPIFFE
+// URI SAN:
 //
 //	spiffe://skybridge.wire-agent/tenant/<tenant_id>/agent/<agent_id>
 //

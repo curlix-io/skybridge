@@ -118,11 +118,12 @@ func runGateway(args []string) {
 
 	errs := make(chan error, 1+len(cfg.Clients))
 
-	// Agent registration requires a verified mTLS client certificate unconditionally — there is no
-	// bearer-token fallback (see internal/gateway/gateway.go's ServeAgent). Refuse to start rather
-	// than run an agent listener nothing can ever successfully register against.
+	// The agent listener's TLS config (wiremtls.ServerConfig) still needs a CA bundle to verify
+	// against for agents that DO present an mTLS client cert, even though ServeAgent also accepts
+	// a bearer token (SKYBRIDGE_CONNECTOR_KEY) from agents that present no cert at all — refuse to
+	// start rather than run a listener with no CA bundle to check certs against.
 	if !cfg.WireMtlsConfigured() {
-		gatewayFatal(logger, "SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM is required — the agent listener has no bearer-token mode")
+		gatewayFatal(logger, "SKYBRIDGE_GW_MTLS_CA_BUNDLE_PEM is required")
 	}
 	agentLn, err := net.Listen("tcp", cfg.AgentListen)
 	if err != nil {
@@ -144,7 +145,7 @@ func runGateway(args []string) {
 		gatewayFatal(logger, fmt.Sprintf("wire mTLS server config: %v", tlsErr))
 	}
 	agentLn = tls.NewListener(agentLn, tlsCfg)
-	logger.Info(fmt.Sprintf("agent endpoint %s (mTLS: agent client certs required)", cfg.AgentListen))
+	logger.Info(fmt.Sprintf("agent endpoint %s (mTLS client cert or bearer token accepted)", cfg.AgentListen))
 	go func() { errs <- gw.ListenAgents(ctx, agentLn) }()
 
 	for _, cl := range cfg.Clients {

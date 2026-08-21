@@ -14,9 +14,15 @@ import (
 )
 
 // ServerConfig builds a tls.Config for the gateway's agent-listen socket: presents serverCertPEM/
-// serverKeyPEM and REQUIRES + verifies an agent client cert against caBundlePEM. Callers extract the
-// verified agent identity from the peer certificate's SPIFFE SAN (see IdentityFromCert) once the TLS
-// handshake completes.
+// serverKeyPEM and, when a client presents a certificate, verifies it against caBundlePEM.
+// ClientAuth is VerifyClientCertIfGiven, not RequireAndVerifyClientCert: gateway.ServeAgent
+// supports two registration credentials — a verified mTLS client cert (SPIFFE SAN, see
+// IdentityFromCert) or a bearer token (SKYBRIDGE_CONNECTOR_KEY, verified via AgentAuthVerifier)
+// when no cert is presented — so the TLS layer must let a certless connection complete the
+// handshake and reach ServeAgent's application-level check, rather than rejecting it outright.
+// VerifyClientCertIfGiven still automatically verifies any cert that IS presented against
+// caBundlePEM, so cert-based agents get the exact same verification RequireAndVerifyClientCert
+// gave them — nothing is weakened for that path.
 func ServerConfig(serverCertPEM, serverKeyPEM, caBundlePEM []byte) (*tls.Config, error) {
 	pair, err := tls.X509KeyPair(serverCertPEM, serverKeyPEM)
 	if err != nil {
@@ -30,7 +36,7 @@ func ServerConfig(serverCertPEM, serverKeyPEM, caBundlePEM []byte) (*tls.Config,
 		MinVersion:   tls.VersionTLS12,
 		Certificates: []tls.Certificate{pair},
 		ClientCAs:    pool,
-		ClientAuth:   tls.RequireAndVerifyClientCert,
+		ClientAuth:   tls.VerifyClientCertIfGiven,
 	}, nil
 }
 
