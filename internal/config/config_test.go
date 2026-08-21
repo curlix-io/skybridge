@@ -28,6 +28,26 @@ func TestLoadAgentDefaults(t *testing.T) {
 	}
 }
 
+func TestLoadAgentCABundleInline(t *testing.T) {
+	t.Setenv("SKYBRIDGE_CA_BUNDLE_PEM", "-----BEGIN CERTIFICATE-----\ninline\n-----END CERTIFICATE-----")
+	a := LoadAgent()
+	if string(a.CABundle) != "-----BEGIN CERTIFICATE-----\ninline\n-----END CERTIFICATE-----" {
+		t.Fatalf("expected inline CA bundle, got %q", string(a.CABundle))
+	}
+}
+
+func TestLoadAgentCABundleFromFile(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "ca.pem")
+	if err := os.WriteFile(path, []byte("-----BEGIN CERTIFICATE-----\nfromfile\n-----END CERTIFICATE-----"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SKYBRIDGE_CA_BUNDLE_FILE", path)
+	a := LoadAgent()
+	if string(a.CABundle) != "-----BEGIN CERTIFICATE-----\nfromfile\n-----END CERTIFICATE-----" {
+		t.Fatalf("expected CA bundle read from file, got %q", string(a.CABundle))
+	}
+}
+
 func TestLoadAgentDefaultListenAddrByDBType(t *testing.T) {
 	cases := map[string]string{"mysql": ":13306", "mongodb": ":27018", "mongo": ":27018", "postgres": ":15432", "unknown": ":15432"}
 	for dbType, want := range cases {

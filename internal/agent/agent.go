@@ -13,6 +13,7 @@ package agent
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"log/slog"
 	"math/rand/v2"
@@ -47,6 +48,19 @@ const (
 
 // jitteredBackoff returns a random duration in [d/2, d) — full-ish jitter so many agents hitting the
 // same dead gateway/enroll endpoint at once don't all retry in lockstep (thundering herd).
+// caCertPool builds an x509.CertPool from a PEM-encoded CA bundle. Returns (nil, false) for an
+// empty or unparseable bundle so callers can fall back to system roots explicitly.
+func caCertPool(caBundlePEM []byte) (*x509.CertPool, bool) {
+	if len(caBundlePEM) == 0 {
+		return nil, false
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(caBundlePEM) {
+		return nil, false
+	}
+	return pool, true
+}
+
 func jitteredBackoff(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -562,6 +576,15 @@ func RunTunnel(ctx context.Context, cfg config.Agent, deps Deps, logger *slog.Lo
 			serverName = host
 		}
 		wireTLS = &tls.Config{ServerName: serverName} // system roots verify the gateway; no client cert presented
+		// Bearer mode never presents a client cert, but the gateway's own cert may still be
+		// issued by a private CA (e.g. the one embedded in a SKYBRIDGE_KEY's ca= param) rather
+		// than a public one — trust it explicitly instead of leaving the default system roots,
+		// which fail every dial with "x509: certificate signed by unknown authority".
+		if pool, ok := caCertPool(cfg.CABundle); ok {
+			wireTLS.RootCAs = pool
+		} else if len(cfg.CABundle) > 0 {
+			logger.Warn("SKYBRIDGE_CA_BUNDLE_PEM/_FILE did not contain a valid PEM certificate; falling back to system roots")
+		}
 	}
 
 	wireMtlsEnrollHintLogged := false
