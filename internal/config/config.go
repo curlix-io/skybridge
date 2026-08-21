@@ -588,6 +588,21 @@ func LoadEdge() Edge {
 		log.Printf("skybridge-edge: %v — ignoring SKYBRIDGE_KEY", err)
 		key = EdgeKey{}
 	}
+	// SKYBRIDGE_CONNECTOR_KEY may also be a full skybridge://org:token@host?... DSN rather than a
+	// bare opaque token — bareBearerToken's own doc comment documents this as carrying the same
+	// org/edge-id/gateway-host/CA derivation convenience SKYBRIDGE_KEY does (e.g.
+	// skybridge_fleet.py's _skybridge_fleet_key mints it in this shape). Only consulted when
+	// SKYBRIDGE_KEY didn't already supply a gateway host, so an explicit SKYBRIDGE_KEY always wins,
+	// and a bare-token SKYBRIDGE_CONNECTOR_KEY (the historical, more common shape) is unaffected —
+	// parseEdgeKey rejects non-DSN input, leaving key untouched. Without this, a connectorKey-only
+	// deployment falls through to the ambiguous SKYBRIDGE_GATEWAY var below, which — for a
+	// stateless deployment that also configures the wire-proxy tunnel — is that tunnel's gateway,
+	// not the connector-gateway's, silently dialing the wrong host with the wrong CA.
+	if key.GatewayHost == "" {
+		if ckKey, ckErr := parseEdgeKey(env("SKYBRIDGE_CONNECTOR_KEY", "")); ckErr == nil {
+			key = ckKey
+		}
+	}
 	caBundle := pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE")
 	if len(caBundle) == 0 {
 		caBundle = key.CABundlePEM
