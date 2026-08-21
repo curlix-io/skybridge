@@ -40,7 +40,7 @@ func TestGenerateSelfSignedServerCertProducesValidPair(t *testing.T) {
 	}
 }
 
-func TestServerConfigBuildsRequireAndVerifyClientCert(t *testing.T) {
+func TestServerConfigBuildsVerifyClientCertIfGiven(t *testing.T) {
 	certPEM, keyPEM, err := GenerateSelfSignedServerCert()
 	if err != nil {
 		t.Fatal(err)
@@ -50,8 +50,11 @@ func TestServerConfigBuildsRequireAndVerifyClientCert(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.ClientAuth != tls.RequireAndVerifyClientCert {
-		t.Fatalf("expected RequireAndVerifyClientCert, got %v", cfg.ClientAuth)
+	// Not RequireAndVerifyClientCert: gateway.ServeAgent also accepts a bearer token
+	// (SKYBRIDGE_CONNECTOR_KEY) from an agent presenting no client cert at all, so the TLS layer
+	// must not reject a certless connection outright — see ServerConfig's own doc comment.
+	if cfg.ClientAuth != tls.VerifyClientCertIfGiven {
+		t.Fatalf("expected VerifyClientCertIfGiven, got %v", cfg.ClientAuth)
 	}
 	if len(cfg.Certificates) != 1 {
 		t.Fatalf("expected exactly one certificate, got %d", len(cfg.Certificates))
