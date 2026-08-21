@@ -50,6 +50,13 @@ type Agent struct {
 	// entirely and presents this as a bearer credential on the tunnel-registration Control message
 	// instead (see ReusableConnectorKeyConfigured and internal/gateway/gateway.go's ServeAgent).
 	ConnectorKey string
+	// CABundle (SKYBRIDGE_CA_BUNDLE_PEM / _FILE) mirrors Edge.CABundle — trusted for the gateway's
+	// TLS cert in bearer mode (ReusableConnectorKeyConfigured), same as the wire-mTLS enrollment
+	// call's server verification. Without it, a gateway cert issued by a private CA (e.g. the one
+	// embedded in a SKYBRIDGE_KEY's ca= param, which Edge mode already trusts) fails every dial
+	// with "x509: certificate signed by unknown authority" — bearer mode never had a way to trust
+	// anything but the system roots.
+	CABundle []byte
 
 	// Targets is the static {name,addr,db_type} list used by LISTENER mode only (SKYBRIDGE_TARGETS).
 	// Tunnel mode no longer consults this: the gateway resolves addr/db_type live per connection via
@@ -339,6 +346,7 @@ func LoadAgent() Agent {
 		OrgID:                 env("SKYBRIDGE_ORG_ID", ""),
 		Token:                 env("SKYBRIDGE_TOKEN", ""),
 		ConnectorKey:          env("SKYBRIDGE_CONNECTOR_KEY", ""),
+		CABundle:              pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE"),
 		Targets:               parseTargets(env("SKYBRIDGE_TARGETS", "")),
 		MaskAnalyzeURL:        env("SKYBRIDGE_MASK_ANALYZE_URL", ""),
 		MaskAnonymizeURL:      env("SKYBRIDGE_MASK_ANONYMIZE_URL", ""),

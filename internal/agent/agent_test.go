@@ -487,3 +487,24 @@ func TestRecoverBackgroundNoopWithoutPanic(t *testing.T) {
 		t.Fatalf("expected no log output absent a panic, got %q", buf.String())
 	}
 }
+
+// TestCaCertPool is the regression test for bearer-mode's wire tunnel TLS: a gateway cert signed
+// by a private CA (embedded in a SKYBRIDGE_KEY's ca= param) must be trusted via cfg.CABundle
+// instead of only ever trusting system roots (which failed every dial with "x509: certificate
+// signed by unknown authority").
+func TestCaCertPool(t *testing.T) {
+	if pool, ok := caCertPool(nil); ok || pool != nil {
+		t.Fatalf("expected (nil, false) for an empty bundle, got (%v, %v)", pool, ok)
+	}
+	if pool, ok := caCertPool([]byte("not a pem")); ok || pool != nil {
+		t.Fatalf("expected (nil, false) for an unparseable bundle, got (%v, %v)", pool, ok)
+	}
+
+	certPEM, _, err := selfSignedCertPEMForTest(t)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if pool, ok := caCertPool(certPEM); !ok || pool == nil {
+		t.Fatal("expected a valid pool for a well-formed PEM certificate")
+	}
+}
