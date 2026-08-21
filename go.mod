@@ -24,7 +24,7 @@ require (
 	github.com/snowflakedb/gosnowflake v1.19.1
 	go.mongodb.org/mongo-driver v1.17.9
 	google.golang.org/grpc v1.83.0
-	google.golang.org/protobuf v1.36.11
+	google.golang.org/protobuf v1.36.12
 	gopkg.in/yaml.v3 v3.0.1
 )
 
