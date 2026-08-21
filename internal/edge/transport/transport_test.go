@@ -418,6 +418,50 @@ func TestDialProducesClientForInsecureAndSystemRoots(t *testing.T) {
 	_ = conn2.Close()
 }
 
+// TestDialWithForceBearerAndCABundleTrustsPrivateCA is a regression test for the bug where the
+// connector-gateway's bearer mode (SKYBRIDGE_CONNECTOR_KEY set) ignored CABundlePEM entirely and
+// fell through to system roots, failing every dial against a gateway whose cert is issued by a
+// private CA (the CA embedded in the connector key itself) with "x509: certificate signed by
+// unknown authority". ensureTLSMaterial's ForceBearer branch always returns (nil, nil), so dial()
+// must consult c.cfg.CABundlePEM directly rather than the material — mirrors studiotransport's
+// dial(), which already handles this for the Query Studio gateway.
+func TestDialWithForceBearerAndCABundleTrustsPrivateCA(t *testing.T) {
+	ca := newTestCA(t)
+	c := New(Config{
+		Target:      "127.0.0.1:0",
+		ForceBearer: true,
+		CABundlePEM: ca.certPEM,
+	}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	material, err := c.ensureTLSMaterial(context.Background())
+	if err != nil {
+		t.Fatalf("ensureTLSMaterial: %v", err)
+	}
+	if material != nil {
+		t.Fatalf("expected ForceBearer to skip mTLS material entirely, got %v", material)
+	}
+
+	conn, err := c.dial(material)
+	if err != nil {
+		t.Fatalf("dial bearer with private CA: %v", err)
+	}
+	_ = conn.Close()
+}
+
+// TestDialWithForceBearerAndInvalidCABundleFails ensures a malformed CABundlePEM in bearer mode
+// surfaces as an error from dial() rather than silently falling back to system roots.
+func TestDialWithForceBearerAndInvalidCABundleFails(t *testing.T) {
+	c := New(Config{
+		Target:      "127.0.0.1:0",
+		ForceBearer: true,
+		CABundlePEM: []byte("not a pem"),
+	}, edge.NewRegistry(), slog.New(slog.NewTextHandler(io.Discard, nil)))
+
+	if _, err := c.dial(nil); err == nil {
+		t.Fatal("expected dial to fail on invalid CA bundle PEM")
+	}
+}
+
 func TestRunFatalConfigErrorReturnsWithoutReconnect(t *testing.T) {
 	ca := newTestCA(t)
 	c := New(Config{
