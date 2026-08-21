@@ -40,6 +40,36 @@ var backoffResetAfter = 60 * time.Second
 var authFailureBackoffFloor = 120 * time.Second
 var preConnectTimeout = 10 * time.Second
 
+// certVerificationErrorHint mirrors internal/edge/transport's equivalent function -- see that
+// package's doc comment for the full rationale (a wrong-gateway-host failure and a wrong/missing
+// CA failure produce byte-for-byte identical error text, making this the hardest failure mode to
+// self-diagnose without a hint).
+func certVerificationErrorHint(err error) string {
+	if err == nil || !strings.Contains(err.Error(), "x509:") {
+		return ""
+	}
+	return "hint: this looks like a TLS certificate verification failure, not a network-" +
+		"reachability problem. Double check (1) the Studio Gateway host this client actually " +
+		"resolved (SKYBRIDGE_STUDIO_GATEWAY) is the Studio gateway, not a different gateway this " +
+		"same process also dials (e.g. the connector-gateway's SKYBRIDGE_EDGE_GATEWAY, or the " +
+		"wire-proxy tunnel's SKYBRIDGE_GATEWAY), and (2) the configured CA bundle " +
+		"(SKYBRIDGE_CA_BUNDLE_PEM/_FILE) actually matches THAT host's certificate -- a CA that " +
+		"correctly validates a different gateway looks identical to a missing/wrong CA in this error"
+}
+
+// logCertHintOnce logs certVerificationErrorHint(err) at Error level, but only the first time
+// this Client ever sees a cert-shaped failure -- Run()'s own goroutine is the only caller, so no
+// locking is needed for certHintLogged.
+func (c *Client) logCertHintOnce(err error) {
+	if c.certHintLogged {
+		return
+	}
+	if hint := certVerificationErrorHint(err); hint != "" {
+		c.certHintLogged = true
+		c.logger.Error(hint)
+	}
+}
+
 const Version = "0.2.0"
 
 type tlsMaterial struct {
@@ -96,6 +126,10 @@ type Client struct {
 	logger *slog.Logger
 	mu     sync.Mutex
 	runs   map[string]context.CancelFunc
+
+	// certHintLogged gates certVerificationErrorHint to once per Client lifetime -- see
+	// internal/edge/transport's equivalent field and comment.
+	certHintLogged bool
 }
 
 func New(cfg Config, logger *slog.Logger) *Client {
@@ -187,11 +221,13 @@ func (c *Client) Run(ctx context.Context) error {
 						"at a reduced rate: %v", serveErr))
 			case serveErr != nil:
 				c.logger.Warn(fmt.Sprintf("studio call-home ended: %v", serveErr))
+				c.logCertHintOnce(serveErr)
 			case time.Since(started) >= backoffResetAfter:
 				backoff = time.Second // clean close of a connection that was actually stable
 			}
 		} else {
 			c.logger.Warn(fmt.Sprintf("studio dial %s failed: %v", c.cfg.Target, derr))
+			c.logCertHintOnce(derr)
 		}
 		if !c.cfg.Reconnect {
 			return derr
