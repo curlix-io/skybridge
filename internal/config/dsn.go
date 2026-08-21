@@ -73,3 +73,22 @@ func hostPort(host, port string) string {
 	}
 	return host + ":" + port
 }
+
+// bareBearerToken extracts the plain bearer credential from raw, which may be either a bare
+// opaque token (returned unchanged — the historical SKYBRIDGE_CONNECTOR_KEY/SKYBRIDGE_TOKEN
+// shape) or a full skybridge://org:token@host?... DSN (its embedded token/password is returned
+// instead). Every consumer of ConnectorKey/Token treats the value as an opaque bearer string
+// presented verbatim to a backend that hashes and compares it — see gateway.ServeAgent's
+// AgentAuthVerifier and the pii-overlay/masking-metrics poll — so a caller that set
+// SKYBRIDGE_CONNECTOR_KEY to the same DSN documented for SKYBRIDGE_KEY (as
+// skybridge_fleet.py's _skybridge_fleet_key does, for org/edge-id/CA derivation convenience) would
+// otherwise present the whole DSN string as the bearer, which can never match what the backend
+// minted (just the token). Returns raw unchanged if it doesn't parse as a skybridge:// DSN at
+// all, so an actual bare-token deployment is unaffected.
+func bareBearerToken(raw string) string {
+	key, err := parseEdgeKey(raw)
+	if err != nil || key.EnrollmentToken == "" {
+		return raw
+	}
+	return key.EnrollmentToken
+}

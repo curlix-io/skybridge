@@ -344,8 +344,8 @@ func LoadAgent() Agent {
 		GatewayAddr:           env("SKYBRIDGE_GATEWAY", ""),
 		AgentID:               env("SKYBRIDGE_AGENT_ID", ""),
 		OrgID:                 env("SKYBRIDGE_ORG_ID", ""),
-		Token:                 env("SKYBRIDGE_TOKEN", ""),
-		ConnectorKey:          env("SKYBRIDGE_CONNECTOR_KEY", ""),
+		Token:                 bareBearerToken(env("SKYBRIDGE_TOKEN", "")),
+		ConnectorKey:          bareBearerToken(env("SKYBRIDGE_CONNECTOR_KEY", "")),
 		CABundle:              pemFromEnv("SKYBRIDGE_CA_BUNDLE_PEM", "SKYBRIDGE_CA_BUNDLE_FILE"),
 		Targets:               parseTargets(env("SKYBRIDGE_TARGETS", "")),
 		MaskAnalyzeURL:        env("SKYBRIDGE_MASK_ANALYZE_URL", ""),
@@ -358,21 +358,21 @@ func LoadAgent() Agent {
 		MaskMode:              strings.ToLower(env("SKYBRIDGE_MASK_MODE", ModeBestEffort)),
 		PIIOverlay:            loadPIIOverlay(),
 		PIIOverlayURL:         env("SKYBRIDGE_PII_OVERLAY_URL", ""),
-		PIIOverlayToken:       env("SKYBRIDGE_PII_OVERLAY_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		PIIOverlayToken:       bareBearerToken(env("SKYBRIDGE_PII_OVERLAY_TOKEN", env("SKYBRIDGE_TOKEN", ""))),
 		PIIOverlayPollSeconds: atoiDefault(env("SKYBRIDGE_PII_OVERLAY_POLL_SECONDS", ""), 60),
 		PIIOverlayOrgHeader:   env("SKYBRIDGE_PII_OVERLAY_ORG_HEADER", ""),
 		ConnectionRole:        env("SKYBRIDGE_CONNECTION_ROLE", ""),
 
 		MaskingMetricsURL:         env("SKYBRIDGE_MASKING_METRICS_URL", ""),
-		MaskingMetricsToken:       env("SKYBRIDGE_MASKING_METRICS_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		MaskingMetricsToken:       bareBearerToken(env("SKYBRIDGE_MASKING_METRICS_TOKEN", env("SKYBRIDGE_TOKEN", ""))),
 		MaskingMetricsPushSeconds: atoiDefault(env("SKYBRIDGE_MASKING_METRICS_PUSH_SECONDS", ""), 60),
 
 		PIIRecognizersURL:         env("SKYBRIDGE_PII_RECOGNIZERS_URL", ""),
-		PIIRecognizersToken:       env("SKYBRIDGE_PII_RECOGNIZERS_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		PIIRecognizersToken:       bareBearerToken(env("SKYBRIDGE_PII_RECOGNIZERS_TOKEN", env("SKYBRIDGE_TOKEN", ""))),
 		PIIRecognizersPollSeconds: atoiDefault(env("SKYBRIDGE_PII_RECOGNIZERS_POLL_SECONDS", ""), 60),
 
 		PathLabelURL:         env("SKYBRIDGE_PATH_LABEL_URL", ""),
-		PathLabelToken:       env("SKYBRIDGE_PATH_LABEL_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		PathLabelToken:       bareBearerToken(env("SKYBRIDGE_PATH_LABEL_TOKEN", env("SKYBRIDGE_TOKEN", ""))),
 		PathLabelPollSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_POLL_SECONDS", ""), 60),
 		PathLabelPushSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_PUSH_SECONDS", ""), 15),
 		PostgresCatalogDSN:   env("SKYBRIDGE_POSTGRES_CATALOG_DSN", ""),
@@ -387,7 +387,7 @@ func LoadAgent() Agent {
 
 		InjectCredentials:        truthy(env("SKYBRIDGE_INJECT_CREDENTIALS", "")),
 		CredentialExchangeURL:    env("SKYBRIDGE_CREDENTIAL_EXCHANGE_URL", ""),
-		CredentialExchangeToken:  env("SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		CredentialExchangeToken:  bareBearerToken(env("SKYBRIDGE_CREDENTIAL_EXCHANGE_TOKEN", env("SKYBRIDGE_TOKEN", ""))),
 		CredentialExchangePerMin: atoiDefault(env("SKYBRIDGE_CREDENTIAL_EXCHANGE_PER_MIN", ""), 0),
 
 		K8sCredentialExchangeURL: env("SKYBRIDGE_K8S_CREDENTIAL_EXCHANGE_URL", ""),
@@ -602,8 +602,13 @@ func LoadEdge() Edge {
 		gatewayAddr = env("SKYBRIDGE_GATEWAY", "")
 	}
 	gatewayAddr = env("SKYBRIDGE_EDGE_GATEWAY", gatewayAddr)
-	connectorKey := env("SKYBRIDGE_CONNECTOR_KEY", "")
-	token := env("SKYBRIDGE_TOKEN", key.EnrollmentToken)
+	// bareBearerToken: connectorKey may be the same skybridge://org:token@host?... DSN documented
+	// for SKYBRIDGE_KEY (org/edge-id/CA derivation convenience — see skybridge_fleet.py's
+	// _skybridge_fleet_key), but every consumer of ConnectorKey/token presents it verbatim as an
+	// opaque bearer credential to a backend that hashes and compares just the token — extract it
+	// once here rather than presenting the whole DSN as the bearer.
+	connectorKey := bareBearerToken(env("SKYBRIDGE_CONNECTOR_KEY", ""))
+	token := bareBearerToken(env("SKYBRIDGE_TOKEN", key.EnrollmentToken))
 	if connectorKey != "" {
 		// Reusable bearer credential wins over whatever SKYBRIDGE_TOKEN/SKYBRIDGE_KEY resolved to —
 		// it's the one value both the connector-gateway and Query Studio transports present, and the
@@ -872,7 +877,7 @@ func LoadLabeller() Labeller {
 	return Labeller{
 		LogLevel:              env("SKYBRIDGE_LOG_LEVEL", ""),
 		OrgID:                 env("SKYBRIDGE_ORG_ID", ""),
-		Token:                 env("SKYBRIDGE_TOKEN", ""),
+		Token:                 bareBearerToken(env("SKYBRIDGE_TOKEN", "")),
 		DBType:                strings.ToLower(env("SKYBRIDGE_LABELLER_DB_TYPE", "postgres")),
 		DSN:                   env("SKYBRIDGE_LABELLER_DSN", ""),
 		Database:              env("SKYBRIDGE_LABELLER_DATABASE", ""),
@@ -888,7 +893,7 @@ func LoadLabeller() Labeller {
 		LLMMinConfidence: atofDefault(env("SKYBRIDGE_LABELLER_LLM_MIN_CONFIDENCE", ""), 0.5),
 
 		PathLabelURL:         env("SKYBRIDGE_PATH_LABEL_URL", ""),
-		PathLabelToken:       env("SKYBRIDGE_PATH_LABEL_TOKEN", env("SKYBRIDGE_TOKEN", "")),
+		PathLabelToken:       bareBearerToken(env("SKYBRIDGE_PATH_LABEL_TOKEN", env("SKYBRIDGE_TOKEN", ""))),
 		PathLabelPollSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_POLL_SECONDS", ""), 60),
 		PathLabelPushSeconds: atoiDefault(env("SKYBRIDGE_PATH_LABEL_PUSH_SECONDS", ""), 15),
 	}
