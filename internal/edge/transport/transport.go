@@ -304,6 +304,18 @@ func (c *Client) dial(material *tlsMaterial) (*grpc.ClientConn, error) {
 		creds = credentials.NewTLS(tlsCfg)
 	case c.cfg.Insecure:
 		creds = insecure.NewCredentials()
+	case len(c.cfg.CABundlePEM) > 0:
+		// Bearer mode (ForceBearer) never acquires mTLS material (ensureTLSMaterial short-circuits
+		// to nil,nil), but the connector-gateway's cert may still be issued by the private CA
+		// embedded in the connector key rather than a public CA — trust it explicitly instead of
+		// falling through to system roots below, which fails every dial with "x509: certificate
+		// signed by unknown authority". Mirrors studiotransport's dial() (internal/edge/
+		// studiotransport/transport.go), which already handles this for the Query Studio gateway.
+		tlsCfg, err := serverTLSConfig(c.cfg.CABundlePEM)
+		if err != nil {
+			return nil, err
+		}
+		creds = credentials.NewTLS(tlsCfg)
 	default:
 		creds = credentials.NewTLS(nil) // system roots
 	}
