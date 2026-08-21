@@ -60,6 +60,49 @@ All configuration is via SKYBRIDGE_* environment variables (no other flags). Com
 Exhaustive list: internal/config/config.go (Edge struct), README.md#the-edge-role.
 `
 
+// logConnectivitySummary logs, once at startup, exactly which host each configured outbound
+// channel resolved to and whether a CA bundle is set for it -- never the CA/token contents
+// themselves, only presence and target. This process can dial up to three independent gateways
+// (connector, Studio, wire-proxy tunnel) that each need their OWN correct host+CA pairing; a
+// misconfiguration where one channel's CA bundle is used to validate a DIFFERENT channel's host
+// produces an identical-looking "x509: certificate signed by unknown authority" regardless of
+// which channel is actually broken. Printing the resolved wiring up front turns "which of these
+// three hosts is actually wrong" from a debugging session into a one-line read.
+func logConnectivitySummary(cfg config.Edge, logger *slog.Logger) {
+	logger.Info("connector-gateway call-home",
+		"gateway_addr", orNotConfigured(cfg.GatewayAddr),
+		"org_id", cfg.TenantID,
+		"edge_id", cfg.EdgeID,
+		"bearer_mode", cfg.ReusableConnectorKeyConfigured(),
+		"ca_bundle_configured", len(cfg.CABundle) > 0,
+	)
+	if cfg.StudioEnabled() {
+		logger.Info("query studio call-home",
+			"gateway_addr", orNotConfigured(cfg.StudioGateway),
+			"agent_id", cfg.StudioAgentID,
+			"bearer_mode", cfg.ReusableConnectorKeyConfigured(),
+			"ca_bundle_configured", len(cfg.CABundle) > 0,
+		)
+	}
+	if cfg.WireProxyEnabled() {
+		wp := cfg.WireProxy
+		logger.Info("wire-proxy tunnel",
+			"mode", wp.Mode,
+			"gateway_addr", orNotConfigured(wp.GatewayAddr),
+			"bearer_mode", wp.ReusableConnectorKeyConfigured(),
+			"ca_bundle_configured", len(wp.CABundle) > 0,
+			"wire_mtls_ca_bundle_configured", len(wp.WireMtlsCABundlePEM) > 0,
+		)
+	}
+}
+
+func orNotConfigured(s string) string {
+	if s == "" {
+		return "(not configured)"
+	}
+	return s
+}
+
 func runEdge(args []string) {
 	fs := flag.NewFlagSet("edge", flag.ExitOnError)
 	help := false
@@ -76,6 +119,7 @@ func runEdge(args []string) {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	logger := skylog.New(os.Stderr, "skybridge-edge", skylog.ParseLevel(cfg.LogLevel))
+	logConnectivitySummary(cfg, logger)
 	masker := agent.BuildMasker(cfg.WireProxy)
 
 	if cfg.WireProxyEnabled() {

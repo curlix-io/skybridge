@@ -13,6 +13,7 @@ import (
 	"io"
 	"log/slog"
 	"math/rand/v2"
+	"strings"
 	"sync"
 	"time"
 
@@ -33,6 +34,40 @@ import (
 
 // jitteredBackoff returns a random duration in [d/2, d) so many edges losing the same gateway at
 // once don't all reconnect in lockstep (thundering herd).
+// certVerificationErrorHint returns a one-line troubleshooting hint when err looks like a TLS
+// certificate verification failure (e.g. "x509: certificate signed by unknown authority") rather
+// than a network-reachability problem. This is the single hardest real-world failure mode to
+// self-diagnose from the raw error alone: dialing the WRONG gateway host with the RIGHT CA for a
+// different gateway produces the exact same error text as dialing the right host with a missing
+// or wrong CA. Returns "" for any other error shape.
+func certVerificationErrorHint(err error) string {
+	if err == nil || !strings.Contains(err.Error(), "x509:") {
+		return ""
+	}
+	return "hint: this looks like a TLS certificate verification failure, not a network-" +
+		"reachability problem. Double check (1) the gateway host this client actually resolved " +
+		"is the CONNECTOR gateway, not a different gateway this same process also dials (e.g. " +
+		"the wire-proxy tunnel's SKYBRIDGE_GATEWAY, or the Query Studio gateway) -- " +
+		"SKYBRIDGE_EDGE_GATEWAY wins if set, otherwise the host embedded in SKYBRIDGE_KEY or a " +
+		"DSN-shaped SKYBRIDGE_CONNECTOR_KEY, and (2) the configured CA bundle " +
+		"(SKYBRIDGE_CA_BUNDLE_PEM/_FILE, or the ca= param embedded in that key) actually matches " +
+		"THAT host's certificate -- a CA that correctly validates a different gateway looks " +
+		"identical to a missing/wrong CA in this error"
+}
+
+// logCertHintOnce logs certVerificationErrorHint(err) at Error level, but only the first time
+// this Client ever sees a cert-shaped failure -- Run()'s own goroutine is the only caller, so no
+// locking is needed for certHintLogged.
+func (c *Client) logCertHintOnce(err error) {
+	if c.certHintLogged {
+		return
+	}
+	if hint := certVerificationErrorHint(err); hint != "" {
+		c.certHintLogged = true
+		c.logger.Error(hint)
+	}
+}
+
 func jitteredBackoff(d time.Duration) time.Duration {
 	if d <= 0 {
 		return 0
@@ -128,6 +163,12 @@ type Client struct {
 
 	mu   sync.Mutex
 	runs map[string]context.CancelFunc
+
+	// certHintLogged gates certVerificationErrorHint to once per Client lifetime (set only from
+	// Run()'s own goroutine, never concurrently) -- the hint is worth surfacing prominently, but
+	// Run() retries in a tight loop early on, and repeating a multi-line hint every ~1s would
+	// bury it in noise rather than helping.
+	certHintLogged bool
 }
 
 // New builds a call-home client. reg supplies the edge-handled tools.
@@ -229,11 +270,13 @@ func (c *Client) Run(ctx context.Context) error {
 						"reduced rate: %v", serveErr))
 			case serveErr != nil:
 				c.logger.Warn(fmt.Sprintf("call-home stream ended: %v", serveErr))
+				c.logCertHintOnce(serveErr)
 			case time.Since(started) >= backoffResetAfter:
 				backoff = time.Second // clean close of a connection that was actually stable
 			}
 		} else {
 			c.logger.Warn(fmt.Sprintf("dial %s failed: %v", c.cfg.Target, derr))
+			c.logCertHintOnce(derr)
 		}
 		if !c.cfg.Reconnect {
 			return derr
