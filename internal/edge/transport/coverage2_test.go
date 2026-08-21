@@ -71,7 +71,7 @@ func TestServeRegisterSendFailsOnCancelledContext(t *testing.T) {
 	// Give the server a moment to observe the cancellation before we try to send.
 	time.Sleep(20 * time.Millisecond)
 
-	err := c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true)
+	err := c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil)
 	if err == nil {
 		t.Fatal("expected Register send to fail on a cancelled context")
 	}
@@ -112,7 +112,7 @@ func TestServeAttachesBearerTokenMetadata(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 
-	_ = c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true)
+	_ = c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil)
 
 	select {
 	case got := <-fg.gotAuth:
@@ -197,7 +197,7 @@ func TestServeHandlesCancelWorkMessage(t *testing.T) {
 	defer cancel()
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true) }()
+	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil) }()
 
 	select {
 	case <-fg.gotReg:
@@ -254,7 +254,7 @@ func TestHandleWorkMarshalErrorFallsBackToEmptyJSON(t *testing.T) {
 	defer cancel()
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true) }()
+	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil) }()
 
 	<-fg.gotReg
 	select {
