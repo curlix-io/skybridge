@@ -123,7 +123,7 @@ func TestServeDispatchesToolEnvelope(t *testing.T) {
 	defer cancel()
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true) }()
+	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil) }()
 
 	select {
 	case reg := <-fg.gotReg:
@@ -206,7 +206,7 @@ func TestServeRejectsNonEnvelopeGoal(t *testing.T) {
 
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	go func() { _ = c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true) }()
+	go func() { _ = c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil) }()
 
 	<-fg.gotReg
 	select {
@@ -302,7 +302,7 @@ func TestServeRespondsToPingWithHeartbeat(t *testing.T) {
 	defer cancel()
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true) }()
+	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil) }()
 
 	select {
 	case <-fg.gotReg:
@@ -348,7 +348,7 @@ func TestServeReturnsErrorWhenStreamRejected(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	err := c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true)
+	err := c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil)
 	if err == nil {
 		t.Fatal("expected error from rejected stream")
 	}

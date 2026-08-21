@@ -3,7 +3,6 @@ package transport
 import (
 	"context"
 	"testing"
-	"time"
 )
 
 // TestExtractSVIDExpiration tests SVID expiration extraction.

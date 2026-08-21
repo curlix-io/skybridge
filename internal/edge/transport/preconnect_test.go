@@ -37,7 +37,7 @@ func TestPreConnectProceedsWhenGatewayDoesNotImplementIt(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ok, retryAfter, reason := c.preConnect(ctx, connectorv1.NewConnectorGatewayClient(conn), true)
+	ok, retryAfter, reason := c.preConnect(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil)
 	if !ok {
 		t.Fatalf("expected ok=true (fail-open) when PreConnect is unimplemented, got ok=false reason=%q", reason)
 	}
@@ -109,7 +109,7 @@ func TestPreConnectReturnsWaitWithReasonAndRetryAfter(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ok, retryAfter, reason := c.preConnect(ctx, connectorv1.NewConnectorGatewayClient(conn), true)
+	ok, retryAfter, reason := c.preConnect(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil)
 	if ok {
 		t.Fatal("expected ok=false")
 	}
@@ -138,7 +138,7 @@ func TestPreConnectClampsSubSecondRetryAfterToOneSecond(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	ok, retryAfter, _ := c.preConnect(ctx, connectorv1.NewConnectorGatewayClient(conn), true)
+	ok, retryAfter, _ := c.preConnect(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil)
 	if ok {
 		t.Fatal("expected ok=false")
 	}

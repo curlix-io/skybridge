@@ -273,7 +273,7 @@ func TestServeHandlesMetadataDiscoveryRequest(t *testing.T) {
 	defer cancel()
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true) }()
+	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil) }()
 
 	select {
 	case <-fg.gotReg:
@@ -336,7 +336,7 @@ func TestServeHandlesMetadataDiscoveryRequestNoTarget(t *testing.T) {
 	defer cancel()
 
 	serveErr := make(chan error, 1)
-	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true) }()
+	go func() { serveErr <- c.serve(ctx, connectorv1.NewConnectorGatewayClient(conn), true, nil) }()
 
 	select {
 	case <-fg.gotReg:
