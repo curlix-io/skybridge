@@ -1,6 +1,7 @@
 package config
 
 import (
+	"encoding/base64"
 	"os"
 	"path/filepath"
 	"testing"
@@ -507,6 +508,51 @@ func TestLoadEdgeConnectorKeyUnsetLeavesTokenAndDefaultsFalse(t *testing.T) {
 	}
 	if e.ReusableConnectorKeyConfigured() {
 		t.Fatal("expected ReusableConnectorKeyConfigured false by default")
+	}
+}
+
+// TestLoadEdgeConnectorKeyDSNDerivesGatewayHostAndCA is a regression test for a bug where a
+// SKYBRIDGE_CONNECTOR_KEY given as a full skybridge://org:token@host?...&ca=... DSN (not a bare
+// token) never had its embedded gateway host/CA honored — LoadEdge only ever parsed SKYBRIDGE_KEY
+// for that, so GatewayAddr silently fell through to the ambiguous SKYBRIDGE_GATEWAY var (the
+// wire-proxy tunnel's target in a deployment that also configures wireProxy), dialing the wrong
+// host with the wrong CA and failing every call-home with "certificate signed by unknown
+// authority". SKYBRIDGE_GATEWAY is set here specifically to prove it's NOT what wins.
+func TestLoadEdgeConnectorKeyDSNDerivesGatewayHostAndCA(t *testing.T) {
+	caB64 := base64.StdEncoding.EncodeToString([]byte("-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n"))
+	t.Setenv("SKYBRIDGE_CONNECTOR_KEY", "skybridge://org-1:tok-1@enroll.example.com?edge_id=conn-1&ca="+caB64)
+	t.Setenv("SKYBRIDGE_GATEWAY", "wire.example.com:8010") // the wire-proxy tunnel's target, must NOT win
+	e := LoadEdge()
+	if e.GatewayAddr != "enroll.example.com:7100" {
+		t.Fatalf("expected GatewayAddr derived from SKYBRIDGE_CONNECTOR_KEY's DSN host, got %q", e.GatewayAddr)
+	}
+	if string(e.CABundle) != "-----BEGIN CERTIFICATE-----\nfake\n-----END CERTIFICATE-----\n" {
+		t.Fatalf("expected CABundle derived from SKYBRIDGE_CONNECTOR_KEY's ca= param, got %q", e.CABundle)
+	}
+}
+
+// TestLoadEdgeSKYBRIDGEKeyWinsOverConnectorKeyDSN ensures an explicit SKYBRIDGE_KEY still takes
+// priority over a DSN-shaped SKYBRIDGE_CONNECTOR_KEY, matching LoadEdge's documented precedence.
+func TestLoadEdgeSKYBRIDGEKeyWinsOverConnectorKeyDSN(t *testing.T) {
+	t.Setenv("SKYBRIDGE_KEY", "skybridge://org-1:tok-1@from-skybridge-key.example.com")
+	t.Setenv("SKYBRIDGE_CONNECTOR_KEY", "skybridge://org-1:tok-1@from-connector-key.example.com")
+	e := LoadEdge()
+	if e.GatewayAddr != "from-skybridge-key.example.com:7100" {
+		t.Fatalf("expected SKYBRIDGE_KEY's host to win, got %q", e.GatewayAddr)
+	}
+}
+
+// TestLoadEdgeBareConnectorKeyUnaffected ensures the historical bare-token
+// SKYBRIDGE_CONNECTOR_KEY shape (not a DSN) is untouched by the new fallback parse.
+func TestLoadEdgeBareConnectorKeyUnaffected(t *testing.T) {
+	t.Setenv("SKYBRIDGE_CONNECTOR_KEY", "opaque-bearer-token")
+	t.Setenv("SKYBRIDGE_GATEWAY", "wire.example.com:8010")
+	e := LoadEdge()
+	if e.GatewayAddr != "wire.example.com:8010" {
+		t.Fatalf("expected bare-token connector key to leave SKYBRIDGE_GATEWAY fallback in place, got %q", e.GatewayAddr)
+	}
+	if e.ConnectorKey != "opaque-bearer-token" {
+		t.Fatalf("expected ConnectorKey unchanged, got %q", e.ConnectorKey)
 	}
 }
 
