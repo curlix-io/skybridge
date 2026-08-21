@@ -189,3 +189,37 @@ func TestLoadEdgeInvalidSkybridgeKeyIgnoredNotFatal(t *testing.T) {
 		t.Fatalf("expected empty edge config on invalid key, got %+v", e)
 	}
 }
+
+// TestBareBearerToken is the regression test for a bug discovered live: SKYBRIDGE_CONNECTOR_KEY/
+// SKYBRIDGE_TOKEN set to the same skybridge://org:token@host?... DSN documented for SKYBRIDGE_KEY
+// (org/edge-id/CA derivation convenience) was presented verbatim as the bearer credential to
+// gateway.ServeAgent's AgentAuthVerifier and the pii-overlay poll, which hash and compare just the
+// token — the whole DSN can never match what was minted, so every bearer-mode registration failed
+// "unauthorized" even with a fresh, valid connectorKey.
+func TestBareBearerToken(t *testing.T) {
+	if got := bareBearerToken("skybridge://org-1:tok-abc@gw.example.com?edge_id=edge-1"); got != "tok-abc" {
+		t.Fatalf("expected the DSN's embedded token, got %q", got)
+	}
+	if got := bareBearerToken("a-bare-opaque-token"); got != "a-bare-opaque-token" {
+		t.Fatalf("expected a non-DSN value to pass through unchanged, got %q", got)
+	}
+	if got := bareBearerToken(""); got != "" {
+		t.Fatalf("expected empty to pass through unchanged, got %q", got)
+	}
+}
+
+func TestLoadAgentConnectorKeyDSNExtractsBareToken(t *testing.T) {
+	t.Setenv("SKYBRIDGE_CONNECTOR_KEY", "skybridge://org-1:tok-abc@gw.example.com?edge_id=edge-1")
+	a := LoadAgent()
+	if a.ConnectorKey != "tok-abc" {
+		t.Fatalf("expected ConnectorKey to be the DSN's bare token, got %q", a.ConnectorKey)
+	}
+}
+
+func TestLoadEdgeConnectorKeyDSNExtractsBareToken(t *testing.T) {
+	t.Setenv("SKYBRIDGE_CONNECTOR_KEY", "skybridge://org-1:tok-abc@gw.example.com?edge_id=edge-1")
+	e := LoadEdge()
+	if e.ConnectorKey != "tok-abc" || e.Token != "tok-abc" {
+		t.Fatalf("expected ConnectorKey/Token to be the DSN's bare token, got ConnectorKey=%q Token=%q", e.ConnectorKey, e.Token)
+	}
+}
