@@ -396,6 +396,13 @@ func (c *Client) serve(ctx context.Context, client connectorv1.ConnectorGatewayC
 			TenantId:    c.cfg.TenantID,
 			ConnectorId: c.cfg.ConnectorID,
 			Version:     Version,
+			// The SaaS side's kubernetes_clusters.agent_id / resource_roles.agent_id pin dispatch
+			// to a connector by its ConnectorID directly (see curlix monorepo's migration
+			// 187_retire_agents_registry.sql) -- there is no separate "named agent" identity for
+			// this transport to claim, so AgentId must equal ConnectorID or every registry lookup
+			// keyed by a pinned connector_id misses (falls back to the org's default agent slot)
+			// even though this connector is online under its own identity.
+			AgentId: c.cfg.ConnectorID,
 		}},
 	}); err != nil {
 		return err
