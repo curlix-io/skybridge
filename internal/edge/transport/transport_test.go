@@ -130,6 +130,15 @@ func TestServeDispatchesToolEnvelope(t *testing.T) {
 		if reg.GetTenantId() != "org-1" || reg.GetConnectorId() != "edge-1" {
 			t.Fatalf("unexpected register: %+v", reg)
 		}
+		// Regression: the SaaS side keys its connector registry by (tenant_id, agent_id) and the
+		// in_cluster_agent credential broker / connectivity check look up a pinned connection's
+		// kubernetes_clusters.agent_id (== ConnectorID) directly against that key -- if AgentId is
+		// left unset here, every such lookup misses ("No in-cluster agent connector attached")
+		// even though this connector is genuinely online, because it silently registered under
+		// the org's default agent slot ("") instead of its own ConnectorID.
+		if reg.GetAgentId() != "edge-1" {
+			t.Fatalf("expected register.agent_id to equal ConnectorID %q, got %q", "edge-1", reg.GetAgentId())
+		}
 	case <-ctx.Done():
 		t.Fatal("never received Register")
 	}

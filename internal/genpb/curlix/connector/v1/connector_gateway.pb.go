@@ -53,6 +53,7 @@ type EnrollRequest struct {
 	TenantId        string                 `protobuf:"bytes,2,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`                      // must match the token's bound tenant
 	ConnectorId     string                 `protobuf:"bytes,3,opt,name=connector_id,json=connectorId,proto3" json:"connector_id,omitempty"`             // must match the token's bound connector
 	CsrPem          string                 `protobuf:"bytes,4,opt,name=csr_pem,json=csrPem,proto3" json:"csr_pem,omitempty"`                            // PEM-encoded PKCS#10 CSR (connector keeps the private key)
+	AgentId         string                 `protobuf:"bytes,5,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`                         // optional: named agent (agents_store.py) this enrollment pack was
 	unknownFields   protoimpl.UnknownFields
 	sizeCache       protoimpl.SizeCache
 }
@@ -111,6 +112,13 @@ func (x *EnrollRequest) GetConnectorId() string {
 func (x *EnrollRequest) GetCsrPem() string {
 	if x != nil {
 		return x.CsrPem
+	}
+	return ""
+}
+
+func (x *EnrollRequest) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
 	}
 	return ""
 }
@@ -400,6 +408,7 @@ type Register struct {
 	TenantId      string                 `protobuf:"bytes,1,opt,name=tenant_id,json=tenantId,proto3" json:"tenant_id,omitempty"`          // organization id this connector serves
 	ConnectorId   string                 `protobuf:"bytes,2,opt,name=connector_id,json=connectorId,proto3" json:"connector_id,omitempty"` // stable connector instance id
 	Version       string                 `protobuf:"bytes,3,opt,name=version,proto3" json:"version,omitempty"`                            // connector build version (for upgrade/telemetry)
+	AgentId       string                 `protobuf:"bytes,4,opt,name=agent_id,json=agentId,proto3" json:"agent_id,omitempty"`             // named agent (agents_store.py) this connector fulfills — must
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -451,6 +460,13 @@ func (x *Register) GetConnectorId() string {
 func (x *Register) GetVersion() string {
 	if x != nil {
 		return x.Version
+	}
+	return ""
+}
+
+func (x *Register) GetAgentId() string {
+	if x != nil {
+		return x.AgentId
 	}
 	return ""
 }
@@ -1481,12 +1497,13 @@ var File_curlix_connector_v1_connector_gateway_proto protoreflect.FileDescriptor
 
 const file_curlix_connector_v1_connector_gateway_proto_rawDesc = "" +
 	"\n" +
-	"+curlix/connector/v1/connector_gateway.proto\x12\x13curlix.connector.v1\x1a\"curlix/agent/v1/agent_runner.proto\"\x93\x01\n" +
+	"+curlix/connector/v1/connector_gateway.proto\x12\x13curlix.connector.v1\x1a\"curlix/agent/v1/agent_runner.proto\"\xae\x01\n" +
 	"\rEnrollRequest\x12)\n" +
 	"\x10enrollment_token\x18\x01 \x01(\tR\x0fenrollmentToken\x12\x1b\n" +
 	"\ttenant_id\x18\x02 \x01(\tR\btenantId\x12!\n" +
 	"\fconnector_id\x18\x03 \x01(\tR\vconnectorId\x12\x17\n" +
-	"\acsr_pem\x18\x04 \x01(\tR\x06csrPem\"\x82\x01\n" +
+	"\acsr_pem\x18\x04 \x01(\tR\x06csrPem\x12\x19\n" +
+	"\bagent_id\x18\x05 \x01(\tR\aagentId\"\x82\x01\n" +
 	"\x0eEnrollResponse\x12&\n" +
 	"\x0fclient_cert_pem\x18\x01 \x01(\tR\rclientCertPem\x12\"\n" +
 	"\rca_bundle_pem\x18\x02 \x01(\tR\vcaBundlePem\x12$\n" +
@@ -1503,11 +1520,12 @@ const file_curlix_connector_v1_connector_gateway_proto_rawDesc = "" +
 	"\x12PreConnectResponse\x12\x0e\n" +
 	"\x02ok\x18\x01 \x01(\bR\x02ok\x12.\n" +
 	"\x13retry_after_seconds\x18\x02 \x01(\x05R\x11retryAfterSeconds\x12\x16\n" +
-	"\x06reason\x18\x03 \x01(\tR\x06reason\"d\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"\x7f\n" +
 	"\bRegister\x12\x1b\n" +
 	"\ttenant_id\x18\x01 \x01(\tR\btenantId\x12!\n" +
 	"\fconnector_id\x18\x02 \x01(\tR\vconnectorId\x12\x18\n" +
-	"\aversion\x18\x03 \x01(\tR\aversion\",\n" +
+	"\aversion\x18\x03 \x01(\tR\aversion\x12\x19\n" +
+	"\bagent_id\x18\x04 \x01(\tR\aagentId\",\n" +
 	"\tHeartbeat\x12\x1f\n" +
 	"\vunix_millis\x18\x01 \x01(\x03R\n" +
 	"unixMillis\"U\n" +
