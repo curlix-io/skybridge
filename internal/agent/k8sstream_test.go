@@ -41,6 +41,26 @@ func TestServeK8sStreamMissingClientTLS(t *testing.T) {
 	}
 }
 
+// TestServeK8sStreamSelfSignedFallbackNotClientTLSError guards the fix that routed serveK8sStream
+// through k8sAPIListenerClientTLS instead of the bare k8sClientTLSConfig: a tunnel-mode deployment
+// (wireProxy enabled, k8sApi.enabled=false in the Helm chart) with only
+// SKYBRIDGE_K8S_CLIENT_TLS_SELF_SIGNED set and no cert/key must not hit the operator-cert-missing
+// error path at all -- before the fix it always did, because serveK8sStream never consulted
+// K8sClientTLSSelfSigned. Self-signed cert generation persists to a fixed disk path this sandbox
+// can't write to, so this only asserts routing (the specific missing-cert message is gone), not
+// that the stream fully succeeds.
+func TestServeK8sStreamSelfSignedFallbackNotClientTLSError(t *testing.T) {
+	st, cleanup := openK8sStream(t)
+	defer cleanup()
+
+	var buf bytes.Buffer
+	cfg := config.Agent{K8sClientTLSSelfSigned: true}
+	serveK8sStream(context.Background(), st, nil, tunnel.OpenMeta{Target: "cluster", Addr: "x:6443"}, cfg, slog.New(slog.NewTextHandler(&buf, nil)))
+	if bytes.Contains(buf.Bytes(), []byte("SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM/_KEY_PEM is not set")) {
+		t.Fatalf("K8sClientTLSSelfSigned should bypass the missing-operator-cert error, got %q", buf.String())
+	}
+}
+
 func TestServeK8sStreamMissingResolver(t *testing.T) {
 	st, cleanup := openK8sStream(t)
 	defer cleanup()
