@@ -20,7 +20,15 @@ func serveK8sStream(ctx context.Context, st *tunnel.Stream, sess *tunnel.Session
 	if logger == nil {
 		logger = slog.Default()
 	}
-	clientTLS, err := k8sClientTLSConfig(cfg)
+	// k8sAPIListenerClientTLS, not the bare k8sClientTLSConfig it wraps -- despite the name, it
+	// covers both the standalone in-cluster listener (RunK8sAPIListener) AND this tunnel-mode
+	// stream path: an operator-provided cert/key wins either way, and SKYBRIDGE_K8S_CLIENT_TLS_SELF_SIGNED
+	// falls back to a self-generated cert for deployments (e.g. a Helm install with wireProxy
+	// tunnel mode but k8sApi.enabled=false) that have no other way to provision one. Before this
+	// fix, a tunnel-mode "kubernetes" target with only SELF_SIGNED set still hard-failed with
+	// "SKYBRIDGE_K8S_CLIENT_TLS_CERT_PEM/_KEY_PEM is not set" -- the self-signed fallback only ever
+	// ran for the standalone listener.
+	clientTLS, err := k8sAPIListenerClientTLS(ctx, cfg, logger)
 	if err != nil {
 		logger.Error(fmt.Sprintf("stream open: target %q is a kubernetes proxy: %v", meta.Target, err))
 		return
